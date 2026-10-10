@@ -9,10 +9,6 @@
 x64/
 Debug/
 Release/
-lib-Debug/
-lib-Release/
-lib-Release_Pdb_Offsets/
-Release_Pdb_Offset/
 */x64/
 */Debug/
 */Release/
@@ -26,17 +22,26 @@ Release_Pdb_Offset/
 *.pch
 *.ipdb
 *.iobj
+*.idb
 
 # MSBuild intermediates
 Intermediate/
 */Intermediate/
 *.tlog
+*.lastbuildstate
 
 # Symbol/cache files
-offsets.ini
+Offsets.ini
 *.ini
 
 # OS / editor
 Thumbs.db
 Desktop.ini
 *.log
+.vscode/
+
+# Tooling caches
+.cache/
+
+# Kernel driver binaries
+*.sys

@@ -10,7 +10,7 @@ Tested from **Windows 10 1607** to **Windows 11 26H2** :heavy_check_mark:
 
 ## Features
 
-- **Modular architecture** — code split into focused namespaces: `Mapper`, `Pe`, `Provider`, `Service`, `Symbols`, `Utils`, `Kernel`, and `App`.
+- **Modular architecture** — code split into focused namespaces: `Mapper`, `PE`, `Provider`, `Service`, `Symbols`, `Utilities`, and `App`.
 - **Multi-provider support** — selectable signed vulnerable-driver providers (Intel NAL / AMD PDFW) via `Provider.hpp`.
 - **Automatic PDB offset resolution** — parses Symbol Server PDBs to resolve kernel offsets for any Windows build, eliminating the need for hardcoded offset tables.
 - **Relocation** — fixes image relocations when the driver cannot be loaded at its preferred base address.
@@ -36,7 +36,7 @@ Tested from **Windows 10 1607** to **Windows 11 26H2** :heavy_check_mark:
 1. Install [Visual Studio](https://visualstudio.microsoft.com/downloads/) (2019 or later).
 2. Install the [Windows SDK](https://developer.microsoft.com/windows/downloads/windows-sdk/).
 3. Install the [Windows WDK](https://learn.microsoft.com/windows-hardware/drivers/download-the-wdk).
-4. Clone this repository and open `Mapper.sln` in Visual Studio.
+4. Clone this repository and open `Template\Mapper.sln` in Visual Studio.
 5. Select a build configuration, e.g. `Release` or `Release_Pdb_Offset`.
 6. Build the solution.
 
@@ -51,18 +51,14 @@ Tested from **Windows 10 1607** to **Windows 11 26H2** :heavy_check_mark:
 
 ```
 Mapper/
-├── App/          # Application entry point and CLI argument parsing
-├── DbgHelp/      # dbghelp.dll and symsrv.dll for PDB symbol resolution
-├── Kernel/       # NT kernel data structures and type definitions
+├── App/          # Application entry point, CLI parsing and NT type definitions
 ├── Mapper/       # Core driver mapping logic (relocations, imports, cookie fix)
-├── Pe/           # Minimal PE parser for in-memory image manipulation
+├── PE/           # Minimal PE parser for in-memory image manipulation
 ├── Provider/     # Vulnerable driver provider abstraction (Intel NAL / AMD PDFW)
 ├── Service/      # Kernel driver service install / start / stop utilities
 ├── Symbols/      # PDB symbol engine and offset handler
-├── Utils/        # Logging and general utilities
-├── Mapper.sln    # Visual Studio solution
-├── Mapper.vcxproj       # Main mapper executable
-└── SymbolTool.vcxproj   # PDB offset extraction helper
+├── Template/     # Visual Studio solution and project files
+└── Utilities/    # Logging, general utilities and the dbghelp/symsrv DLLs
 ```
 
 ## Common Issues
