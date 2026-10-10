@@ -296,4 +296,5 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 	Log(L"[+] success" << std::endl);
 
+	return 0;
 }

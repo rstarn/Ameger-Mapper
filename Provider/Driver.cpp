@@ -47,7 +47,7 @@ DriverOffsets Driver::g_offsets = {};
 //True only when this process registered and loaded the provider. When the
 //provider was already running (vendor software loaded it), nothing was
 //created and nothing is torn down.
-bool g_driverWasLoadedByUs = false;
+static bool g_driverWasLoadedByUs = false;
 
 //Set by --no-forensics: skip the kernel structure walks, which are the parts
 //that modify existing kernel state.
@@ -55,7 +55,7 @@ bool Driver::g_skipForensicCleanup = false;
 
 //Random name for the dropped provider and its service, generated once per run
 //so the same name is used consistently for load, match and cleanup.
-std::string cachedDriverName = "";
+static std::string cachedDriverName = "";
 
 /*
  * Random alphanumeric name for the dropped provider and its service.
@@ -231,6 +231,19 @@ NTSTATUS Driver::Load() {
 		Log(L"[-] Aborting: the read-only page write primitive is not available" << std::endl);
 		Driver::Unload();
 		return STATUS_ACCESS_DENIED;
+	}
+
+	//When the provider was reused instead of being loaded by us, it is running
+	//under a name we did not generate. GetDriverNameW() produces a fresh random
+	//name every run, but the kernel entry we need to clear holds the name the
+	//previous run or the vendor registered — a string this run's name can never
+	//match. Every cleanup stage below looks for entries by name, so in reuse
+	//mode they would all miss and fatal-abort. SeDebugPrivilege was also not
+	//acquired: it is only needed to register the service, which reuse skips.
+	//There is nothing of this run to clean, so the walks are skipped entirely.
+	if (!g_driverWasLoadedByUs) {
+		Log(L"[*] Provider reused from a prior load, forensic cleanup skipped (provider name differs from this run)" << std::endl);
+		return STATUS_SUCCESS;
 	}
 
 	if (g_skipForensicCleanup) {

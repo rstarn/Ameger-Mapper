@@ -144,6 +144,9 @@ namespace Driver
 	 * Residual risk that cannot be designed away: if the process is killed
 	 * between the patch and the restore, or the kernel crashes for an unrelated
 	 * reason while patched, NtAddAtom is left pointing at the last target.
+	 * Another process calling NtAddAtom during the hook window races the call
+	 * to the target function. The window is ~10 instructions and cannot be
+	 * closed without serialising every NtAddAtom call system-wide.
 	 *
 	 * A... must be trivially copyable and there can be at most 4 of them, since
 	 * the hook passes everything through registers.

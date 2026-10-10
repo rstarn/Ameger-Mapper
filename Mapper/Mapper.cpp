@@ -35,7 +35,7 @@ static bool RelocateImageByDelta(const PE::vec_relocs& relocs, const ULONG64 del
 				continue;
 
 			if (type != IMAGE_REL_BASED_DIR64) {
-								Log(L"[-] Unsupported relocation type " << type << L" at page +0x"
+				Log(L"[-] Unsupported relocation type " << type << L" at page +0x"
 					<< std::hex << current_reloc.address + offset << std::dec
 					<< L"; refusing to build an image with unfixed pointers" << std::endl);
 				return false;
@@ -256,6 +256,12 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 	void* local_image_base = VirtualAlloc(nullptr, image_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 	if (!local_image_base)
 		return 0;
+
+	if (nt_headers->FileHeader.NumberOfSections == 0) {
+		Log(L"[-] Image has no sections, refusing to map" << std::endl);
+		VirtualFree(local_image_base, 0, MEM_RELEASE);
+		return 0;
+	}
 
 	DWORD TotalVirtualHeaderSize = (IMAGE_FIRST_SECTION(nt_headers))->VirtualAddress;
 	if (destroyHeader && TotalVirtualHeaderSize > image_size) {
@@ -517,11 +523,11 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 			}
 		}
 
-	//Success: the driver is loaded. The user mode copy is no longer needed.
-	VirtualFree(local_image_base, 0, MEM_RELEASE);
-	return realBase;
+		//Success: the driver is loaded. The user mode copy is no longer needed.
+		VirtualFree(local_image_base, 0, MEM_RELEASE);
+		return realBase;
 
-} while (false);
+	} while (false);
 
 //Every failure path above breaks out with kernel_image_base reset to realBase,
 //so this release always frees the allocation itself and never the header
