@@ -1,0 +1,81 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="..\..\App\Main.cpp">
+      <Filter>App</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Mapper\Mapper.cpp">
+      <Filter>Mapper</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\PE\PE.cpp">
+      <Filter>PE</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Provider\Driver.cpp">
+      <Filter>Provider</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Service\Service.cpp">
+      <Filter>Service</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Symbols\Handler\SymbolsHandler.cpp">
+      <Filter>Handler</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Utilities\Utilities.cpp">
+      <Filter>Utilities</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\App\NT.hpp">
+      <Filter>App</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Mapper\Mapper.hpp">
+      <Filter>Mapper</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\PE\PE.hpp">
+      <Filter>PE</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Provider\Driver.hpp">
+      <Filter>Provider</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Provider\Provider.hpp">
+      <Filter>Provider</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Provider\Resource.hpp">
+      <Filter>Provider</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Service\Service.hpp">
+      <Filter>Service</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Symbols\Handler\SymbolsHandler.hpp">
+      <Filter>Handler</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Utilities\Utilities.hpp">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="App">
+      <UniqueIdentifier>{1a5c8f21-0b47-4d2e-9f31-2c5a70b41d01}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Mapper">
+      <UniqueIdentifier>{3c7eab43-2d69-4f40-9154-4e7c92d63f23}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="PE">
+      <UniqueIdentifier>{4d8fbc54-3e7a-4051-a265-5f8da3e74034}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Provider">
+      <UniqueIdentifier>{5e90cd65-4f8b-4162-b376-609eb4f85145}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Service">
+      <UniqueIdentifier>{6fa1de76-509c-4273-c487-71afc5096256}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Symbols">
+      <UniqueIdentifier>{70b2ef87-61ad-4384-d598-82b0d61a7367}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Handler">
+      <UniqueIdentifier>{a3e50f1a-94d0-4bbc-a7ca-b5e39d4c069a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Utilities">
+      <UniqueIdentifier>{81c3f098-72be-4495-e6a9-93c1e72b8478}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

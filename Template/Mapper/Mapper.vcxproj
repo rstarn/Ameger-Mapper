@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release_Pdb_Offset|x64">
+      <Configuration>Release_Pdb_Offset</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{518E0636-BA8F-459D-ACAC-81BD33475E3E}</ProjectGuid>
+    <RootNamespace>Mapper</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_Pdb_Offset|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+    <SpectreMitigation>false</SpectreMitigation>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_Pdb_Offset|x64'">
+    <TargetName>Mapper</TargetName>
+    <!-- Build scratch lives outside the repository, under %TEMP%\amager_build,
+     so no build output or intermediate ever lands in the source tree.
+     $(ProjectName) in IntDir is load bearing: a shared intermediate folder
+     makes the two projects race for the same .obj files, which shows up as
+     MSB8028 plus LNK1181 on a parallel build. -->
+    <IntDir>$(TEMP)\amager_build\obj\$(ProjectName)\</IntDir>
+    <OutDir>$(TEMP)\amager_build\bin\</OutDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release_Pdb_Offset|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalOptions>/D "PDB_OFFSETS" %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
+    </Link>
+    <PostBuildEvent>
+      <!-- Copies the two symbol libraries into $(OutDir)\DLLs, which is where
+     SymbolEngine looks for them. The two files are named explicitly on purpose:
+     a Utilities\* wildcard would also drag Utilities.cpp and Utilities.hpp into
+     the build output, because they ship from the same folder. -->
+    <Command>if not exist "$(OutDir)DLLs" mkdir "$(OutDir)DLLs"
+copy /y "$(SolutionDir)..\Utilities\DLLs\dbghelp.dll" "$(OutDir)DLLs\" >nul
+copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Command>
+    </PostBuildEvent>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <!-- App -->
+    <ClCompile Include="..\..\App\Main.cpp" />
+    <!-- Mapper -->
+    <ClCompile Include="..\..\Mapper\Mapper.cpp" />
+    <!-- PE -->
+    <ClCompile Include="..\..\PE\PE.cpp" />
+    <!-- Provider -->
+    <ClCompile Include="..\..\Provider\Driver.cpp" />
+    <!-- Service -->
+    <ClCompile Include="..\..\Service\Service.cpp" />
+    <!-- Symbols -->
+    <ClCompile Include="..\..\Symbols\Handler\SymbolsHandler.cpp" />
+    <!-- Utilities -->
+    <ClCompile Include="..\..\Utilities\Utilities.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- App -->
+    <ClInclude Include="..\..\App\NT.hpp" />
+    <!-- Mapper -->
+    <ClInclude Include="..\..\Mapper\Mapper.hpp" />
+    <!-- PE -->
+    <ClInclude Include="..\..\PE\PE.hpp" />
+    <!-- Provider -->
+    <ClInclude Include="..\..\Provider\Driver.hpp" />
+    <ClInclude Include="..\..\Provider\Provider.hpp" />
+    <ClInclude Include="..\..\Provider\Resource.hpp" />
+    <!-- Service -->
+    <ClInclude Include="..\..\Service\Service.hpp" />
+    <!-- Symbols -->
+    <ClInclude Include="..\..\Symbols\Handler\SymbolsHandler.hpp" />
+    <!-- Utilities -->
+    <ClInclude Include="..\..\Utilities\Utilities.hpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

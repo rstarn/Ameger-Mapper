@@ -1,0 +1,24 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Symbols">
+      <UniqueIdentifier>{70b2ef87-61ad-4384-d598-82b0d61a7367}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Engine">
+      <UniqueIdentifier>{92d40109-83cf-4aab-f6b9-a4d2f83c9589}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\Symbols\Main.cpp">
+      <Filter>Symbols</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\Symbols\Engine\SymbolEngine.cpp">
+      <Filter>Engine</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\Symbols\Engine\SymbolEngine.hpp">
+      <Filter>Engine</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>

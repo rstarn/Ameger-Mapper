@@ -1,4 +1,19 @@
-#ifndef KDLIBMODE
+/*
+ * Entry point and command line handling for Mapper.exe.
+ *
+ * Order of operations, which matters:
+ *   1. install the crash handler, so a failure still unloads the provider
+ *   2. parse arguments
+ *   3. resolve Offsets.ini (running SymbolTool.exe unless told not to)
+ *   4. verify the driver file exists
+ *   5. load the provider and prepare offsets
+ *   6. map the driver and call its entry point
+ *   7. unload the provider
+ *
+ * Steps 5 and 6 are the only ones that touch the kernel, and they only run once
+ * the file has been fully validated, so a bad path never gets as far as
+ * loading anything.
+ */
 
 #include <Windows.h>
 #include <iostream>
@@ -7,18 +22,29 @@
 #include <filesystem>
 #include <TlHelp32.h>
 
-#include "Mapper.hpp"
-#include "Utils.hpp"
-#include "Driver.hpp"
+#include "../Mapper/Mapper.hpp"
+#include "../Utilities/Utilities.hpp"
+#include "../Provider/Driver.hpp"
 
 #ifdef PDB_OFFSETS
-#include "SymbolsHandler.hpp"
+#include "../Symbols/Handler/SymbolsHandler.hpp"
 #endif
 
+/*
+ * Unhandled exception handler.
+ *
+ * A crash here usually means the kernel side went wrong, and leaving the
+ * provider loaded would keep whatever state it created alive, so the handler
+ * unloads before letting the process die.
+ */
 LONG WINAPI SimplestCrashHandler(EXCEPTION_POINTERS* ExceptionInfo)
 {
 	if (ExceptionInfo && ExceptionInfo->ExceptionRecord)
-		Log(L"[!!] Crash at addr 0x" << ExceptionInfo->ExceptionRecord->ExceptionAddress << L" by 0x" << std::hex << ExceptionInfo->ExceptionRecord->ExceptionCode << std::endl);
+	{
+		const auto* rec = ExceptionInfo->ExceptionRecord;
+		Log(L"[!!] Crash at addr 0x" << std::hex << (uint64_t)rec->ExceptionAddress
+			<< L" by 0x" << rec->ExceptionCode << std::dec << std::endl);
+	}
 	else
 		Log(L"[!!] Crash" << std::endl);
 
@@ -28,8 +54,9 @@ LONG WINAPI SimplestCrashHandler(EXCEPTION_POINTERS* ExceptionInfo)
 	return EXCEPTION_EXECUTE_HANDLER;
 }
 
-extern bool g_skipForensicCleanup;
-
+//Index of a command line flag, -1 when absent.
+//Accepts both /flag and --flag, case insensitively, so the two styles in the
+//help text both work.
 int paramExists(const int argc, wchar_t** argv, const wchar_t* param) {
 	size_t plen = wcslen(param);
 	for (int i = 1; i < argc; i++) {
@@ -43,22 +70,30 @@ int paramExists(const int argc, wchar_t** argv, const wchar_t* param) {
 	return -1;
 }
 
+/*
+ * Example callback, runs once the image is in kernel memory but before
+ * DriverEntry. This is the point where the final mapping address is known and
+ * can still be modified.
+ */
 bool callbackExample(ULONG64* param1, ULONG64* param2, ULONG64 allocationPtr, ULONG64 allocationSize) {
 	UNREFERENCED_PARAMETER(param1);
 	UNREFERENCED_PARAMETER(param2);
 	UNREFERENCED_PARAMETER(allocationPtr);
 	UNREFERENCED_PARAMETER(allocationSize);
 	Log("[+] Callback example called" << std::endl);
-	
+
 	/*
 	This callback occurs before call driver entry and
-	can be useful to pass more customized params in 
-	the last step of the mapping procedure since you 
+	can be useful to pass more customized params in
+	the last step of the mapping procedure since you
 	know now the mapping address and other things
 	*/
 	return true;
 }
 
+//Parent process id, 0 when it cannot be determined.
+//Walks the process snapshot; the handle is closed in the finally block either
+//way.
 DWORD getParentProcess()
 {
 	HANDLE hSnapshot;
@@ -87,7 +122,9 @@ DWORD getParentProcess()
 	return ppid;
 }
 
-//Help people that don't understand how to open a console
+//Help people that don't understand how to open a console.
+//Only pauses when launched from explorer, so a run from a terminal or a script
+//is not left waiting for a keypress.
 void PauseIfParentIsExplorer() {
 	DWORD explorerPid = 0;
 	GetWindowThreadProcessId(GetShellWindow(), &explorerPid);
@@ -101,18 +138,20 @@ void PauseIfParentIsExplorer() {
 
 void help() {
 	Log(L"\r\n\r\n[!] Incorrect Usage!" << std::endl);
-	Log(L"[+] Usage: kdmapper.exe [--free][--indPages][--PassAllocationPtr][--copy-header][--no-forensics]");
+	Log(L"[+] Usage: Mapper.exe [--free][--indPages][--PassAllocationPtr][--copy-header][--no-forensics]");
 
 #ifdef PDB_OFFSETS
-	Log(L"[--dontUpdateOffsets [--offsetsPath \"FilePath\"]]"); 
+	Log(L"[--dontUpdateOffsets [--offsetsPath \"FilePath\"]]");
 #endif
-	
+
 	Log(L" driver" << std::endl);
 
 	PauseIfParentIsExplorer();
 }
 
 int wmain(const int argc, wchar_t** argv) {
+	//Installed first so an access violation anywhere below still unloads the
+	//provider rather than leaving it loaded in a half configured state.
 	SetUnhandledExceptionFilter(SimplestCrashHandler);
 
 	bool free = paramExists(argc, argv, L"free") > 0;
@@ -139,7 +178,7 @@ int wmain(const int argc, wchar_t** argv) {
 #ifdef PDB_OFFSETS
 	bool UpdateOffset = !(paramExists(argc, argv, L"dontUpdateOffsets") > 0);
 	int FilePathParamIdx = paramExists(argc, argv, L"offsetsPath");
-	std::wstring offsetFilePath = Utils::GetCurrentAppFolder() + L"\\offsets.ini";
+	std::wstring offsetFilePath = Utilities::GetCurrentAppFolder() + L"\\Offsets.ini";
 
 	if (UpdateOffset && FilePathParamIdx > 0) {
 		Log("[-] Can't set --offsetsPath without set --dontUpdateOffsets" << std::endl);
@@ -148,14 +187,47 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 
 	if (FilePathParamIdx > 0) {
+		//The value is the next argument. When the flag is the last one there is
+		//none, and argv[argc] is NULL, which would be read as a wide string.
+		if (FilePathParamIdx + 1 >= argc) {
+			Log(L"[-] --offsetsPath requires a file path argument" << std::endl);
+			help();
+			return -1;
+		}
 		offsetFilePath = argv[FilePathParamIdx + 1];
 		Log("[+] Setting Offsets File Path To: " << offsetFilePath << std::endl);
 	}
 #endif
 
+	//Warn on any argument that looks like a flag but was not recognized. A typo
+	//in an option name would otherwise be silently ignored, and the run would
+	//proceed with the default behaviour instead of what was asked for.
+	static const wchar_t* knownFlags[] = {
+		L"free", L"indPages", L"PassAllocationPtr", L"copy-header",
+		L"no-forensics", L"dontUpdateOffsets", L"offsetsPath"
+	};
+	for (int i = 1; i < argc; i++) {
+		const wchar_t* arg = argv[i];
+		if (arg[0] != L'-')
+			continue;
+		//The argument after --offsetsPath is its value, not a flag.
+		if (i > 1 && (_wcsicmp(argv[i - 1], L"--offsetsPath") == 0 || _wcsicmp(argv[i - 1], L"/offsetsPath") == 0))
+			continue;
+		const wchar_t* name = (arg[1] == L'-') ? arg + 2 : arg + 1;
+		bool known = false;
+		for (const wchar_t* flag : knownFlags) {
+			if (_wcsicmp(name, flag) == 0) {
+				known = true;
+				break;
+			}
+		}
+		if (!known)
+			Log(L"[!] Unrecognized option: " << arg << std::endl);
+	}
+
 	int drvIndex = -1;
 	for (int i = 1; i < argc; i++) {
-		if (std::filesystem::path(argv[i]).extension().string().compare(".sys") == 0) {
+		if (_wcsicmp(std::filesystem::path(argv[i]).extension().c_str(), L".sys") == 0) {
 			drvIndex = i;
 			break;
 		}
@@ -166,7 +238,7 @@ int wmain(const int argc, wchar_t** argv) {
 	//every one of them is another write into a kernel data structure, so this
 	//flag reduces the number of chances the run has to destabilize the system.
 	if (paramExists(argc, argv, L"no-forensics") > 0) {
-		g_skipForensicCleanup = true;
+		Driver::g_skipForensicCleanup = true;
 		Log(L"[+] Forensic cleanup disabled (--no-forensics)" << std::endl);
 	}
 
@@ -184,7 +256,7 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 
 #ifdef PDB_OFFSETS
-	if (!SymbolsHandler::GetInstance()->ReloadFile(offsetFilePath, UpdateOffset ? Utils::GetCurrentAppFolder() + L"\\" + SYM_FROM_PDB_EXE : L"")) {
+	if (!SymbolsHandler::GetInstance()->ReloadFile(offsetFilePath, UpdateOffset ? Utilities::GetCurrentAppFolder() + L"\\" + SYMBOL_TOOL_EXE : L"")) {
 		Log(L"[-] Error: Failed To Get Symbols Info." << std::endl);
 		PauseIfParentIsExplorer();
 		return -1;
@@ -197,7 +269,7 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 
 	std::vector<uint8_t> raw_image = { 0 };
-	if (!Utils::ReadFileToMemory(driver_path, &raw_image)) {
+	if (!Utilities::ReadFileToMemory(driver_path, &raw_image)) {
 		Log(L"[-] Failed to read image to memory" << std::endl);
 		Driver::Unload();
 		PauseIfParentIsExplorer();
@@ -211,7 +283,7 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 
 	NTSTATUS exitCode = 0;
-	if (!Mapper::MapDriver(raw_image.data(), 0, 0, free, !copyHeader, mode, passAllocationPtr, callbackExample, &exitCode)) {
+	if (!Mapper::MapDriver(raw_image.data(), raw_image.size(), 0, 0, free, !copyHeader, mode, passAllocationPtr, callbackExample, &exitCode)) {
 		Log(L"[-] Failed to map " << driver_path << std::endl);
 		Driver::Unload();
 		PauseIfParentIsExplorer();
@@ -225,5 +297,3 @@ int wmain(const int argc, wchar_t** argv) {
 	Log(L"[+] success" << std::endl);
 
 }
-
-#endif

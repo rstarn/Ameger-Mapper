@@ -1,25 +1,41 @@
-#include "Utils.hpp"
+/*
+ * Helpers shared by the mapper. None of these touch kernel memory: they all
+ * run before the provider is loaded or after it has been unloaded. See
+ * Utilities.hpp for the per function contracts.
+ */
+
+#include "Utilities.hpp"
 #include <Windows.h>
 #include <iostream>
+#include <string>
 #include <vector>
 #include <fstream>
 
-#include "Nt.hpp"
+#include "../App/NT.hpp"
 
-std::wstring Utils::GetFullTempPath() {
+//Widens an ASCII identifier. A per byte copy is correct for the narrow ASCII
+//module and export names used here and is cheaper than a codepage conversion,
+//which would need a locale.
+std::wstring Utilities::ToWide(const std::string& text) {
+	return std::wstring(text.begin(), text.end());
+}
+
+std::wstring Utilities::GetFullTempPath() {
 	wchar_t temp_directory[MAX_PATH + 1] = { 0 };
-	const uint32_t get_temp_path_ret = GetTempPathW(sizeof(temp_directory) / 2, temp_directory);
+	const uint32_t get_temp_path_ret = GetTempPathW(sizeof(temp_directory) / sizeof(wchar_t), temp_directory);
 	if (!get_temp_path_ret || get_temp_path_ret > MAX_PATH + 1) {
 		Log(L"[-] Failed to get temp path" << std::endl);
 		return L"";
 	}
-	if (temp_directory[wcslen(temp_directory) - 1] == L'\\')
-		temp_directory[wcslen(temp_directory) - 1] = 0x0;
+
+	const size_t temp_length = wcslen(temp_directory);
+	if (temp_length && temp_directory[temp_length - 1] == L'\\')
+		temp_directory[temp_length - 1] = 0x0;
 
 	return std::wstring(temp_directory);
 }
 
-bool Utils::ReadFileToMemory(const std::wstring& file_path, std::vector<BYTE>* out_buffer) {
+bool Utilities::ReadFileToMemory(const std::wstring& file_path, std::vector<BYTE>* out_buffer) {
 	std::ifstream file_ifstream(file_path, std::ios::binary);
 
 	if (!file_ifstream)
@@ -31,7 +47,7 @@ bool Utils::ReadFileToMemory(const std::wstring& file_path, std::vector<BYTE>* o
 	return true;
 }
 
-bool Utils::CreateFileFromMemory(const std::wstring& desired_file_path, const char* address, size_t size) {
+bool Utilities::CreateFileFromMemory(const std::wstring& desired_file_path, const char* address, size_t size) {
 	std::ofstream file_ofstream(desired_file_path.c_str(), std::ios_base::out | std::ios_base::binary);
 
 	if (!file_ofstream.write(address, size)) {
@@ -43,10 +59,14 @@ bool Utils::CreateFileFromMemory(const std::wstring& desired_file_path, const ch
 	return true;
 }
 
-uint64_t Utils::GetKernelModuleAddress(const std::string& module_name) {
+uint64_t Utilities::GetKernelModuleAddress(const std::string& module_name) {
 	void* buffer = nullptr;
 	DWORD buffer_size = 0;
 
+	//SystemModuleInformation has no size query, so it is called once with a
+	//null buffer to have the kernel report how much it needs, then again with
+	//a buffer of that size. The loop handles the race where the module list
+	//grows between the two calls.
 	NTSTATUS status = NtQuerySystemInformation(static_cast<SYSTEM_INFORMATION_CLASS>(Nt::SystemModuleInformation), buffer, buffer_size, &buffer_size);
 
 	while (status == STATUS_INFO_LENGTH_MISMATCH) {
@@ -63,11 +83,15 @@ uint64_t Utils::GetKernelModuleAddress(const std::string& module_name) {
 		return 0;
 	}
 
-	const auto modules = static_cast<nt::PRTL_PROCESS_MODULES>(buffer);
-	if (!modules)
+	const auto modules = static_cast<Nt::PRTL_PROCESS_MODULES>(buffer);
+	if (!modules || modules->NumberOfModules == 0) {
+		VirtualFree(buffer, 0, MEM_RELEASE);
 		return 0;
+	}
 
 	for (auto i = 0u; i < modules->NumberOfModules; ++i) {
+		//FullPathName holds the whole path; OffsetToFileName is where the base
+		//name starts inside it.
 		const std::string current_module_name = std::string(reinterpret_cast<char*>(modules->Modules[i].FullPathName) + modules->Modules[i].OffsetToFileName);
 
 		if (!_stricmp(current_module_name.c_str(), module_name.c_str()))
@@ -83,44 +107,14 @@ uint64_t Utils::GetKernelModuleAddress(const std::string& module_name) {
 	return 0;
 }
 
-BOOLEAN Utils::bDataCompare(const BYTE* pData, const BYTE* bMask, const char* szMask) {
-	for (; *szMask; ++szMask, ++pData, ++bMask)
-		if (*szMask == 'x' && *pData != *bMask)
-			return 0;
-	return (*szMask) == 0;
-}
+std::wstring Utilities::GetCurrentAppFolder() {
+	wchar_t buffer[1024] = { 0 };
+	const DWORD length = GetModuleFileNameW(NULL, buffer, static_cast<DWORD>(std::size(buffer)));
+	if (!length || length >= std::size(buffer))
+		return L"";
 
-uintptr_t Utils::FindPattern(uintptr_t dwAddress, uintptr_t dwLen, BYTE* bMask, const char* szMask) {
-	size_t max_len = dwLen - strlen(szMask);
-	for (uintptr_t i = 0; i < max_len; i++)
-		if (bDataCompare((BYTE*)(dwAddress + i), bMask, szMask))
-			return (uintptr_t)(dwAddress + i);
-	return 0;
-}
-
-PVOID Utils::FindSection(const char* sectionName, uintptr_t modulePtr, PULONG size) {
-	size_t namelength = strlen(sectionName);
-	PIMAGE_NT_HEADERS headers = (PIMAGE_NT_HEADERS)(modulePtr + ((PIMAGE_DOS_HEADER)modulePtr)->e_lfanew);
-	PIMAGE_SECTION_HEADER sections = IMAGE_FIRST_SECTION(headers);
-	for (DWORD i = 0; i < headers->FileHeader.NumberOfSections; ++i) {
-		PIMAGE_SECTION_HEADER section = &sections[i];
-		if (memcmp(section->Name, sectionName, namelength) == 0 &&
-			namelength == strlen((char*)section->Name)) {
-			if (!section->VirtualAddress) {
-				return 0;
-			}
-			if (size) {
-				*size = section->Misc.VirtualSize;
-			}
-			return (PVOID)(modulePtr + section->VirtualAddress);
-		}
-	}
-	return 0;
-}
-
-std::wstring Utils::GetCurrentAppFolder() {
-	wchar_t buffer[1024];
-	GetModuleFileNameW(NULL, buffer, 1024);
 	std::wstring::size_type pos = std::wstring(buffer).find_last_of(L"\\/");
+	if (pos == std::wstring::npos)
+		return L"";
 	return std::wstring(buffer).substr(0, pos);
 }
