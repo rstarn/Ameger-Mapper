@@ -19,44 +19,15 @@
  */
 
 #include "SymbolEngine.hpp"
+#include "../../Utilities/Console.hpp"
 
-#include <windows.h>
+#include <Windows.h>
 #include <string>
 #include <memory>
 #include <filesystem>
 #include <iostream>
 #include <cstdio>
 #include <dbghelp.h>
-
-/*
- * Enables ANSI escape processing on the console, or leaves it off when
- * AMEGER_NO_COLOR=1 is set (the same opt-out the build script honours).
- *
- * Without this the sequences in SymbolEngine.hpp are written as literal bytes,
- * which is exactly what happens when output is redirected to a file or a pipe -
- * there the sequences are simply not interpreted, so the text still reads
- * correctly.
- */
-void EnableAnsiColors() {
-	//AMEGER_NO_COLOR=1 is the same opt-out the build script honours.
-	wchar_t optOut[8] = { 0 };
-	const DWORD optOutLength = GetEnvironmentVariableW(L"AMEGER_NO_COLOR", optOut, static_cast<DWORD>(std::size(optOut)));
-	if (optOutLength > 0 && optOutLength < std::size(optOut) && optOut[0] == L'1')
-		return;
-
-	// Colour is only switched on for a real console: leaving ANSI enabled on a
-	// redirected file puts escape bytes in it, which a log file should not
-	// contain. The sequences stay in the output but are simply not interpreted.
-	const HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
-	if (console == INVALID_HANDLE_VALUE || console == nullptr)
-		return;
-
-	DWORD mode = 0;
-	if (!GetConsoleMode(console, &mode))
-		return;
-
-	SetConsoleMode(console, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
-}
 
 namespace
 {
@@ -92,7 +63,7 @@ namespace
 		bool Bind(const char* name, T& slot) {
 			slot = reinterpret_cast<T>(GetProcAddress(module, name));
 			if (!slot) {
-				std::wcout << kColorRed << L"[-] dbghelp.dll is missing export " << name << kColorReset << std::endl;
+				Log(L"[-] dbghelp.dll is missing export " << Val(name) << std::endl);
 				return false;
 			}
 			return true;
@@ -139,7 +110,7 @@ namespace
 			}
 
 			if (!module) {
-				std::wcout << kColorRed << L"[-] Could not load dbghelp.dll from " << folder << kColorReset << std::endl;
+				Log(L"[-] Could not load dbghelp.dll from " << Val(folder) << std::endl);
 				return false;
 			}
 
@@ -252,7 +223,7 @@ SymbolEngine::SymbolEngine(const std::wstring& cachePath) : cachePath(cachePath)
 	//cache folder is never rebuilt into a symstore tree.
 	const std::wstring searchPath = L"SRV*http://msdl.microsoft.com/download/symbols";
 	if (!dbg.SymInitializeW((HANDLE)process, searchPath.c_str(), FALSE))
-		std::wcout << kColorRed << L"[-] SymInitializeW failed, error " << GetLastError() << kColorReset << std::endl;
+		Log(L"[-] SymInitializeW failed, error " << Val(GetLastError()) << std::endl);
 	dbg.SymSetOptions(SYMOPT_EXACT_SYMBOLS);
 }
 
@@ -273,12 +244,12 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 	binaryInfo.sizeofstruct = sizeof(SYMSRV_INDEX_INFOW);
 	if (!dbg.SymSrvGetFileIndexInfoW(binaryPath.c_str(), &binaryInfo, 0))
 	{
-		std::wcout << kColorRed << "[-] Failed to find binary info. Error: " << GetLastError() << kColorReset << std::endl;
+		Log(L"[-] Failed to find binary info. Error: " << Val(GetLastError()) << std::endl);
 		return {};
 	}
 
 	if (binaryInfo.pdbfile[0] == L'\0') {
-		std::wcout << kColorRed << "[-] No PDB name in the debug directory of " << binaryPath << kColorReset << std::endl;
+		Log(L"[-] No PDB name in the debug directory of " << Val(binaryPath) << std::endl);
 		return {};
 	}
 
@@ -293,11 +264,9 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 		cachedInfo.sizeofstruct = sizeof(SYMSRV_INDEX_INFOW);
 		if (dbg.SymSrvGetFileIndexInfoW(flatPath.c_str(), &cachedInfo, 0)
 			&& SameIdentity(binaryIdentity, IdentityOf(cachedInfo))) {
-			std::wcout << kColorDim << L"[i] Symbol cache hit: " << flatPath << kColorReset << std::endl;
 			return flatPath;
 		}
-		std::wcout << kColorDim << L"[i] Cached " << binaryInfo.pdbfile
-			<< L" does not match the running build; refreshing" << kColorReset << std::endl;
+		Log(L"[INFO] Cached " << Val(binaryInfo.pdbfile) << L" does not match the running build; refreshing" << std::endl);
 	}
 
 	void* id;
@@ -317,7 +286,7 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 	//and a pingme.txt there instead of under the flat cache folder.
 	const std::wstring tempStore = MakeTempSymbolStore();
 	if (tempStore.empty()) {
-		std::wcout << kColorRed << "[-] Could not create a temporary symbol store" << kColorReset << std::endl;
+		Log(L"[-] Could not create a temporary symbol store" << std::endl);
 		return {};
 	}
 	const std::wstring tempSearch = L"cache*" + tempStore + L";SRV*http://msdl.microsoft.com/download/symbols";
@@ -339,7 +308,7 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 	const std::wstring downloadedPath = pdbPath.get();
 	// Windows don't provide symsrv.dll and dbghelp loads it from his current path, if its not loaded after those calls means that symsrv/dbghelp are invalid
 	if (downloadedPath.empty() && GetModuleHandleA("symsrv.dll") == nullptr) {
-		std::wcout << kColorRed << "[-] Please provide proper dbghelp.dll and symsrv.dll!" << kColorReset << std::endl;
+		Log(L"[-] Please provide proper dbghelp.dll and symsrv.dll!" << std::endl);
 	}
 
 	std::wstring result;
@@ -352,13 +321,12 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 		//different volumes, where a plain rename cannot work.
 		if (MoveFileExW(downloadedPath.c_str(), flatPath.c_str(),
 			MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
-			std::wcout << kColorGreen << L"[+] Downloaded " << binaryInfo.pdbfile
-				<< L" to " << flatPath << kColorReset << std::endl;
+			Log(L"[+] Downloaded " << Val(binaryInfo.pdbfile) << L" to " << Val(flatPath) << std::endl);
 			result = flatPath;
 		}
 		else {
-			std::wcout << kColorRed << L"[-] Could not move the downloaded PDB to " << flatPath
-				<< L", error " << GetLastError() << kColorReset << std::endl;
+			Log(L"[-] Could not move the downloaded PDB to " << Val(flatPath)
+				<< L", error " << Val(GetLastError()) << std::endl);
 		}
 	}
 
@@ -384,7 +352,7 @@ std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const
 	std::error_code fileSizeError;
 	const auto fileSize = std::filesystem::file_size(pdbPath, fileSizeError);
 	if (fileSizeError) {
-		std::wcout << kColorRed << L"[-] Cannot read " << pdbPath << L": " << fileSizeError.message().c_str() << kColorReset << std::endl;
+		Log(L"[-] Cannot read " << Val(pdbPath) << L": " << Val(fileSizeError.message().c_str()) << std::endl);
 		return {};
 	}
 	const DWORD FileSize = (DWORD)fileSize;
@@ -392,8 +360,8 @@ std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const
 	// Load symbols for the module.
 	//The module is loaded at a fixed base with the PDB as the image, so the
 	//addresses dbghelp returns are offsets from that base and can be written
-	//straight into Offsets.ini.
-	std::wcout << kColorGreen << "[+] Loading Symbols From " << pdbPath << kColorReset << std::endl;
+	//straight into Offsets.ini. The loading line is printed by the caller, which
+	//reports every module together at the end instead of in resolution order.
 	DWORD64 ModBase = dbg.SymLoadModuleExW(
 		(HANDLE)process, // Process handle of the current process
 		NULL,                // Handle to the module's image file (not needed)
@@ -407,7 +375,7 @@ std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const
 
 	if (ModBase == 0)
 	{
-		std::wcout << kColorRed << "[-] Error: SymLoadModule64() failed. Error code: " << GetLastError() << kColorReset << std::endl;
+		Log(L"[-] Error: SymLoadModule64() failed. Error code: " << Val(GetLastError()) << std::endl);
 		return {};
 	}
 
@@ -426,17 +394,15 @@ std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const
 		);
 		if (!bRet || !SymInfoPackage.si.Address)
 		{
-			std::wcout << kColorRed << "[-] Error: SymFromName() failed. Sym: " << sym << " || Error code: " << GetLastError() << kColorReset << std::endl;
+			Log(L"[-] Error: SymFromName() failed. Sym: " << Val(sym) << L" || Error code: " << Val(GetLastError()) << std::endl);
 			dbg.SymUnloadModule64(GetCurrentProcess(), ModBase);
 			return {};
 		}
 
 		//Symbol offsets are relative to the module base, which can exceed 32
-		//bits, so they are kept at full width.
+		//bits, so they are kept at full width. The caller prints them, in a
+		//fixed order, once every module has resolved.
 		const uint64_t offset = SymInfoPackage.si.Address - ModBase;
-
-		// Display information about the symbol
-		std::wcout << kColorGreen << "[+] Symbol " << sym << " Offset: " << offset << kColorReset << std::endl;
 		offsets.push_back(offset);
 	}
 
@@ -529,7 +495,7 @@ static bool GetFieldOffsetInternal(HANDLE hProcess, ULONG64 ModBase, const std::
 	return false;
 }
 
-std::vector<uint64_t> SymbolEngine::GetStructFieldOffsets(const std::wstring& pdbPath, const std::vector<FieldRequest>& fields) {
+std::vector<SymbolEngine::FieldResult> SymbolEngine::GetStructFieldOffsets(const std::wstring& pdbPath, const std::vector<FieldRequest>& fields) {
 
 	//Resolved once; every call below goes through these pointers.
 	const auto& dbg = Dbg();
@@ -540,7 +506,7 @@ std::vector<uint64_t> SymbolEngine::GetStructFieldOffsets(const std::wstring& pd
 	std::error_code fileSizeError;
 	const auto fileSize = std::filesystem::file_size(pdbPath, fileSizeError);
 	if (fileSizeError) {
-		std::wcout << kColorRed << L"[-] Cannot read " << pdbPath << L": " << fileSizeError.message().c_str() << kColorReset << std::endl;
+		Log(L"[-] Cannot read " << Val(pdbPath) << L": " << Val(fileSizeError.message().c_str()) << std::endl);
 		return {};
 	}
 	const DWORD FileSize = (DWORD)fileSize;
@@ -557,48 +523,30 @@ std::vector<uint64_t> SymbolEngine::GetStructFieldOffsets(const std::wstring& pd
 	);
 
 	if (ModBase == 0) {
-		std::wcout << kColorRed << L"[-] Error: SymLoadModule64() failed. Error code: " << GetLastError() << kColorReset << std::endl;
+		Log(L"[-] Error: SymLoadModule64() failed. Error code: " << Val(GetLastError()) << std::endl);
 		return {};
 	}
 
-	std::vector<uint64_t> offsets{};
-	offsets.reserve(fields.size());
-
-	//Optional misses are collapsed into one dimmed summary at the end. Printing
-	//one warning per optional field buries the ones that matter, and in this
-	//project every optional field always misses by design.
-	std::vector<uint64_t> optionalMisses{};
+	std::vector<FieldResult> results{};
+	results.reserve(fields.size());
 
 	for (const auto& request : fields) {
 		const std::wstring& structName = request.structName;
 		const std::wstring& fieldName = request.fieldName;
 
-		uint64_t offset = 0;
+		//A miss leaves offset at 0 and matchedName empty; the caller decides
+		//how to report it, based on the request's optional flag. Reporting used
+		//to happen here, which is why the field block landed in the middle of
+		//the console report.
+		FieldResult result{};
 		std::wstring matchedName;
-		if (GetFieldOffsetInternal((HANDLE)process, ModBase, structName, fieldName, offset, matchedName)) {
-			//The field can resolve through a differently named copy of the type.
-			std::wcout << kColorGreen << L"[+] Field " << structName;
-			if (matchedName != structName)
-				std::wcout << L" (as " << matchedName << L")";
-			std::wcout << L"." << fieldName << L" offset: 0x" << std::hex << offset << std::dec << kColorReset << std::endl;
-		}
-		else if (request.optional) {
-			optionalMisses.push_back(offset);
-		}
-		else {
-			std::wcout << kColorRed << L"[!] Field " << structName << L"." << fieldName << L" unresolved" << kColorReset << std::endl;
-		}
+		if (GetFieldOffsetInternal((HANDLE)process, ModBase, structName, fieldName, result.offset, matchedName))
+			result.matchedName = matchedName;
 
-		offsets.push_back(offset);
-	}
-
-	if (!optionalMisses.empty()) {
-		std::wcout << kColorDim << L"[i] " << optionalMisses.size()
-			<< L" optional field(s) are not in the public PDB type stream; derived at runtime by content matching"
-			<< kColorReset << std::endl;
+		results.push_back(result);
 	}
 
 	dbg.SymUnloadModule64(GetCurrentProcess(), ModBase);
 
-	return offsets;
+	return results;
 }

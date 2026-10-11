@@ -93,6 +93,7 @@ copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Comm
     <!-- Symbols -->
     <ClInclude Include="..\..\Symbols\Handler\SymbolsHandler.hpp" />
     <!-- Utilities -->
+    <ClInclude Include="..\..\Utilities\Console.hpp" />
     <ClInclude Include="..\..\Utilities\Utilities.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

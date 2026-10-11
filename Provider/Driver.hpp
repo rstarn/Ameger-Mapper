@@ -5,7 +5,7 @@
 #include <iostream>
 #include <string>
 
-#include "../Utilities/Utilities.hpp"
+#include "../Utilities/Console.hpp"
 #include "../App/NT.hpp"
 #include "../Symbols/Handler/SymbolsHandler.hpp"
 

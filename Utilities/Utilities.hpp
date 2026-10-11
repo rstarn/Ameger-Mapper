@@ -6,10 +6,6 @@
 #include <string>
 #include <vector>
 
-//Log to the console. Every diagnostic in the project goes through this, so the
-//mapper and the symbol tool produce output the same way.
-#define Log(content) std::wcout << content
-
 /*
  * Helpers shared by the rest of the project. Nothing here touches kernel
  * memory: these all run before the provider is loaded or after it has been

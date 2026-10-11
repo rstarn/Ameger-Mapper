@@ -3,6 +3,7 @@
 #include <iostream>
 
 #include "../Utilities/Utilities.hpp"
+#include "../Utilities/Console.hpp"
 #include "../Provider/Driver.hpp"
 #include "../App/NT.hpp"
 #include "../PE/PE.hpp"
@@ -35,8 +36,8 @@ static bool RelocateImageByDelta(const PE::vec_relocs& relocs, const ULONG64 del
 				continue;
 
 			if (type != IMAGE_REL_BASED_DIR64) {
-				Log(L"[-] Unsupported relocation type " << type << L" at page +0x"
-					<< std::hex << current_reloc.address + offset << std::dec
+				Log(L"[-] Unsupported relocation type " << Val(type) << L" at page "
+					<< Val(Hex(current_reloc.address + offset))
 					<< L"; refusing to build an image with unfixed pointers" << std::endl);
 				return false;
 			}
@@ -48,7 +49,7 @@ static bool RelocateImageByDelta(const PE::vec_relocs& relocs, const ULONG64 del
 			const ULONG64 target = current_reloc.address + offset;
 			if (target < image_base || image_size < sizeof(ULONG64) ||
 				target - image_base > image_size - sizeof(ULONG64)) {
-				Log(L"[-] Relocation target 0x" << std::hex << (target - image_base) << std::dec
+				Log(L"[-] Relocation target " << Val(Hex(target - image_base))
 					<< L" is outside the image; refusing to build an image with unfixed pointers" << std::endl);
 				return false;
 			}
@@ -93,7 +94,7 @@ static bool FixSecurityCookie(void* local_image, size_t image_size, ULONG64 kern
 	auto load_config_directory = headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].VirtualAddress;
 	if (!load_config_directory)
 	{
-		Log(L"[+] Load config directory wasn't found, probably StackCookie not defined, fix cookie skipped" << std::endl);
+		Log(L"[INFO] Load config directory wasn't found, probably StackCookie not defined, fix cookie skipped" << std::endl);
 		return true;
 	}
 
@@ -110,7 +111,7 @@ static bool FixSecurityCookie(void* local_image, size_t image_size, ULONG64 kern
 	auto stack_cookie = load_config_struct->SecurityCookie;
 	if (!stack_cookie)
 	{
-		Log(L"[+] StackCookie not defined, fix cookie skipped" << std::endl);
+		Log(L"[INFO] StackCookie not defined, fix cookie skipped" << std::endl);
 		return true; // as I said, it is not an error and we should allow that behavior
 	}
 
@@ -136,7 +137,7 @@ static bool FixSecurityCookie(void* local_image, size_t image_size, ULONG64 kern
 	//means the author compiled with a custom /GS cookie, which is supported.
 	static constexpr uintptr_t kDefaultCookie = 0x2B992DDFA232;
 	if (*(uintptr_t*)(stack_cookie) != kDefaultCookie)
-		Log(L"[+] Non-default stack cookie found, remapping it anyway" << std::endl);
+		Log(L"[INFO] Non-default stack cookie found, remapping it anyway" << std::endl);
 
 	Log(L"[+] Fixing stack cookie" << std::endl);
 
@@ -167,7 +168,7 @@ static bool ResolveImports(const PE::vec_imports& imports) {
 	for (const auto& current_import : imports) {
 		ULONG64 Module = Utilities::GetKernelModuleAddress(current_import.module_name);
 		if (!Module) {
-			Log(L"[-] Dependency " << Utilities::ToWide(current_import.module_name) << L" wasn't found" << std::endl);
+			Log(L"[-] Dependency " << Val(Utilities::ToWide(current_import.module_name)) << L" wasn't found" << std::endl);
 			return false;
 		}
 
@@ -185,12 +186,12 @@ static bool ResolveImports(const PE::vec_imports& imports) {
 
 					if (!function_address) {
 						if (current_function_data.ordinal != 0) {
-							Log(L"[-] Failed to resolve import ordinal " << current_function_data.ordinal
-								<< L" (" << Utilities::ToWide(current_import.module_name) << L")" << std::endl);
+							Log(L"[-] Failed to resolve import ordinal " << Val(current_function_data.ordinal)
+								<< L" (" << Val(Utilities::ToWide(current_import.module_name)) << L")" << std::endl);
 						}
 						else {
-							Log(L"[-] Failed to resolve import " << Utilities::ToWide(current_function_data.name)
-								<< L" (" << Utilities::ToWide(current_import.module_name) << L")" << std::endl);
+							Log(L"[-] Failed to resolve import " << Val(Utilities::ToWide(current_function_data.name))
+								<< L" (" << Val(Utilities::ToWide(current_import.module_name)) << L")" << std::endl);
 						}
 						return false;
 					}
@@ -288,7 +289,9 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 	}
 
 	do {
-		Log(L"[+] Image base has been allocated at 0x" << reinterpret_cast<void*>(kernel_image_base) << std::endl);
+		LogBlank();
+		Log(L"[+] Image base has been allocated at " << Val(reinterpret_cast<void*>(kernel_image_base)) << std::endl);
+		LogBlank();
 
 		const ULONG64 realBase = kernel_image_base;
 
@@ -317,13 +320,13 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 			//otherwise the copy reads and writes out of bounds.
 			if (section_va > nt_headers->OptionalHeader.SizeOfImage ||
 				section_raw_size > nt_headers->OptionalHeader.SizeOfImage - section_va) {
-				Log(L"[-] Section " << SectionName(&current_image_section[i]) << L" does not fit in the image, aborted" << std::endl);
+				Log(L"[-] Section " << Val(SectionName(&current_image_section[i])) << L" does not fit in the image, aborted" << std::endl);
 				sections_ok = false;
 				break;
 			}
 
 			if (section_raw_ptr > data_size || section_raw_size > data_size - section_raw_ptr) {
-				Log(L"[-] Section " << SectionName(&current_image_section[i]) << L" is truncated in the file, aborted" << std::endl);
+				Log(L"[-] Section " << Val(SectionName(&current_image_section[i])) << L" is truncated in the file, aborted" << std::endl);
 				sections_ok = false;
 				break;
 			}
@@ -337,7 +340,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 
 		if (destroyHeader) {
 			kernel_image_base -= TotalVirtualHeaderSize;
-			Log(L"[+] Skipped 0x" << std::hex << TotalVirtualHeaderSize << std::dec << L" bytes of PE Header" << std::endl);
+			Log(L"[INFO] Skipped " << Val(Hex(TotalVirtualHeaderSize)) << L" bytes of PE Header" << std::endl);
 		}
 
 		// Resolve relocs and imports
@@ -365,7 +368,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 * checkable, so it is checked rather than assumed.
 		 */
 		if (relocations.empty()) {
-			Log(L"[!] Image has no relocation directory; it can only load at its preferred base" << std::endl);
+			Log(L"[INFO] Image has no relocation directory; it can only load at its preferred base" << std::endl);
 
 			if (!PE::VerifyNoAbsoluteReferences(local_image_base, nt_headers->OptionalHeader.SizeOfImage)) {
 				Log(L"[-] Refusing to map: the image keeps absolute pointers into itself and has no relocations to fix them" << std::endl);
@@ -373,7 +376,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 				break;
 			}
 
-			Log(L"[+] No absolute references into the image itself; safe to load at any address" << std::endl);
+			Log(L"[INFO] No absolute references into the image itself; safe to load at any address" << std::endl);
 		}
 
 		if (!FixSecurityCookie(local_image_base, nt_headers->OptionalHeader.SizeOfImage, kernel_image_base))
@@ -432,7 +435,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 				uint32_t secSize = sec->Misc.VirtualSize;
 
 				if (secSize == 0) {
-					Log(L"[*] Skipping empty section: " << SectionName(sec) << std::endl);
+					Log(L"[*] Skipping empty section: " << Val(SectionName(sec)) << std::endl);
 					continue;
 				}
 
@@ -440,7 +443,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 				//independent-pages allocation before its protection is changed.
 				if (secAddr < realBase || secSize > image_size ||
 					secAddr - realBase > image_size - secSize) {
-					Log(L"[-] Section " << SectionName(sec) << L" lies outside the allocation, skipping protection change" << std::endl);
+					Log(L"[-] Section " << Val(SectionName(sec)) << L" lies outside the allocation, skipping protection change" << std::endl);
 					continue;
 				}
 
@@ -458,14 +461,14 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 				}
 
 				Log(L"[+] Setting protection for section: "
-				<< SectionName(sec)
-				<< L" Base: 0x" << std::hex << secAddr
-				<< L" Size: 0x" << secSize
-				<< L" Prot: " << ProtectionToString(prot)
-				<< std::dec << std::endl);
+				<< Val(SectionName(sec))
+				<< L" Base: " << Val(Hex(secAddr))
+				<< L" Size: " << Val(Hex(secSize))
+				<< L" Prot: " << Val(ProtectionToString(prot))
+				<< std::endl);
 
 				if (!Driver::MmSetPageProtection(secAddr, secSize, prot)) {
-					Log(L"[-] Failed to set protection for section: " << SectionName(sec) << std::endl);
+					Log(L"[-] Failed to set protection for section: " << Val(SectionName(sec)) << std::endl);
 				}
 			}
 		}
@@ -478,7 +481,8 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 */
 		const ULONG64 address_of_entry_point = kernel_image_base + nt_headers->OptionalHeader.AddressOfEntryPoint;
 
-		Log(L"[<] Calling DriverEntry 0x" << reinterpret_cast<void*>(address_of_entry_point) << std::endl);
+		LogBlank();
+		Log(L"[!] Calling DriverEntry | " << Val(reinterpret_cast<void*>(address_of_entry_point)) << std::endl);
 
 		if (callback) {
 			if (!callback(&param1, &param2, realBase, image_size)) {
@@ -498,7 +502,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		if (exitCode)
 			*exitCode = status;
 
-		Log(L"[+] DriverEntry returned 0x" << std::hex << status << std::dec << std::endl);
+		Log(L"[+] DriverEntry returned: " << Val(Hex(status)) << std::endl);
 
 		//Optional early release, --free. Only safe for drivers that have copied
 		//out everything they need, because the image becomes invalid as soon as

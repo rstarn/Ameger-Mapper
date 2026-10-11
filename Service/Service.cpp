@@ -12,7 +12,7 @@
 #include <string>
 #include <iostream>
 
-#include "../Utilities/Utilities.hpp"
+#include "../Utilities/Console.hpp"
 #include "../App/NT.hpp"
 
 //The kernel expects \??\<full path> as an NT object path.
@@ -60,7 +60,7 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 	NTSTATUS ntStatus = Nt::RtlAdjustPrivilege(SE_LOAD_DRIVER_PRIVILEGE, TRUE, FALSE, &SeLoadDriverWasEnabled);
 	if (!NT_SUCCESS(ntStatus)) {
 		RegDeleteTreeW(HKEY_LOCAL_MACHINE, servicesPath.c_str());
-		Log("Fatal error: failed to acquire SE_LOAD_DRIVER_PRIVILEGE. Make sure you are running as administrator." << std::endl);
+		Log("[-] Fatal error: failed to acquire SE_LOAD_DRIVER_PRIVILEGE. Make sure you are running as administrator." << std::endl);
 		return ntStatus;
 	}
 
@@ -70,7 +70,7 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 
 	ntStatus = Nt::NtLoadDriver(&serviceStr);
 
-	Log("[+] NtLoadDriver Status 0x" << std::hex << ntStatus << std::dec << std::endl);
+	Log(L"[+] NtLoadDriver Status " << Val(Hex(ntStatus)) << std::endl);
 
 	if (ntStatus == STATUS_IMAGE_CERT_REVOKED) {
 		Log("[-] Your vulnerable driver blocklist is enabled and has blocked the provider from loading, you must disable it" << std::endl);
@@ -78,7 +78,7 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 		Log("[-] Set 'VulnerableDriverBlocklistEnable' as dword to 0" << std::endl);
 	}
 	else if (ntStatus == STATUS_ACCESS_DENIED || ntStatus == STATUS_INSUFFICIENT_RESOURCES) {
-		Log("[-] Access Denied or Insufficient Resources (0x" << std::hex << ntStatus << std::dec << "), Probably some anticheat or antivirus running blocking the load of vulnerable driver" << std::endl);
+		Log(L"[-] Access Denied or Insufficient Resources (" << Val(Hex(ntStatus)) << L"), Probably some anticheat or antivirus running blocking the load of vulnerable driver" << std::endl);
 	}
 
 	if (!NT_SUCCESS(ntStatus)) {
@@ -113,7 +113,7 @@ NTSTATUS Service::StopAndRemove(const std::wstring& serviceName) {
 	RegCloseKey(driver_service);
 
 	NTSTATUS st = Nt::NtUnloadDriver(&serviceStr);
-	Log("[+] NtUnloadDriver Status 0x" << std::hex << st << std::dec << std::endl);
+	Log(L"[+] NtUnloadDriver Status: " << Val(Hex(st)) << std::endl);
 	if (!NT_SUCCESS(st)) {
 		Log("[-] Driver Unload Failed!!" << std::endl);
 		RegDeleteTreeW(HKEY_LOCAL_MACHINE, servicesPath.c_str());

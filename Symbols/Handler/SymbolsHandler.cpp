@@ -14,9 +14,12 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <sstream>
 #include <utility>
+#include <vector>
 
 #include "../../Utilities/Utilities.hpp"
+#include "../../Utilities/Console.hpp"
 
 bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::wstring& updater) {
 	symbols.clear();
@@ -29,7 +32,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	const std::wstring& fileToCheck = usingUpdater ? updater : requestedPath;
 
 	if (!std::filesystem::exists(fileToCheck)) {
-		std::wcout << L"[-] Offsets file (" << requestedPath << L") or updater (" << updater << L") not found" << std::endl;
+		Log(L"[-] Offsets file (" << Val(requestedPath) << L") or updater (" << Val(updater) << L") not found" << std::endl);
 		return false;
 	}
 
@@ -53,7 +56,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 			wchar_t oldPath[32768] = { 0 };
 			const DWORD pathLength = GetEnvironmentVariableW(L"PATH", oldPath, static_cast<DWORD>(std::size(oldPath)));
 			if (pathLength >= static_cast<DWORD>(std::size(oldPath))) {
-				std::wcerr << L"[-] PATH is too long to extend; leaving PATH alone" << std::endl;
+				Log(L"[-] PATH is too long to extend; leaving PATH alone" << std::endl);
 			}
 			else {
 				const std::wstring newPath = dllFolder + L";" + std::wstring(oldPath, pathLength);
@@ -64,13 +67,13 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 		const std::wstring cmdW = L"\"" + updater + L"\"";
 		const int exitCode = _wsystem(cmdW.c_str());
 		if (exitCode != 0) {
-			std::wcout << L"[-] Failed to update offsets (exit code " << exitCode << L")" << std::endl;
-			std::wcout << L"[-] Offsets file expected at: " << outputPath << std::endl;
+			Log(L"[-] Failed to update offsets (exit code " << Val(exitCode) << L")" << std::endl);
+			Log(L"[-] Offsets file expected at: " << Val(outputPath) << std::endl);
 			return false;
 		}
 
 		if (!std::filesystem::exists(outputPath)) {
-			std::wcout << L"[-] Updater ran but produced no " << outputPath << std::endl;
+			Log(L"[-] Updater ran but produced no " << Val(outputPath) << std::endl);
 			return false;
 		}
 
@@ -82,12 +85,24 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	//load file with ini format
 	std::wifstream file(path);
 	if (!file.is_open()) {
-		std::wcout << L"[-] Failed to open offsets file" << std::endl;
+		Log(L"[-] Failed to open offsets file" << std::endl);
 		return false;
 	}
 
+	//Lines are buffered and reported in two groups - every symbol, then every
+	//structure field - so the console report has the same shape SymbolTool.exe
+	//prints instead of interleaving each module's symbols with its own fields.
+	std::vector<std::wstring> symbolLines;
+	std::vector<std::wstring> fieldLines;
+
 	std::wstring line;
 	std::wstring currentSection;
+
+	//Counted separately so the summary can say what was actually loaded: an
+	//Offsets.ini entry is either a symbol (a [<module>] section) or a structure
+	//field (a [<module>.fields] section).
+	size_t symbolCount = 0;
+	size_t fieldCount = 0;
 
 	while (std::getline(file, line)) {
 		if (line.empty() || line[0] == L';' || line[0] == L'#') {
@@ -96,7 +111,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 		if (line[0] == L'[') {
 			//A section header needs both brackets; substr would underflow here.
 			if (line.back() != L']') {
-				std::wcout << L"[-] Malformed section header, skipping" << std::endl;
+				Log(L"[-] Malformed section header, skipping" << std::endl);
 				continue;
 			}
 			currentSection = line.substr(1, line.size() - 2);
@@ -116,18 +131,40 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 			parsed = std::stoull(offset, nullptr, 10);
 		}
 		catch (const std::exception&) {
-			std::wcout << L"[-] Skipping malformed offset for " << name << std::endl;
+			Log(L"[-] Skipping malformed offset for " << Val(name) << std::endl);
 			continue;
 		}
 
 		SymbolOffset sym{};
 		sym.name = name;
 		sym.offset = parsed;
-		std::wcout << L"[+] Loaded " << currentSection << L" - " << sym.name << L" - 0x" << std::hex << sym.offset << std::dec << std::endl;
+
+		const bool isField = currentSection.size() >= 7 &&
+			currentSection.compare(currentSection.size() - 7, 7, L".fields") == 0;
+
+		std::wostringstream loaded;
+		loaded << L"[+] Loaded " << Val(currentSection) << L" - " << Val(sym.name) << L" - " << Val(Hex(sym.offset));
+		(isField ? fieldLines : symbolLines).push_back(loaded.str());
+
 		symbols.push_back(std::move(sym));
+
+		if (isField)
+			++fieldCount;
+		else
+			++symbolCount;
 	}
 
-	std::wcout << L"[+] " << symbols.size() << L" Symbols Loaded" << std::endl;
+	for (const auto& loaded : symbolLines)
+		Log(loaded << std::endl);
+	LogBlank();
+
+	for (const auto& loaded : fieldLines)
+		Log(loaded << std::endl);
+	LogBlank();
+
+	Log(L"[+] Loaded " << Val(symbols.size()) << L" offsets (" << Val(symbolCount)
+		<< L" symbols, " << Val(fieldCount) << L" fields) from " << Val(path) << std::endl);
+	LogBlank();
 	return true;
 }
 

@@ -48,6 +48,9 @@
     <ClInclude Include="..\..\Symbols\Handler\SymbolsHandler.hpp">
       <Filter>Handler</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\Utilities\Console.hpp">
+      <Filter>Utilities</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\Utilities\Utilities.hpp">
       <Filter>Utilities</Filter>
     </ClInclude>

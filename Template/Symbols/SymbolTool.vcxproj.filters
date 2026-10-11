@@ -7,6 +7,9 @@
     <Filter Include="Engine">
       <UniqueIdentifier>{92d40109-83cf-4aab-f6b9-a4d2f83c9589}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Utilities">
+      <UniqueIdentifier>{81c3f098-72be-4495-e6a9-93c1e72b8478}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\Symbols\Main.cpp">
@@ -19,6 +22,9 @@
   <ItemGroup>
     <ClInclude Include="..\..\Symbols\Engine\SymbolEngine.hpp">
       <Filter>Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\Utilities\Console.hpp">
+      <Filter>Utilities</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

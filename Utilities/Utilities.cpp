@@ -5,6 +5,7 @@
  */
 
 #include "Utilities.hpp"
+#include "Console.hpp"
 #include <Windows.h>
 #include <iostream>
 #include <string>

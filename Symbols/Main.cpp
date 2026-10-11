@@ -14,14 +14,17 @@
 
 #include <Windows.h>
 
+#include <algorithm>
 #include <vector>
 #include <string>
+#include <utility>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 
 #include "Engine/SymbolEngine.hpp"
+#include "../Utilities/Console.hpp"
 
 namespace
 {
@@ -37,6 +40,24 @@ namespace
 			return L"";
 		return std::wstring(buffer).substr(0, pos);
 	}
+
+	//A symbol resolved from a module's PDB, held until the whole report can be
+	//printed in one fixed order instead of in resolution order.
+	struct ResolvedSymbol {
+		std::wstring name;
+		uint64_t offset = 0;
+	};
+
+	//A structure field resolved from a module's PDB type stream. optional
+	//mirrors the request: a non-optional miss is reported as a warning, an
+	//optional miss stays silent.
+	struct ResolvedField {
+		std::wstring structName;
+		std::wstring fieldName;
+		std::wstring matchedName;
+		uint64_t offset = 0;
+		bool optional = false;
+	};
 }
 
 //Modules to resolve. ci.dll only matters when Defender is present, so its
@@ -45,7 +66,7 @@ int wmain()
 {
 	//ANSI escape processing has to be enabled before any colour sequence is
 	//written, otherwise the escape bytes print literally.
-	EnableAnsiColors();
+	Console::EnableAnsiColors();
 
 	std::vector<std::wstring> targetBinaries = {
 		L"C:\\Windows\\System32\\ntoskrnl.exe",
@@ -72,9 +93,9 @@ int wmain()
 	//could silently change between Windows builds.
 	//
 	//The optional=true entries are the internal types Microsoft does not publish
-	//in the PDB type stream. They cannot be resolved here by design and are
-	//reported as a single dimmed summary instead of one warning each; the mapper
-	//derives their offsets at runtime by content matching.
+	//in the PDB type stream. They cannot be resolved here by design, so they are
+	//omitted from the report; the mapper derives their offsets at runtime by
+	//content matching.
 	std::vector<FieldRequest> fieldsToRetrieve{
 		{ L"ntoskrnl.exe", L"_FILE_OBJECT",               L"DeviceObject" },
 		{ L"ntoskrnl.exe", L"_DEVICE_OBJECT",             L"DriverObject" },
@@ -97,12 +118,23 @@ int wmain()
 		symbolsToRetrieve.push_back({ L"WdFilter.sys", L"MpFreeDriverInfoEx" });
 	}
 
-	SymbolEngine engine(GetCurrentAppFolder() + L"\\Symbols");
+	/*
+	 * The flat PDB cache lives at Build\Symbols, one level above the release
+	 * folder this tool is staged into. Keeping it outside the release root is
+	 * what lets Build\Executors\Create.bat wipe the release on every rebuild
+	 * without discarding the cache - see the stage notes there.
+	 */
+	SymbolEngine engine(std::filesystem::path(GetCurrentAppFolder()).parent_path().wstring() + L"\\Symbols");
 
 	std::wostringstream content;
 	//Optional fields are allowed to fail: the mapper validates those objects
 	//at runtime instead of trusting a compiled-in offset.
-	bool allResolved = true;
+
+	//Results are collected while resolving and printed afterwards in a fixed
+	//order, so the report is not grouped by the PDB each value came from.
+	std::vector<ResolvedSymbol> resolvedSymbols;
+	std::vector<ResolvedField> resolvedFields;
+	std::vector<std::wstring> loadingPaths;
 
 	for (const auto& binary : targetBinaries) {
 		const bool isWdFilter = binary.find(L"WdFilter") != std::wstring::npos;
@@ -113,11 +145,10 @@ int wmain()
 				//WdFilter's PDB is not always published, and the mapper treats a
 				//missing WdFilter cleanup as "nothing to remove", so skip it
 				//rather than failing the whole run over an optional module.
-				std::wcout << kColorDim << L"[i] No symbols available for " << binary
-					<< L", skipping" << kColorReset << std::endl;
+				Log(L"[INFO] No symbols available for " << Val(binary) << L", skipping" << std::endl);
 				continue;
 			}
-			std::wcout << L"[-] No symbols available for " << binary << std::endl;
+			Log(L"[-] No symbols available for " << Val(binary) << std::endl);
 			return -1;
 		}
 
@@ -135,17 +166,17 @@ int wmain()
 
 		const auto offsets = engine.GetOffset(pdbPath, symbols);
 		if (offsets.size() != symbols.size()) {
-			std::wcout << kColorRed << L"[-] Could not resolve every symbol of " << binary << kColorReset << std::endl;
+			Log(L"[-] Could not resolve every symbol of " << Val(binary) << std::endl);
 			return -1;
 		}
 
-		const auto fieldOffsets = engine.GetStructFieldOffsets(pdbPath, fields);
-		//GetStructFieldOffsets returns one value per requested field, or an
+		const auto fieldResults = engine.GetStructFieldOffsets(pdbPath, fields);
+		//GetStructFieldOffsets returns one result per requested field, or an
 		//empty vector when the PDB could not be loaded. The loop below indexes
 		//it by fields.size(), so the two have to agree or the read runs off the
 		//end of the vector.
-		if (fieldOffsets.size() != fields.size()) {
-			std::wcout << kColorRed << L"[-] Could not resolve the structure fields of " << binary << kColorReset << std::endl;
+		if (fieldResults.size() != fields.size()) {
+			Log(L"[-] Could not resolve the structure fields of " << Val(binary) << std::endl);
 			return -1;
 		}
 
@@ -160,32 +191,121 @@ int wmain()
 			//Only publish what actually resolved: a zero entry would look like a
 			//legitimate offset of zero. Missing fields fall back to the compiled
 			//default plus runtime validation in the mapper.
-			if (fieldOffsets[i] == 0) {
-				allResolved = false;
+			if (fieldResults[i].offset == 0) {
 				continue;
 			}
-			content << fields[i].structName << L"." << fields[i].fieldName << L"=" << std::dec << fieldOffsets[i] << std::endl;
+			content << fields[i].structName << L"." << fields[i].fieldName << L"=" << std::dec << fieldResults[i].offset << std::endl;
 		}
 
 		content << std::endl;
+
+		//Held for the report pass below rather than printed here, so the
+		//console output follows the fixed order and not this loop's.
+		loadingPaths.push_back(pdbPath);
+		for (size_t i = 0; i < symbols.size(); i++)
+			resolvedSymbols.push_back({ symbols[i], offsets[i] });
+		for (size_t i = 0; i < fields.size(); i++)
+			resolvedFields.push_back({
+				fields[i].structName, fields[i].fieldName,
+				fieldResults[i].matchedName, fieldResults[i].offset, fields[i].optional });
 	}
+
+	/*
+	 * Console report, emitted in one fixed order once every module has resolved
+	 * so the two PDBs do not split the symbol block and the fields do not land
+	 * in the middle of it. The lists below only decide the order; the values
+	 * come from the resolution pass above.
+	 */
+	const std::vector<std::wstring> symbolReportOrder{
+		L"MmAllocateIndependentPagesEx",
+		L"MmFreeIndependentPages",
+		L"g_KernelHashBucketList",
+		L"MmSetPageProtection",
+		L"PiDDBCacheTable",
+		L"g_HashCacheLock",
+		L"PiDDBLock",
+		L"MmPteBase",
+	};
+	const std::vector<std::pair<std::wstring, std::wstring>> fieldReportOrder{
+		{ L"_KLDR_DATA_TABLE_ENTRY", L"BaseDllName" },
+		{ L"_DRIVER_OBJECT",         L"DriverSection" },
+		{ L"_DEVICE_OBJECT",         L"DriverObject" },
+		{ L"_RTL_AVL_TABLE",         L"DeleteCount" },
+		{ L"_FILE_OBJECT",           L"DeviceObject" },
+	};
+
+	//Rank by position in the fixed order. An entry the list does not name - a
+	//conditional WdFilter symbol - ranks last and keeps its resolution order,
+	//so nothing is silently dropped from the report.
+	auto symbolRank = [&symbolReportOrder](const std::wstring& name) {
+		for (size_t i = 0; i < symbolReportOrder.size(); i++)
+			if (symbolReportOrder[i] == name)
+				return i;
+		return symbolReportOrder.size();
+	};
+	std::stable_sort(resolvedSymbols.begin(), resolvedSymbols.end(),
+		[&](const ResolvedSymbol& a, const ResolvedSymbol& b) {
+			return symbolRank(a.name) < symbolRank(b.name);
+		});
+
+	auto fieldRank = [&fieldReportOrder](const std::wstring& structName, const std::wstring& fieldName) {
+		for (size_t i = 0; i < fieldReportOrder.size(); i++)
+			if (fieldReportOrder[i].first == structName && fieldReportOrder[i].second == fieldName)
+				return i;
+		return fieldReportOrder.size();
+	};
+	std::stable_sort(resolvedFields.begin(), resolvedFields.end(),
+		[&](const ResolvedField& a, const ResolvedField& b) {
+			return fieldRank(a.structName, a.fieldName) < fieldRank(b.structName, b.fieldName);
+		});
+
+	//Group A: symbols.
+	for (const auto& symbol : resolvedSymbols) {
+		Log(L"[+] Symbol " << Val(symbol.name) << L" Offset: " << Val(Hex(symbol.offset)) << std::endl);
+	}
+	LogBlank();
+
+	//Group B: structure fields.
+	for (const auto& field : resolvedFields) {
+		if (field.offset != 0) {
+			//The field can resolve through a differently named copy of the type.
+			if (!field.matchedName.empty() && field.matchedName != field.structName)
+				Log(L"[+] Field " << Val(field.structName) << L" (as " << Val(field.matchedName) << L")."
+					<< Val(field.fieldName) << L" Offset: " << Val(Hex(field.offset)) << std::endl);
+			else
+				Log(L"[+] Field " << Val(field.structName) << L"."
+					<< Val(field.fieldName) << L" Offset: " << Val(Hex(field.offset)) << std::endl);
+		}
+		else if (!field.optional) {
+			//An optional field is expected to miss: it is not in the public PDB
+			//type stream, so the mapper derives its offset at runtime instead.
+			Log(L"[-] Field " << Val(field.structName) << L"." << Val(field.fieldName) << L" unresolved" << std::endl);
+		}
+	}
+	LogBlank();
+
+	//Group C: the PDBs the offsets were resolved from.
+	for (const auto& pdbPath : loadingPaths) {
+		Log(L"[+] Loading Symbols From " << Val(pdbPath) << std::endl);
+	}
+	LogBlank();
 
 	//Written next to Mapper.exe, which is also where the mapper looks for it.
 	const auto outputPath = GetCurrentAppFolder() + L"\\Offsets.ini";
 
 	std::wofstream out(outputPath, std::ios::trunc);
 	if (!out.is_open()) {
-		std::wcout << L"[-] Could not write " << outputPath << std::endl;
+		Log(L"[-] Could not write " << Val(outputPath) << std::endl);
 		return -1;
 	}
 	out << content.str();
 	out.close();
 	if (out.fail()) {
-		std::wcout << kColorRed << L"[-] Failed to write " << outputPath << kColorReset << std::endl;
+		Log(L"[-] Failed to write " << Val(outputPath) << std::endl);
 		return -1;
 	}
 
-	std::wcout << kColorGreen << L"[+] Wrote " << outputPath
-		<< (allResolved ? L"" : L" (with unresolved optional fields)") << kColorReset << std::endl;
+	Log(L"[+] Wrote " << Val(outputPath) << std::endl);
+	LogBlank();
 	return 0;
 }
