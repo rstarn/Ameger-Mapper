@@ -44,12 +44,6 @@ namespace Mapper
 		AllocateIndependentPages
 	};
 
-	//Invoked after the image is in kernel memory but before DriverEntry runs.
-	//Returning false aborts the mapping.
-	//param1/param2 are forwarded as the DriverEntry arguments,
-	//allocationPtr/allocationSize describe the kernel allocation.
-	typedef bool (*mapCallback)(ULONG64* param1, ULONG64* param2, ULONG64 allocationPtr, ULONG64 allocationSize);
-
 	/*
 	 * Map a driver image.
 	 *
@@ -70,15 +64,15 @@ namespace Mapper
 	 * is released before returning.
 	 */
 	//Note: if you set PassAllocationAddressAsFirstParam as true, param1 will be ignored
-	ULONG64 MapDriver(BYTE* data, size_t data_size, ULONG64 param1 = 0, ULONG64 param2 = 0, bool free = false, bool destroyHeader = true, AllocationMode mode = AllocationMode::AllocatePool, bool PassAllocationAddressAsFirstParam = false, mapCallback callback = nullptr, NTSTATUS* exitCode = nullptr);
+	ULONG64 MapDriver(BYTE* data, size_t data_size, ULONG64 param1 = 0, ULONG64 param2 = 0, bool free = false, bool destroyHeader = true, AllocationMode mode = AllocationMode::AllocatePool, bool PassAllocationAddressAsFirstParam = false, NTSTATUS* exitCode = nullptr);
 
 	/*
-	 * The three image fixups, exposed for the self test.
+	 * The three image fixups, exposed rather than kept file-local.
 	 *
-	 * They are here rather than kept file-local because they are the part of the
-	 * mapper that decides whether an image is safe to run, and that is exactly
-	 * the part worth testing against hand-built images: none of it touches the
-	 * kernel, so all of it can be exercised in user mode.
+	 * They are the part of the mapper that decides whether an image is safe to
+	 * run, and that is exactly the part worth testing against hand-built
+	 * images: none of it touches the kernel, so all of it can be exercised in
+	 * user mode.
 	 *
 	 * RelocateImageByDelta and FixSecurityCookie are pure. ResolveImports takes
 	 * the resolver to use rather than calling the kernel helpers itself, so the

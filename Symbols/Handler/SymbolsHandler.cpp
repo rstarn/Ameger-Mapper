@@ -289,7 +289,6 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 		L"_DRIVER_OBJECT.DriverSection",
 		L"_DRIVER_OBJECT.DriverUnload",
 		L"_DEVICE_OBJECT.DriverObject",
-		L"_DRIVER_EXTENSION.AddDevice",
 		L"_RTL_AVL_TABLE.DeleteCount",
 		L"_DRIVER_OBJECT.DriverStart",
 		L"_DRIVER_OBJECT.DriverSize",

@@ -451,7 +451,7 @@ int wmain(const int argc, wchar_t** argv) {
 		Log(L"[+] Copying driver header enabled" << std::endl);
 	}
 
-bool UpdateOffset = !(paramExists(argc, argv, L"dontUpdateOffsets") > 0);
+	bool UpdateOffset = !(paramExists(argc, argv, L"dontUpdateOffsets") > 0);
 	int FilePathParamIdx = paramExists(argc, argv, L"offsetsPath");
 	std::wstring offsetFilePath = Utilities::GetCurrentAppFolder() + L"\\Offsets.ini";
 
@@ -564,7 +564,7 @@ bool UpdateOffset = !(paramExists(argc, argv, L"dontUpdateOffsets") > 0);
 		return -1;
 	}
 
-if (!SymbolsHandler::GetInstance()->ReloadFile(offsetFilePath, UpdateOffset ? Utilities::GetCurrentAppFolder() + L"\\" + SYMBOL_TOOL_EXE : L"")) {
+	if (!SymbolsHandler::GetInstance()->ReloadFile(offsetFilePath, UpdateOffset ? Utilities::GetCurrentAppFolder() + L"\\" + SYMBOL_TOOL_EXE : L"")) {
 		Log(L"[-] Error: Failed To Get Symbols Info." << std::endl);
 		PauseBeforeExit();
 		return -1;
@@ -587,7 +587,7 @@ if (!SymbolsHandler::GetInstance()->ReloadFile(offsetFilePath, UpdateOffset ? Ut
 		mode = Mapper::AllocationMode::AllocateIndependentPages;
 	}
 
-	if (!Mapper::MapDriver(raw_image.data(), raw_image.size(), 0, 0, free, !copyHeader, mode, passAllocationPtr, nullptr)) {
+	if (!Mapper::MapDriver(raw_image.data(), raw_image.size(), 0, 0, free, !copyHeader, mode, passAllocationPtr)) {
 		Log(L"[-] Failed to map " << Val(driver_path) << std::endl);
 		Driver::Unload();
 		PauseBeforeExit();

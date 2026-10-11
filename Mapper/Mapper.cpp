@@ -253,7 +253,7 @@ bool Mapper::ResolveImports(const PE::vec_imports& imports, ImportResolver resol
  * its first section - but everything that is written or freed uses realBase, so
  * the shifted base is only ever used to compute addresses.
  */
-ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 param2, bool free, bool destroyHeader, AllocationMode mode, bool PassAllocationAddressAsFirstParam, mapCallback callback, NTSTATUS* exitCode) {
+ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 param2, bool free, bool destroyHeader, AllocationMode mode, bool PassAllocationAddressAsFirstParam, NTSTATUS* exitCode) {
 
 	if (!data || data_size == 0) {
 		Log(L"[-] No image data to map" << std::endl);
@@ -525,15 +525,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 * Reached by hooking NtAddAtom (see Driver::CallKernelFunction), which
 		 * is why a failure here is reported rather than fatal.
 		 */
-const ULONG64 address_of_entry_point = kernel_image_base + nt_headers->OptionalHeader.AddressOfEntryPoint;
-
-		if (callback) {
-			if (!callback(&param1, &param2, realBase, image_size)) {
-				Log(L"[-] Callback returns false, failed!" << std::endl);
-				kernel_image_base = realBase;
-				break;
-			}
-		}
+		const ULONG64 address_of_entry_point = kernel_image_base + nt_headers->OptionalHeader.AddressOfEntryPoint;
 
 		/*
 		 * Build the DRIVER_OBJECT this driver is entered with.
@@ -681,28 +673,28 @@ const ULONG64 address_of_entry_point = kernel_image_base + nt_headers->OptionalH
 
 	} while (false);
 
-//Every failure path above breaks out with kernel_image_base reset to realBase,
-//so this release always frees the allocation itself and never the header
-//shifted address.
-VirtualFree(local_image_base, 0, MEM_RELEASE);
+	//Every failure path above breaks out with kernel_image_base reset to realBase,
+	//so this release always frees the allocation itself and never the header
+	//shifted address.
+	VirtualFree(local_image_base, 0, MEM_RELEASE);
 
-Log(L"[+] Freeing memory" << std::endl);
-bool free_status = false;
+	Log(L"[+] Freeing memory" << std::endl);
+	bool free_status = false;
 
-if (mode == AllocationMode::AllocateIndependentPages)
-{
-	free_status = Driver::MmFreeIndependentPages(kernel_image_base, image_size);
-}
-else {
-	free_status = Driver::FreePool(kernel_image_base);
-}
+	if (mode == AllocationMode::AllocateIndependentPages)
+	{
+		free_status = Driver::MmFreeIndependentPages(kernel_image_base, image_size);
+	}
+	else {
+		free_status = Driver::FreePool(kernel_image_base);
+	}
 
-if (free_status) {
-	Log(L"[+] Memory has been released" << std::endl);
-}
-else {
-	Log(L"[-] WARNING: Failed to free memory!" << std::endl);
-}
+	if (free_status) {
+		Log(L"[+] Memory has been released" << std::endl);
+	}
+	else {
+		Log(L"[-] WARNING: Failed to free memory!" << std::endl);
+	}
 
-return 0;
+	return 0;
 }

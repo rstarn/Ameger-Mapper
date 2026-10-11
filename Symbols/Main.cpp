@@ -131,7 +131,6 @@ int wmain()
 		{ L"ntoskrnl.exe", L"_DRIVER_OBJECT",             L"Flags",          true },
 		{ L"ntoskrnl.exe", L"_DRIVER_OBJECT",             L"DriverUnload",   true },
 		{ L"ntoskrnl.exe", L"_DRIVER_EXTENSION",          L"DriverObject",   true },
-		{ L"ntoskrnl.exe", L"_DRIVER_EXTENSION",          L"AddDevice",      true },
 
 		{ L"ntoskrnl.exe", L"_PiDDBCacheEntry",           L"List",           true },
 		{ L"ntoskrnl.exe", L"_PiDDBCacheEntry",           L"DriverName",     true },
@@ -290,7 +289,6 @@ int wmain()
 		{ L"_DRIVER_OBJECT",            L"DriverStart" },
 		{ L"_DEVICE_OBJECT",            L"DriverObject" },
 		{ L"_RTL_AVL_TABLE",            L"DeleteCount" },
-		{ L"_DRIVER_EXTENSION",         L"AddDevice" },
 		{ L"_DRIVER_OBJECT",            L"DriverSize" },
 		{ L"_FILE_OBJECT",              L"DeviceObject" },
 		{ L"_DRIVER_OBJECT",            L"Flags" },

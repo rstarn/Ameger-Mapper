@@ -82,11 +82,10 @@ struct DriverOffsets {
 	uint32_t DriverObject_Flags = 0x10;
 	uint32_t DriverObject_DriverUnload = 0x68;
 	uint32_t DriverExtension_DriverObject = 0x00;
-	uint32_t DriverExtension_AddDevice = 0x08;
 
-	//How many of the eight fields above were replaced with this build's own.
+	//How many of the seven fields above were replaced with this build's own.
 	uint32_t DriverObjectResolvedCount = 0;
-	static constexpr uint32_t kDriverObjectResolvableFieldCount = 8;
+	static constexpr uint32_t kDriverObjectResolvableFieldCount = 7;
 
 	void LoadFromSymbols() {
 		const auto lookup = [](const wchar_t* name, uint32_t& target) {
@@ -135,7 +134,6 @@ struct DriverOffsets {
 		object_fields += lookup(L"_DRIVER_OBJECT.Flags", DriverObject_Flags) ? 1u : 0u;
 		object_fields += lookup(L"_DRIVER_OBJECT.DriverUnload", DriverObject_DriverUnload) ? 1u : 0u;
 		object_fields += lookup(L"_DRIVER_EXTENSION.DriverObject", DriverExtension_DriverObject) ? 1u : 0u;
-		object_fields += lookup(L"_DRIVER_EXTENSION.AddDevice", DriverExtension_AddDevice) ? 1u : 0u;
 		DriverObjectResolvedCount = object_fields;
 	}
 };
@@ -332,12 +330,21 @@ namespace Driver
 		//unaligned access and undefined behaviour.
 		memcpy(&kernel_injected_jmp[2], &kernel_function_address, sizeof(kernel_function_address));
 
-		//Cached: the export is the same for the whole run, and resolving it
-		//walks the kernel export directory on every single kernel call.
-		static uint64_t kernel_NtAddAtom = GetKernelModuleExport(Driver::ntoskrnlAddr, "NtAddAtom");
+		//Cached once resolved: the export is the same for the whole run, and
+		//resolving it walks the kernel export directory.
+		//
+		//Retry-on-zero, not one-shot static initialisation. A one-shot
+		//initialiser runs on the first call only, so a first call made before
+		//ntoskrnlAddr was resolved cached 0 forever and every later call
+		//reported the same failure without retrying. Same shape as the export
+		//resolvers in Driver.cpp.
+		static uint64_t kernel_NtAddAtom = 0;
 		if (!kernel_NtAddAtom) {
-			Log(L"[-] Failed to get export ntoskrnl.NtAddAtom" << std::endl);
-			return false;
+			kernel_NtAddAtom = GetKernelModuleExport(Driver::ntoskrnlAddr, "NtAddAtom");
+			if (!kernel_NtAddAtom) {
+				Log(L"[-] Failed to get export ntoskrnl.NtAddAtom" << std::endl);
+				return false;
+			}
 		}
 
 		if (!ReadMemory(kernel_NtAddAtom, &original_kernel_function, sizeof(kernel_injected_jmp)))

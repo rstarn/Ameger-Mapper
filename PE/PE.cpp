@@ -69,7 +69,7 @@ bool PE::GetRelocs(void* image_base, size_t image_size, vec_relocs& relocs) {
 	 * x64 image_base is always a large address, so that sum exceeded the length
 	 * on the very first block and GetRelocs refused every image that carried a
 	 * .reloc directory. It never showed up because the only driver ever mapped
-	 * had no relocations at all; --selftest catches it.
+	 * had no relocations at all; mapping a relocatable image catches it.
 	 */
 	const ULONG64 image_end = reinterpret_cast<ULONG64>(image_base) + image_size;
 	auto current_base_relocation = reinterpret_cast<PIMAGE_BASE_RELOCATION>(reinterpret_cast<ULONG64>(image_base) + reloc_va);

