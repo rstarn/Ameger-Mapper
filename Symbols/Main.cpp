@@ -51,12 +51,18 @@ namespace
 	//A structure field resolved from a module's PDB type stream. optional
 	//mirrors the request: a non-optional miss is reported as a warning, an
 	//optional miss stays silent.
+	//
+	//Resolved is separate from offset because a field can legitimately resolve
+	//to offset 0, and treating that as a miss silently dropped
+	//_DRIVER_EXTENSION.DriverObject from the generated file.
 	struct ResolvedField {
 		std::wstring structName;
 		std::wstring fieldName;
 		std::wstring matchedName;
 		uint64_t offset = 0;
 		bool optional = false;
+
+		bool Resolved() const { return !matchedName.empty(); }
 	};
 }
 
@@ -102,6 +108,31 @@ int wmain()
 		{ L"ntoskrnl.exe", L"_DRIVER_OBJECT",             L"DriverSection" },
 		{ L"ntoskrnl.exe", L"_KLDR_DATA_TABLE_ENTRY",     L"BaseDllName" },
 		{ L"ntoskrnl.exe", L"_RTL_AVL_TABLE",             L"DeleteCount" },
+
+		/*
+		 * Fields the mapper writes when it builds the DRIVER_OBJECT it hands to a
+		 * driver's DriverEntry. A driver reaches IoCreateDevice before it has
+		 * registered anything, and IoCreateDevice reads DriverExtension and the
+		 * extension's own back-reference - so all of these have to be this
+		 * build's real offsets, not a guess.
+		 *
+		 * Optional: a build that does not publish one of them falls back to the
+		 * compiled default, and Driver::CreateDriverObjectForEntry validates what
+		 * it wrote rather than trusting the layout blindly.
+		 *
+		 * _DRIVER_EXTENSION has no Size member in the PDB type stream - its
+		 * first member is DriverObject, the back-pointer - so nothing is
+		 * requested for Size and nothing is written there.
+		 */
+		{ L"ntoskrnl.exe", L"_DRIVER_OBJECT",             L"Size",           true },
+		{ L"ntoskrnl.exe", L"_DRIVER_OBJECT",             L"DriverStart",    true },
+		{ L"ntoskrnl.exe", L"_DRIVER_OBJECT",             L"DriverSize",     true },
+		{ L"ntoskrnl.exe", L"_DRIVER_OBJECT",             L"DriverExtension",true },
+		{ L"ntoskrnl.exe", L"_DRIVER_OBJECT",             L"Flags",          true },
+		{ L"ntoskrnl.exe", L"_DRIVER_OBJECT",             L"DriverUnload",   true },
+		{ L"ntoskrnl.exe", L"_DRIVER_EXTENSION",          L"DriverObject",   true },
+		{ L"ntoskrnl.exe", L"_DRIVER_EXTENSION",          L"AddDevice",      true },
+
 		{ L"ntoskrnl.exe", L"_PiDDBCacheEntry",           L"List",           true },
 		{ L"ntoskrnl.exe", L"_PiDDBCacheEntry",           L"DriverName",     true },
 		{ L"ntoskrnl.exe", L"_PiDDBCacheEntry",           L"TimeDateStamp",  true },
@@ -188,10 +219,20 @@ int wmain()
 
 		content << L"[" << name << L".fields]" << std::endl;
 		for (size_t i = 0; i < fields.size(); i++) {
-			//Only publish what actually resolved: a zero entry would look like a
-			//legitimate offset of zero. Missing fields fall back to the compiled
-			//default plus runtime validation in the mapper.
-			if (fieldResults[i].offset == 0) {
+			/*
+			 * Publish anything that resolved, including one at offset 0.
+			 *
+			 * The previous test was offset != 0, which dropped
+			 * _DRIVER_EXTENSION.DriverObject: it really is the first member, so
+			 * its resolved offset is 0, and writing "=0" was mistaken for a
+			 * missing entry. The mapper then used its compiled default without
+			 * saying so - which happened to be the same number, so the bug was
+			 * invisible until a build where the two differ.
+			 *
+			 * A genuine miss has an empty matchedName and is still skipped, so
+			 * the file never carries an entry that means nothing.
+			 */
+			if (!fieldResults[i].Resolved()) {
 				continue;
 			}
 			content << fields[i].structName << L"." << fields[i].fieldName << L"=" << std::dec << fieldResults[i].offset << std::endl;
@@ -215,6 +256,20 @@ int wmain()
 	 * so the two PDBs do not split the symbol block and the fields do not land
 	 * in the middle of it. The lists below only decide the order; the values
 	 * come from the resolution pass above.
+	 *
+	 * Field order groups what a reader is looking at, not what the request list
+	 * happened to be in:
+	 *
+	 *   - the offsets the cleanup walks dereference to reach an object come
+	 *     first, because a wrong one is a write into the wrong kernel structure
+	 *   - then the DRIVER_OBJECT members the mapper writes when it builds the
+	 *     object it hands to DriverEntry
+	 *   - then the extension members, whose layout is what makes a real
+	 *     IoCreateDevice work
+	 *
+	 * Anything the list does not name keeps its resolution order and is still
+	 * reported, so a newly requested field can never silently disappear from
+	 * the report by being absent here.
 	 */
 	const std::vector<std::wstring> symbolReportOrder{
 		L"MmAllocateIndependentPagesEx",
@@ -227,11 +282,19 @@ int wmain()
 		L"MmPteBase",
 	};
 	const std::vector<std::pair<std::wstring, std::wstring>> fieldReportOrder{
-		{ L"_KLDR_DATA_TABLE_ENTRY", L"BaseDllName" },
-		{ L"_DRIVER_OBJECT",         L"DriverSection" },
-		{ L"_DEVICE_OBJECT",         L"DriverObject" },
-		{ L"_RTL_AVL_TABLE",         L"DeleteCount" },
-		{ L"_FILE_OBJECT",           L"DeviceObject" },
+		{ L"_KLDR_DATA_TABLE_ENTRY",    L"BaseDllName" },
+		{ L"_DRIVER_OBJECT",            L"DriverExtension" },
+		{ L"_DRIVER_EXTENSION",         L"DriverObject" },
+		{ L"_DRIVER_OBJECT",            L"DriverSection" },
+		{ L"_DRIVER_OBJECT",            L"DriverUnload" },
+		{ L"_DRIVER_OBJECT",            L"DriverStart" },
+		{ L"_DEVICE_OBJECT",            L"DriverObject" },
+		{ L"_RTL_AVL_TABLE",            L"DeleteCount" },
+		{ L"_DRIVER_EXTENSION",         L"AddDevice" },
+		{ L"_DRIVER_OBJECT",            L"DriverSize" },
+		{ L"_FILE_OBJECT",              L"DeviceObject" },
+		{ L"_DRIVER_OBJECT",            L"Flags" },
+		{ L"_DRIVER_OBJECT",            L"Size" },
 	};
 
 	//Rank by position in the fixed order. An entry the list does not name - a
@@ -267,14 +330,17 @@ int wmain()
 
 	//Group B: structure fields.
 	for (const auto& field : resolvedFields) {
-		if (field.offset != 0) {
-			//The field can resolve through a differently named copy of the type.
+		if (field.Resolved()) {
+			//Field | Offset = 0x.., so the name and the value are separated by a
+			//delimiter that is not part of either and that stays readable when the
+			//name is long. The alternate-spelling note goes before the delimiter,
+			//because it qualifies the name rather than the value.
 			if (!field.matchedName.empty() && field.matchedName != field.structName)
-				Log(L"[+] Field " << Val(field.structName) << L" (as " << Val(field.matchedName) << L")."
-					<< Val(field.fieldName) << L" Offset: " << Val(Hex(field.offset)) << std::endl);
+				Log(L"[+] Field " << Val(field.structName) << L"." << Val(field.fieldName)
+					<< L" (as " << Val(field.matchedName) << L") | Offset = " << Val(Hex(field.offset)) << std::endl);
 			else
-				Log(L"[+] Field " << Val(field.structName) << L"."
-					<< Val(field.fieldName) << L" Offset: " << Val(Hex(field.offset)) << std::endl);
+				Log(L"[+] Field " << Val(field.structName) << L"." << Val(field.fieldName)
+					<< L" | Offset = " << Val(Hex(field.offset)) << std::endl);
 		}
 		else if (!field.optional) {
 			//An optional field is expected to miss: it is not in the public PDB
@@ -305,7 +371,9 @@ int wmain()
 		return -1;
 	}
 
-	Log(L"[+] Wrote " << Val(outputPath) << std::endl);
-	LogBlank();
+	//The "Wrote" line is emitted by the reader that consumes this file, inside
+	//its symbol report, so that it lands between MmPteBase and g_HashCacheLock
+	//rather than at the head of the mapper's symbol list. Printing it here as
+	//well would show it once for each of the two programs.
 	return 0;
 }

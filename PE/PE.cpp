@@ -61,7 +61,17 @@ bool PE::GetRelocs(void* image_base, size_t image_size, vec_relocs& relocs) {
 		reloc_size > image_size - reloc_va)
 		return false;
 
-	const auto reloc_limit = static_cast<ULONG64>(image_size);
+	/*
+	 * End of the buffer, as an address rather than a length.
+	 *
+	 * This used to be `image_size` on its own, which is a length, and it was
+	 * compared against `block_start + SizeOfBlock` - an absolute address. On
+	 * x64 image_base is always a large address, so that sum exceeded the length
+	 * on the very first block and GetRelocs refused every image that carried a
+	 * .reloc directory. It never showed up because the only driver ever mapped
+	 * had no relocations at all; --selftest catches it.
+	 */
+	const ULONG64 image_end = reinterpret_cast<ULONG64>(image_base) + image_size;
 	auto current_base_relocation = reinterpret_cast<PIMAGE_BASE_RELOCATION>(reinterpret_cast<ULONG64>(image_base) + reloc_va);
 	const ULONG64 reloc_end = reinterpret_cast<ULONG64>(current_base_relocation) + reloc_size;
 
@@ -74,7 +84,7 @@ bool PE::GetRelocs(void* image_base, size_t image_size, vec_relocs& relocs) {
 		//applied relocation set leaves pointers aimed at the preferred base,
 		//and the first use of one is a bugcheck.
 		if (current_base_relocation->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) ||
-			block_start + current_base_relocation->SizeOfBlock > reloc_limit)
+			block_start + current_base_relocation->SizeOfBlock > image_end)
 			return false;
 
 		RelocInfo reloc_info;

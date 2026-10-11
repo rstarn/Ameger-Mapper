@@ -12,9 +12,24 @@
  */
 
 #include <Windows.h>
+#include <string>
+
+#include "../PE/PE.hpp"
 
 namespace Mapper
 {
+	//One import being resolved, handed to an ImportResolver.
+	//name is null when the import is by ordinal rather than by name.
+	struct ImportLookup {
+		ULONG64 module_base;
+		const std::string* name;
+		uint16_t ordinal;
+	};
+
+	//Resolves one import to a kernel address, written to out_address.
+	//Returns false when the named function, or the ordinal, is not present in
+	//the module the descriptor named. out_address is only written on success.
+	typedef bool (*ImportResolver)(const ImportLookup& request, void* context, ULONG64& out_address);
 	//Where the kernel side of the image is allocated.
 	enum class AllocationMode
 	{
@@ -56,4 +71,32 @@ namespace Mapper
 	 */
 	//Note: if you set PassAllocationAddressAsFirstParam as true, param1 will be ignored
 	ULONG64 MapDriver(BYTE* data, size_t data_size, ULONG64 param1 = 0, ULONG64 param2 = 0, bool free = false, bool destroyHeader = true, AllocationMode mode = AllocationMode::AllocatePool, bool PassAllocationAddressAsFirstParam = false, mapCallback callback = nullptr, NTSTATUS* exitCode = nullptr);
+
+	/*
+	 * The three image fixups, exposed for the self test.
+	 *
+	 * They are here rather than kept file-local because they are the part of the
+	 * mapper that decides whether an image is safe to run, and that is exactly
+	 * the part worth testing against hand-built images: none of it touches the
+	 * kernel, so all of it can be exercised in user mode.
+	 *
+	 * RelocateImageByDelta and FixSecurityCookie are pure. ResolveImports takes
+	 * the resolver to use rather than calling the kernel helpers itself, so the
+	 * same code path can be driven with a stub table instead of a live kernel.
+	 * MapDriver supplies the real resolver; see the default in Mapper.cpp.
+	 */
+
+	//Applies DIR64 fixups by delta inside [image_base, image_base+image_size).
+	//Returns false on an unsupported relocation type or a target outside the
+	//image, in both cases having applied nothing further.
+	bool RelocateImageByDelta(const PE::vec_relocs& relocs, ULONG64 delta, ULONG64 image_base, ULONG64 image_size);
+
+	//Rewrites /GS security cookie so it matches the base the image runs at.
+	//Returns false only when the headers themselves cannot be read; a missing
+	//load config, a zero cookie and a cookie outside the image are all "nothing
+	//to fix", not failures.
+	bool FixSecurityCookie(void* local_image, size_t image_size, ULONG64 kernel_image_base);
+
+	//Fills every IAT slot. Returns false on the first unresolvable import.
+	bool ResolveImports(const PE::vec_imports& imports, ImportResolver resolver, void* context);
 }

@@ -71,9 +71,6 @@
     <Filter Include="Service">
       <UniqueIdentifier>{6fa1de76-509c-4273-c487-71afc5096256}</UniqueIdentifier>
     </Filter>
-    <Filter Include="Symbols">
-      <UniqueIdentifier>{70b2ef87-61ad-4384-d598-82b0d61a7367}</UniqueIdentifier>
-    </Filter>
     <Filter Include="Handler">
       <UniqueIdentifier>{a3e50f1a-94d0-4bbc-a7ca-b5e39d4c069a}</UniqueIdentifier>
     </Filter>

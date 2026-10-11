@@ -164,11 +164,20 @@ namespace Nt
 	 * driver image.
 	 *
 	 * Used as the lookup key for RtlLookupElementGenericTableAvl, so DriverName
-	 * and TimeDateStamp must sit at the offsets the table's own compare
-	 * routine reads them from - otherwise the comparison silently fails.
-	 * RtlLookupElementGenericTableAvl is not exported on current Windows, so
-	 * both values come from the PDB and the resulting entry is then validated
-	 * by content before anything is written.
+	 * and TimeDateStamp must sit at the offsets the table's own compare routine
+	 * reads them from - otherwise the comparison silently fails and the lookup
+	 * simply never matches.
+	 *
+	 * RtlLookupElementGenericTableAvl is resolved by name out of the ntoskrnl
+	 * export table, not out of the PDB; see Driver::RtlLookupElementGenericTableAvl.
+	 * A build that does not export it makes the lookup report 0, which is a clean
+	 * failure the caller turns into "not found in cache" rather than a write
+	 * against an unknown entry.
+	 *
+	 * The layout here is this project's own declaration: _PiDDBCacheEntry is not
+	 * a public UDT, so its members cannot be resolved from symbols. The member
+	 * offsets are therefore re-derived at run time by content before anything is
+	 * written - see Driver::LookupEntry and FindUnicodeStringFieldByContent.
 	 */
 	typedef struct _PiDDBCacheEntry
 	{
@@ -176,6 +185,9 @@ namespace Nt
 		UNICODE_STRING	DriverName;
 		ULONG			TimeDateStamp;
 		NTSTATUS		LoadStatus;
+		//Not referenced by name anywhere. Present only so the structure keeps the
+		//size the kernel gives this entry, which is what a pointer step over the
+		//array depends on. Renaming it would be wrong; reading it would be noise.
 		char			_0x0028[16]; // shim engine data, or uninitialized memory for custom drivers
 	} PiDDBCacheEntry;
 }

@@ -7,19 +7,121 @@
  * section header or a non numeric value skips that entry instead of throwing.
  */
 
-#ifdef PDB_OFFSETS
-
 #include "SymbolsHandler.hpp"
+#include <algorithm>
 #include <string>
 #include <iostream>
 #include <fstream>
 #include <filesystem>
-#include <sstream>
 #include <utility>
 #include <vector>
 
 #include "../../Utilities/Utilities.hpp"
 #include "../../Utilities/Console.hpp"
+
+namespace
+{
+	/*
+	 * Restores PATH when it goes out of scope.
+	 *
+	 * ReloadFile has to put the DLLs folder on PATH for the SymbolTool it
+	 * spawns, because dbghelp.dll and symsrv.dll live in a subfolder that is not
+	 * a default search location. That edit used to be left in place after the
+	 * call returned, so every later child process of Mapper.exe inherited a PATH
+	 * it never asked for, for the rest of the run. Restoring it here means an
+	 * early return cannot leave it behind either.
+	 */
+	class ScopedPathChange
+	{
+	public:
+		ScopedPathChange() {
+			wchar_t buffer[32768] = { 0 };
+			const DWORD length = GetEnvironmentVariableW(L"PATH", buffer, static_cast<DWORD>(std::size(buffer)));
+			//0 is "PATH was not set", which is a legitimate state to restore to.
+			//At or above the buffer size is truncation, and restoring that would
+			//replace a real PATH with a partial one - so nothing is saved and
+			//nothing is restored.
+			if (length < static_cast<DWORD>(std::size(buffer))) {
+				had_value_ = true;
+				previous_.assign(buffer, length);
+			}
+		}
+
+		~ScopedPathChange() {
+			if (had_value_)
+				SetEnvironmentVariableW(L"PATH", previous_.c_str());
+		}
+
+		ScopedPathChange(const ScopedPathChange&) = delete;
+		ScopedPathChange& operator=(const ScopedPathChange&) = delete;
+
+	private:
+		bool had_value_ = false;
+		std::wstring previous_;
+	};
+
+	/*
+	 * Run the offset updater and wait for it.
+	 *
+	 * CreateProcessW rather than _wsystem: the previous call went through
+	 * cmd.exe, which is an unnecessary interpreter between this process and a
+	 * path it already holds. Nothing here is attacker controlled, so this is not
+	 * closing a privilege escalation, but there is no reason to hand a path to a
+	 * shell in order to have it quoted.
+	 *
+	 * The child inherits stdio, so SymbolTool's report still reaches the console
+	 * exactly as it did before.
+	 *
+	 * The wait is bounded: a tool that hangs would otherwise hang the mapper
+	 * before it ever touches the kernel.
+	 */
+	bool RunSymbolTool(const std::wstring& tool_path, DWORD& exit_code) {
+		exit_code = 0;
+
+		//CreateProcessW may modify the command line buffer, so it is given a
+		//writable copy. lpApplicationName carries the real path, so the quoted
+		//command line is only there for display and argument parsing.
+		std::wstring command_line = L"\"" + tool_path + L"\"";
+
+		STARTUPINFOW startup{};
+		startup.cb = sizeof(startup);
+		PROCESS_INFORMATION process{};
+
+		if (!CreateProcessW(
+			tool_path.c_str(),
+			command_line.data(),
+			nullptr, nullptr, FALSE, 0, nullptr, nullptr,
+			&startup, &process)) {
+			Log(L"[-] Failed to start the offset updater, error "
+				<< Val(static_cast<unsigned long>(GetLastError())) << std::endl);
+			return false;
+		}
+
+		const DWORD waited = WaitForSingleObject(process.hProcess, 120000);
+
+		if (waited == WAIT_TIMEOUT) {
+			Log(L"[-] The offset updater did not finish within 120s; terminating it" << std::endl);
+			TerminateProcess(process.hProcess, 1);
+			WaitForSingleObject(process.hProcess, INFINITE);
+			CloseHandle(process.hThread);
+			CloseHandle(process.hProcess);
+			exit_code = 1;
+			return true; //it did run; the caller still checks exit_code and the file
+		}
+
+		DWORD status = 0;
+		if (waited != WAIT_OBJECT_0 || !GetExitCodeProcess(process.hProcess, &status)) {
+			CloseHandle(process.hThread);
+			CloseHandle(process.hProcess);
+			return false;
+		}
+
+		CloseHandle(process.hThread);
+		CloseHandle(process.hProcess);
+		exit_code = status;
+		return true;
+	}
+}
 
 bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::wstring& updater) {
 	symbols.clear();
@@ -42,10 +144,12 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 		//offsets instead of leaving nothing behind.
 		const std::wstring outputPath = Utilities::GetCurrentAppFolder() + L"\\Offsets.ini";
 
-		//Both live in the DLLs subfolder, which is not a default search location, so
-		//that subfolder is put on PATH for the child. _wsystem inherits this
-		//process's environment, so the spawned tool picks it up.
-		//
+		//Both symbol libraries live in the DLLs subfolder, which is not a
+		//default search location, so it has to be on PATH for the child. The
+		//change is scoped to this block and undone on the way out, including on
+		//an early return.
+		const ScopedPathChange path_restore;
+
 		//GetEnvironmentVariableW returns the required size and leaves the buffer
 		//untouched when it is too small, so building a PATH from an unchecked
 		//length would silently replace the parent's PATH with just this folder.
@@ -64,10 +168,9 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 			}
 		}
 
-		const std::wstring cmdW = L"\"" + updater + L"\"";
-		const int exitCode = _wsystem(cmdW.c_str());
-		if (exitCode != 0) {
-			Log(L"[-] Failed to update offsets (exit code " << Val(exitCode) << L")" << std::endl);
+		DWORD exitCode = 0;
+		if (!RunSymbolTool(updater, exitCode) || exitCode != 0) {
+			Log(L"[-] Failed to update offsets (exit code " << Val(static_cast<unsigned long>(exitCode)) << L")" << std::endl);
 			Log(L"[-] Offsets file expected at: " << Val(outputPath) << std::endl);
 			return false;
 		}
@@ -92,8 +195,18 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	//Lines are buffered and reported in two groups - every symbol, then every
 	//structure field - so the console report has the same shape SymbolTool.exe
 	//prints instead of interleaving each module's symbols with its own fields.
-	std::vector<std::wstring> symbolLines;
-	std::vector<std::wstring> fieldLines;
+	//
+	//Entries are held structured rather than pre-rendered: the field group is
+	//sorted by name below, and a rendered string cannot be sorted against a
+	//list of names.
+	struct LoadedEntry {
+		std::wstring section;
+		std::wstring name;
+		unsigned long long offset = 0;
+	};
+
+	std::vector<LoadedEntry> symbolEntries;
+	std::vector<LoadedEntry> fieldEntries;
 
 	std::wstring line;
 	std::wstring currentSection;
@@ -135,18 +248,20 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 			continue;
 		}
 
-		SymbolOffset sym{};
-		sym.name = name;
-		sym.offset = parsed;
-
 		const bool isField = currentSection.size() >= 7 &&
 			currentSection.compare(currentSection.size() - 7, 7, L".fields") == 0;
 
-		std::wostringstream loaded;
-		loaded << L"[+] Loaded " << Val(currentSection) << L" - " << Val(sym.name) << L" - " << Val(Hex(sym.offset));
-		(isField ? fieldLines : symbolLines).push_back(loaded.str());
+		//A duplicate name would silently shadow the earlier entry. The file is
+		//machine generated, so a repeat means the generator changed or the file
+		//was hand edited, and either way the two values disagree and the later
+		//one is being taken on trust.
+		const auto [existing, inserted] = symbols.emplace(name, parsed);
+		if (!inserted && existing->second != parsed) {
+			Log(L"[-] Duplicate entry for " << Val(name) << L" with conflicting offsets ("
+				<< Val(Hex(existing->second)) << L" vs " << Val(Hex(parsed)) << L"), keeping the first" << std::endl);
+		}
 
-		symbols.push_back(std::move(sym));
+		(isField ? fieldEntries : symbolEntries).push_back({ currentSection, name, parsed });
 
 		if (isField)
 			++fieldCount;
@@ -154,38 +269,133 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 			++symbolCount;
 	}
 
-	for (const auto& loaded : symbolLines)
-		Log(loaded << std::endl);
+	/*
+	 * Order the field group reports in.
+	 *
+	 * Offsets.ini lists fields in the order SymbolTool requested them, which is
+	 * the order they appear in the PDB walk rather than the order a reader needs.
+	 * This list groups them the way the mapper consumes them - the offsets the
+	 * cleanup walks dereference first, then the DRIVER_OBJECT members it writes
+	 * for DriverEntry, then the extension members - so a wrong offset stands out
+	 * against the structure it belongs to instead of being buried mid-list.
+	 *
+	 * A field this list does not name keeps its file order and still reports, so a
+	 * newly resolved field can never vanish from the report by being absent here.
+	 */
+	static const std::vector<std::wstring> fieldOrder{
+		L"_KLDR_DATA_TABLE_ENTRY.BaseDllName",
+		L"_DRIVER_OBJECT.DriverExtension",
+		L"_DRIVER_EXTENSION.DriverObject",
+		L"_DRIVER_OBJECT.DriverSection",
+		L"_DRIVER_OBJECT.DriverUnload",
+		L"_DEVICE_OBJECT.DriverObject",
+		L"_DRIVER_EXTENSION.AddDevice",
+		L"_RTL_AVL_TABLE.DeleteCount",
+		L"_DRIVER_OBJECT.DriverStart",
+		L"_DRIVER_OBJECT.DriverSize",
+		L"_FILE_OBJECT.DeviceObject",
+		L"_DRIVER_OBJECT.Flags",
+		L"_DRIVER_OBJECT.Size",
+	};
+
+	//fieldOrder has static storage duration, so it is visible inside the lambdas
+	//below without being captured - naming it in a capture list is an error.
+	//rank is hoisted out of the comparator so the lookup is not rebuilt on every
+	//comparison, and so the comparator only has to capture rank.
+	const auto rank = [](const std::wstring& name) {
+		for (size_t i = 0; i < fieldOrder.size(); i++)
+			if (fieldOrder[i] == name)
+				return i;
+		return fieldOrder.size();
+	};
+
+	std::stable_sort(fieldEntries.begin(), fieldEntries.end(),
+		[&rank](const LoadedEntry& a, const LoadedEntry& b) {
+			return rank(a.name) < rank(b.name);
+		});
+
+	/*
+	 * Order the symbol group reports in, and the separator style it uses.
+	 *
+	 * The order groups the offsets by what they are for rather than by the
+	 * PDB walk order SymbolTool wrote them in: the allocation primitives the
+	 * mapper calls, the PiDDBCacheTable it walks, the ci.dll hash bucket cache,
+	 * then PiDDBLock, then MmPteBase - the address the read-only write
+	 * primitive is built on, which is reported last because it is the last
+	 * thing resolved before the first kernel call.
+	 *
+	 * A symbol this list does not name keeps its file order and still reports,
+	 * so a newly resolved symbol can never vanish from the report by being
+	 * absent here.
+	 *
+	 * The "Wrote" line is printed inside this group, between MmPteBase and
+	 * g_HashCacheLock. That is not where the updater writes the file - it does
+	 * so before the mapper reads it - but the line belongs with the offsets it
+	 * produced, and the head of the group is occupied by the offsets that are
+	 * consumed first.
+	 */
+	static const std::vector<std::wstring> symbolOrder{
+		L"MmAllocateIndependentPagesEx",
+		L"MmFreeIndependentPages",
+		L"MmSetPageProtection",
+		L"PiDDBCacheTable",
+		L"g_KernelHashBucketList",
+		L"PiDDBLock",
+		L"MmPteBase",
+		L"g_HashCacheLock",
+	};
+
+	//Zero based index into the sorted symbol list at which the "Wrote" line is
+	//printed: after the seventh entry, so between MmPteBase and
+	//g_HashCacheLock.
+	const size_t wrotePosition = 7;
+
+	//Rank is hoisted out of the comparator so the lookup is not rebuilt on every
+	//comparison, and so the comparator only has to capture rank.
+	const auto symbolRank = [](const std::wstring& name) {
+		for (size_t i = 0; i < symbolOrder.size(); i++)
+			if (symbolOrder[i] == name)
+				return i;
+		return symbolOrder.size();
+	};
+
+	std::stable_sort(symbolEntries.begin(), symbolEntries.end(),
+		[&symbolRank](const LoadedEntry& a, const LoadedEntry& b) {
+			return symbolRank(a.name) < symbolRank(b.name);
+		});
+
+	size_t symbolsPrinted = 0;
+	for (const auto& entry : symbolEntries) {
+		//Only printed when the updater actually produced the file; with
+		//--dontUpdateOffsets nothing was written by this run.
+		if (usingUpdater && symbolsPrinted == wrotePosition)
+			Log(L"[+] Wrote | " << Val(path) << std::endl);
+
+		Log(L"[+] Loaded " << Val(entry.section) << L" | " << Val(entry.name)
+			<< L" | Offset = " << Val(Hex(entry.offset)) << std::endl);
+		++symbolsPrinted;
+	}
 	LogBlank();
 
-	for (const auto& loaded : fieldLines)
-		Log(loaded << std::endl);
+	for (const auto& entry : fieldEntries)
+		Log(L"[+] Loaded " << Val(entry.section) << L" | " << Val(entry.name)
+			<< L" | Offset = " << Val(Hex(entry.offset)) << std::endl);
 	LogBlank();
 
-	Log(L"[+] Loaded " << Val(symbols.size()) << L" offsets (" << Val(symbolCount)
-		<< L" symbols, " << Val(fieldCount) << L" fields) from " << Val(path) << std::endl);
+	Log(L"[+] Loaded " << Val(symbols.size()) << L" Offsets (" << Val(symbolCount)
+		<< L" Symbols, " << Val(fieldCount) << L" Fields) From " << Val(path) << std::endl);
 	LogBlank();
 	return true;
 }
 
 unsigned long long SymbolsHandler::GetOffset(const std::wstring& name) {
-	for (const auto& sym : symbols) {
-		if (sym.name == name) {
-			return sym.offset;
-		}
-	}
-	return 0;
+	const auto it = symbols.find(name);
+	return it == symbols.end() ? 0 : it->second;
 }
 
 //Structure field offsets are stored as "<Struct>.<Field>" entries and are
 //unique, so a plain lookup is enough.
 unsigned long long SymbolsHandler::GetFieldOffset(const std::wstring& structAndField) {
-	for (const auto& sym : symbols) {
-		if (sym.name == structAndField) {
-			return sym.offset;
-		}
-	}
-	return kFieldUnresolved;
+	const auto it = symbols.find(structAndField);
+	return it == symbols.end() ? kFieldUnresolved : it->second;
 }
-
-#endif

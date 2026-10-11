@@ -4,15 +4,16 @@
  * Order of operations, which matters:
  *   1. install the crash handler, so a failure still unloads the provider
  *   2. parse arguments, then prompt for a driver path when none was given
- *   3. resolve Offsets.ini (running SymbolTool.exe unless told not to)
- *   4. verify the driver file exists
+ *   3. read and validate the driver file, keeping the validated bytes
+ *   4. resolve Offsets.ini (running SymbolTool.exe unless told not to)
  *   5. load the provider and prepare offsets
  *   6. map the driver and call its entry point
  *   7. unload the provider
  *
  * Steps 5 and 6 are the only ones that touch the kernel, and they only run once
  * the file has been fully validated, so a bad path never gets as far as
- * loading anything.
+ * loading anything. Step 3 also keeps the bytes it validated: the image that is
+ * mapped is the one that was summarised, not a later re-read of the same path.
  */
 
 #include <Windows.h>
@@ -38,10 +39,7 @@
 #include "../Utilities/Utilities.hpp"
 #include "../Utilities/Console.hpp"
 #include "../Provider/Driver.hpp"
-
-#ifdef PDB_OFFSETS
 #include "../Symbols/Handler/SymbolsHandler.hpp"
-#endif
 
 /*
  * Console colour and layout come from Console.hpp, which is shared with
@@ -171,12 +169,12 @@ namespace
 		WinVerifyTrust(nullptr, &policy, &trust_data);
 
 		if (status == ERROR_SUCCESS)
-			return L"signed";
+			return L"Signed";
 		if (status == static_cast<LONG>(TRUST_E_NOSIGNATURE))
-			return L"unsigned";
+			return L"Unsigned";
 
 		std::wostringstream stream;
-		stream << L"unsigned (trust error 0x" << std::hex << std::uppercase
+		stream << L"Unsigned (trust error 0x" << std::hex << std::uppercase
 			<< std::setw(8) << std::setfill(L'0') << static_cast<unsigned long>(status) << L")";
 		return stream.str();
 	}
@@ -185,12 +183,18 @@ namespace
 	 * Print a short summary of the driver file at `path` and report whether it
 	 * is a usable PE image.
 	 *
+	 * On success out_image holds the exact bytes that were read and summarised.
+	 * Those same bytes are what the mapper is given later, which is what keeps
+	 * the file from being a second one between validation and use: a summary
+	 * taken from one copy and an image loaded from a later re-read is a window
+	 * where the two can differ.
+	 *
 	 * Returns false, after printing a red reason, when the file cannot be read
 	 * or has no parseable PE headers. A file that is not a PE image could never
 	 * be mapped, so the caller refuses it rather than handing it to the mapper.
 	 * Everything here runs in user mode, before the provider is loaded.
 	 */
-	bool DescribeDriverImage(const std::wstring& path) {
+	bool DescribeDriverImage(const std::wstring& path, std::vector<BYTE>* out_image) {
 		std::vector<BYTE> image;
 		if (!Utilities::ReadFileToMemory(path, &image) || image.empty()) {
 			Log(L"[-] Failed to read \"" << Val(path) << L"\"" << std::endl);
@@ -223,7 +227,7 @@ namespace
 		LogBlank();
 
 		const uint64_t size = static_cast<uint64_t>(image.size());
-		const std::wstring size_text = GroupThousands(size) + L" bytes (" + HumanReadableSize(size) + L")";
+		const std::wstring size_text = GroupThousands(size) + L" Bytes (" + HumanReadableSize(size) + L")";
 		Log(L"[+] Size:         " << Val(size_text) << std::endl);
 
 		Log(L"[+] SHA-256:      " << Val(Sha256Hex(image)) << std::endl);
@@ -269,14 +273,19 @@ namespace
 				sections.push_back(L' ');
 			sections += Utilities::ToWide(name);
 		}
-		Log(L"[+] Sections:     " << Val(sections.empty() ? L"(none)" : sections) << std::endl);
+		Log(L"[+] Sections:     " << Val(sections.empty() ? L"(None)" : sections) << std::endl);
 		LogBlank();
 
 		const auto& reloc = nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
-		Log(L"[+] Relocations:  " << Val(reloc.VirtualAddress && reloc.Size ? L"present" : L"absent") << std::endl);
+		Log(L"[+] Relocations:  " << Val(reloc.VirtualAddress && reloc.Size ? L"Present" : L"Absent") << std::endl);
 
 		Log(L"[+] Signature:    " << Val(SignatureStatus(path)) << std::endl);
 		LogBlank();
+
+		//Hand back the bytes that were just summarised. The mapper maps these,
+		//never a later re-read of the same path.
+		if (out_image)
+			*out_image = std::move(image);
 
 		return true;
 	}
@@ -291,8 +300,11 @@ namespace
 	 * mapped, so it is rejected here and the prompt comes back. Returns an empty
 	 * string when the console input ends (closed or redirected to nothing),
 	 * which the caller treats as "no path was given".
+	 *
+	 * out_image receives the validated bytes, the same ones DescribeDriverImage
+	 * summarised.
 	 */
-	std::wstring PromptForDriverPath() {
+	std::wstring PromptForDriverPath(std::vector<BYTE>* out_image) {
 		for (;;) {
 			LogRaw(L"Driver path: ");
 
@@ -323,7 +335,7 @@ namespace
 			}
 			//The file is readable and is a regular file: summarise it. A file
 			//that is not a PE image can never be mapped, so that re-prompts too.
-			if (!DescribeDriverImage(path))
+			if (!DescribeDriverImage(path, out_image))
 				continue;
 			return path;
 		}
@@ -398,12 +410,7 @@ int paramExists(const int argc, wchar_t** argv, const wchar_t* param) {
 void help() {
 	LogBlank();
 	LogRaw(L"[+] Usage: Mapper.exe [--free][--indPages][--PassAllocationPtr][--copy-header][--no-forensics]");
-
-#ifdef PDB_OFFSETS
-	LogRaw(L"[--dontUpdateOffsets [--offsetsPath \"FilePath\"]]");
-#endif
-
-	LogRaw(L" [driver.sys]" << std::endl);
+	LogRaw(L"[--dontUpdateOffsets [--offsetsPath \"FilePath\"]] [driver.sys]" << std::endl);
 	LogRaw(L"[+] Run with no driver path to be prompted for one interactively." << std::endl);
 }
 
@@ -444,8 +451,7 @@ int wmain(const int argc, wchar_t** argv) {
 		Log(L"[+] Copying driver header enabled" << std::endl);
 	}
 
-#ifdef PDB_OFFSETS
-	bool UpdateOffset = !(paramExists(argc, argv, L"dontUpdateOffsets") > 0);
+bool UpdateOffset = !(paramExists(argc, argv, L"dontUpdateOffsets") > 0);
 	int FilePathParamIdx = paramExists(argc, argv, L"offsetsPath");
 	std::wstring offsetFilePath = Utilities::GetCurrentAppFolder() + L"\\Offsets.ini";
 
@@ -468,7 +474,6 @@ int wmain(const int argc, wchar_t** argv) {
 		offsetFilePath = argv[FilePathParamIdx + 1];
 		Log(L"[+] Setting Offsets File Path To: " << Val(offsetFilePath) << std::endl);
 	}
-#endif
 
 	//Warn on any argument that looks like a flag but was not recognized. A typo
 	//in an option name would otherwise be silently ignored, and the run would
@@ -513,6 +518,12 @@ int wmain(const int argc, wchar_t** argv) {
 		Log(L"[+] Forensic cleanup disabled (--no-forensics)" << std::endl);
 	}
 
+	/*
+	 * The image bytes, filled in by whichever branch below validated the file.
+	 * These are the bytes that were summarised, and they are the bytes that get
+	 * mapped: nothing re-reads the path in between.
+	 */
+	std::vector<BYTE> raw_image;
 	std::wstring driver_path;
 	if (drvIndex > 0) {
 		//A path was given on the command line: skip the prompt and behave
@@ -527,14 +538,14 @@ int wmain(const int argc, wchar_t** argv) {
 
 		//Summarise the file and refuse a non PE image, the same gate the
 		//interactive prompt applies.
-		if (!DescribeDriverImage(driver_path)) {
+		if (!DescribeDriverImage(driver_path, &raw_image)) {
 			PauseBeforeExit();
 			return -1;
 		}
 	}
 	else {
 		//No path argument: ask for one interactively.
-		driver_path = PromptForDriverPath();
+		driver_path = PromptForDriverPath(&raw_image);
 		if (driver_path.empty()) {
 			//Input ended before a usable path was entered.
 			help();
@@ -543,23 +554,29 @@ int wmain(const int argc, wchar_t** argv) {
 		}
 	}
 
-#ifdef PDB_OFFSETS
-	if (!SymbolsHandler::GetInstance()->ReloadFile(offsetFilePath, UpdateOffset ? Utilities::GetCurrentAppFolder() + L"\\" + SYMBOL_TOOL_EXE : L"")) {
+	if (raw_image.empty()) {
+		//Both branches above only return a path once DescribeDriverImage has
+		//handed back a non empty buffer, so this cannot normally fire. It is
+		//checked anyway because it is the one condition that would otherwise let
+		//an empty buffer reach the mapper.
+		Log(L"[-] Driver image is empty" << std::endl);
+		PauseBeforeExit();
+		return -1;
+	}
+
+if (!SymbolsHandler::GetInstance()->ReloadFile(offsetFilePath, UpdateOffset ? Utilities::GetCurrentAppFolder() + L"\\" + SYMBOL_TOOL_EXE : L"")) {
 		Log(L"[-] Error: Failed To Get Symbols Info." << std::endl);
 		PauseBeforeExit();
 		return -1;
 	}
-#endif
 
+	/*
+	 * The provider is loaded only now that the image has been read and
+	 * validated. Loading it before the file was known to be readable left a
+	 * dropped driver, a service key and a loaded driver to unwind for a file
+	 * read that was going to fail anyway.
+	 */
 	if (!NT_SUCCESS(Driver::Load())) {
-		PauseBeforeExit();
-		return -1;
-	}
-
-	std::vector<uint8_t> raw_image = { 0 };
-	if (!Utilities::ReadFileToMemory(driver_path, &raw_image)) {
-		Log(L"[-] Failed to read image to memory" << std::endl);
-		Driver::Unload();
 		PauseBeforeExit();
 		return -1;
 	}
@@ -570,8 +587,7 @@ int wmain(const int argc, wchar_t** argv) {
 		mode = Mapper::AllocationMode::AllocateIndependentPages;
 	}
 
-	NTSTATUS exitCode = 0;
-	if (!Mapper::MapDriver(raw_image.data(), raw_image.size(), 0, 0, free, !copyHeader, mode, passAllocationPtr, nullptr, &exitCode)) {
+	if (!Mapper::MapDriver(raw_image.data(), raw_image.size(), 0, 0, free, !copyHeader, mode, passAllocationPtr, nullptr)) {
 		Log(L"[-] Failed to map " << Val(driver_path) << std::endl);
 		Driver::Unload();
 		PauseBeforeExit();

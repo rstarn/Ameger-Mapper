@@ -540,8 +540,12 @@ std::vector<SymbolEngine::FieldResult> SymbolEngine::GetStructFieldOffsets(const
 		//the console report.
 		FieldResult result{};
 		std::wstring matchedName;
-		if (GetFieldOffsetInternal((HANDLE)process, ModBase, structName, fieldName, result.offset, matchedName))
+		if (GetFieldOffsetInternal((HANDLE)process, ModBase, structName, fieldName, result.offset, matchedName)) {
+			//Set even when the offset is 0: that is how the caller tells a field
+			//that legitimately sits at the start of the struct from one that was
+			//not found.
 			result.matchedName = matchedName;
+		}
 
 		results.push_back(result);
 	}

@@ -2,10 +2,8 @@
 
 #pragma once
 
-#ifdef PDB_OFFSETS
-
 #include <string>
-#include <vector>
+#include <unordered_map>
 
 //Name of the offset generator built by Template\SymbolTool.vcxproj. It is
 //deployed next to Mapper.exe and is what --dontUpdateOffsets turns off.
@@ -21,12 +19,6 @@
 //folder on PATH. ReloadFile does that for the process it spawns, and
 //Build\Executors\Create.bat does it for its own invocation.
 #define SYMBOL_DLL_FOLDER L"DLLs"
-
-//One entry of Offsets.ini: a symbol name and its offset from the module base.
-struct SymbolOffset {
-	unsigned long long offset{};
-	std::wstring name{};
-};
 
 /*
  * Reader for Offsets.ini, the file SymbolTool.exe writes.
@@ -74,16 +66,26 @@ public:
 	//Offset of a structure field, stored as "<Struct>.<Field>".
 	//Returns kFieldUnresolved when the field could not be resolved from the
 	//PDB, which is a normal outcome for types that are not public UDTs.
+	//
+	//The sentinel is deliberately not 0: a field can legitimately resolve to
+	//offset 0, and reusing the "not found" value of GetOffset for it meant a
+	//caller could not tell "this field is at the start of the struct" from
+	//"this field is not in the PDB". Callers compare against the sentinel
+	//itself, so the two are now distinguishable.
 	unsigned long long GetFieldOffset(const std::wstring& structAndField);
 
-	//Static layouts of internal types are not part of any public ABI. When a
-	//field offset could not be resolved from the PDB, callers fall back to the
-	//compiled default and must additionally validate the structure before
-	//writing to it.
-	static constexpr unsigned long long kFieldUnresolved = 0;
+	//Returned by GetFieldOffset when no offset could be resolved. Deliberately
+	//outside the range of any real member offset.
+	static constexpr unsigned long long kFieldUnresolved = ~0ULL;
 
 private:
-	std::vector<SymbolOffset> symbols{};
+	/*
+	 * Every entry, keyed by name.
+	 *
+	 * A map rather than the list this used to hold. GetOffset and
+	 * GetFieldOffset are called from the kernel structure walks, where the
+	 * WdFilter discovery in particular looks a field up once per candidate
+	 * offset, so a linear scan turned a bounded search into a quadratic one.
+	 */
+	std::unordered_map<std::wstring, unsigned long long> symbols{};
 };
-
-#endif

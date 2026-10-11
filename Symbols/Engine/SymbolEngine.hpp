@@ -60,13 +60,22 @@ public:
 	//mistaken for a complete one.
 	std::vector<uint64_t> GetOffset(const std::wstring& pdbPath, const std::vector<std::wstring>& symbolName);
 
-	//One resolved structure field. offset is 0 when the field could not be
+//One resolved structure field. offset is 0 when the field could not be
 	//resolved. matchedName is the spelling the type was found under, which can
-	//differ from the requested struct name for the internal types that appear
-	//under several names in the PDB; empty on a miss.
+	// differ from the requested struct name for the internal types that appear
+	// under several names in the PDB; empty on a miss.
+	//
+	//Resolved() is the test for "was this field found", and it is deliberately
+	//not offset != 0: _DRIVER_EXTENSION.DriverObject really does live at offset
+	//0, so a caller that skipped zero-valued fields would drop it and the mapper
+	//would silently fall back to a compiled default while the file claimed the
+	//field was simply absent.
 	struct FieldResult {
 		uint64_t offset = 0;
 		std::wstring matchedName{};
+
+		//True when the type was located, whether or not the field sits at 0.
+		bool Resolved() const { return !matchedName.empty(); }
 	};
 
 	//Resolve field offsets inside a structure using the PDB type information.

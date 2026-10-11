@@ -26,7 +26,7 @@
  * copy before it is written: a block whose VirtualAddress is outside the image
  * would otherwise patch memory past the end of the mapper's own allocation.
  */
-static bool RelocateImageByDelta(const PE::vec_relocs& relocs, const ULONG64 delta, const ULONG64 image_base, const ULONG64 image_size) {
+bool Mapper::RelocateImageByDelta(const PE::vec_relocs& relocs, const ULONG64 delta, const ULONG64 image_base, const ULONG64 image_size) {
 	for (const auto& current_reloc : relocs) {
 		for (auto i = 0u; i < current_reloc.count; ++i) {
 			const uint16_t type = current_reloc.item[i] >> 12;
@@ -85,7 +85,7 @@ static std::wstring SectionName(const PIMAGE_SECTION_HEADER section) {
  *
  * @Jerem584
  */
-static bool FixSecurityCookie(void* local_image, size_t image_size, ULONG64 kernel_image_base)
+bool Mapper::FixSecurityCookie(void* local_image, size_t image_size, ULONG64 kernel_image_base)
 {
 	auto headers = PE::GetNtHeaders(local_image, image_size);
 	if (!headers)
@@ -164,41 +164,70 @@ static bool FixSecurityCookie(void* local_image, size_t image_size, ULONG64 kern
  * Returns false, having written nothing further, on the first unresolvable
  * import - a partially resolved image would jump to 0 on the first call.
  */
-static bool ResolveImports(const PE::vec_imports& imports) {
+/*
+ * Resolves one import against the live kernel.
+ *
+ * This is what MapDriver passes as the ImportResolver, and the only part of
+ * import handling that touches the kernel. Kept separate from ResolveImports so
+ * that function stays testable without a provider.
+ */
+static bool ResolveImportFromKernel(const Mapper::ImportLookup& request, void*, ULONG64& out_address) {
+	if (!request.module_base)
+		return false;
+
+	out_address = request.ordinal != 0
+		? Driver::GetKernelModuleExportOrdinal(request.module_base, request.ordinal)
+		: Driver::GetKernelModuleExport(request.module_base, *request.name);
+
+	return out_address != 0;
+}
+
+bool Mapper::ResolveImports(const PE::vec_imports& imports, ImportResolver resolver, void* context) {
+	if (!resolver)
+		return false;
+
 	for (const auto& current_import : imports) {
-		ULONG64 Module = Utilities::GetKernelModuleAddress(current_import.module_name);
+		const ULONG64 Module = Utilities::GetKernelModuleAddress(current_import.module_name);
 		if (!Module) {
 			Log(L"[-] Dependency " << Val(Utilities::ToWide(current_import.module_name)) << L" wasn't found" << std::endl);
 			return false;
 		}
 
 		for (auto& current_function_data : current_import.function_datas) {
-			ULONG64 function_address = current_function_data.ordinal != 0
-				? Driver::GetKernelModuleExportOrdinal(Module, current_function_data.ordinal)
-				: Driver::GetKernelModuleExport(Module, current_function_data.name);
+			ImportLookup request{};
+			request.module_base = Module;
+			request.name = current_function_data.ordinal ? nullptr : &current_function_data.name;
+			request.ordinal = current_function_data.ordinal;
 
-			if (!function_address) {
-				//Lets try with ntoskrnl
-				if (Module != Driver::ntoskrnlAddr) {
-					function_address = current_function_data.ordinal != 0
-						? Driver::GetKernelModuleExportOrdinal(Driver::ntoskrnlAddr, current_function_data.ordinal)
-						: Driver::GetKernelModuleExport(Driver::ntoskrnlAddr, current_function_data.name);
+			ULONG64 resolved = 0;
+			if (resolver(request, context, resolved)) {
+				*current_function_data.address = resolved;
+				continue;
+			}
 
-					if (!function_address) {
-						if (current_function_data.ordinal != 0) {
-							Log(L"[-] Failed to resolve import ordinal " << Val(current_function_data.ordinal)
-								<< L" (" << Val(Utilities::ToWide(current_import.module_name)) << L")" << std::endl);
-						}
-						else {
-							Log(L"[-] Failed to resolve import " << Val(Utilities::ToWide(current_function_data.name))
-								<< L" (" << Val(Utilities::ToWide(current_import.module_name)) << L")" << std::endl);
-						}
-						return false;
-					}
+			//Lets try with ntoskrnl. Most driver imports name a module other than
+			//ntoskrnl but live in it, so the first module is frequently the wrong
+			//place to look. When the descriptor already named ntoskrnl there is no
+			//second module left to try, so that is simply the failure.
+			if (Module != Driver::ntoskrnlAddr) {
+				ImportLookup fallback = request;
+				fallback.module_base = Driver::ntoskrnlAddr;
+
+				if (resolver(fallback, context, resolved)) {
+					*current_function_data.address = resolved;
+					continue;
 				}
 			}
 
-			*current_function_data.address = function_address;
+			if (current_function_data.ordinal != 0) {
+				Log(L"[-] Failed to resolve import ordinal " << Val(current_function_data.ordinal)
+					<< L" (" << Val(Utilities::ToWide(current_import.module_name)) << L")" << std::endl);
+			}
+			else {
+				Log(L"[-] Failed to resolve import " << Val(Utilities::ToWide(current_function_data.name))
+					<< L" (" << Val(Utilities::ToWide(current_import.module_name)) << L")" << std::endl);
+			}
+			return false;
 		}
 	}
 
@@ -340,7 +369,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 
 		if (destroyHeader) {
 			kernel_image_base -= TotalVirtualHeaderSize;
-			Log(L"[INFO] Skipped " << Val(Hex(TotalVirtualHeaderSize)) << L" bytes of PE Header" << std::endl);
+			Log(L"[INFO] Skipped " << Val(Hex(TotalVirtualHeaderSize)) << L" Bytes of PE Header" << std::endl);
 		}
 
 		// Resolve relocs and imports
@@ -368,15 +397,32 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 * checkable, so it is checked rather than assumed.
 		 */
 		if (relocations.empty()) {
-			Log(L"[INFO] Image has no relocation directory; it can only load at its preferred base" << std::endl);
-
+			/*
+			 * Say exactly what was checked.
+			 *
+			 * This proves one thing only: no 64-bit value inside the section data
+			 * still points into the image's own preferred range, so no pointer
+			 * into the image itself survives the move. It is not a general proof
+			 * that the image is safe to load anywhere - it says nothing about
+			 * the import table, about the IAT the resolver is about to rewrite,
+			 * or about the .pdata unwind entries the unwinder reads. An image
+			 * whose only hazard is its IAT is fine, because the resolver
+			 * rewrites those entries before anything runs.
+			 *
+			 * realBase, not kernel_image_base: with the header skipped the latter
+			 * is the address the relocation delta was computed from, but it is
+			 * not where the image lands. Quoting it here named an address no
+			 * code pointer ends up at.
+			 */
 			if (!PE::VerifyNoAbsoluteReferences(local_image_base, nt_headers->OptionalHeader.SizeOfImage)) {
 				Log(L"[-] Refusing to map: the image keeps absolute pointers into itself and has no relocations to fix them" << std::endl);
 				kernel_image_base = realBase;
 				break;
 			}
 
-			Log(L"[INFO] No absolute references into the image itself; safe to load at any address" << std::endl);
+			Log(L"[INFO] Verified: no absolute self-pointers, safe to load at "
+				<< Val(reinterpret_cast<void*>(realBase)) << std::endl);
+			Log(L"[INFO] Image has no relocation directory; it can only load at its preferred base" << std::endl);
 		}
 
 		if (!FixSecurityCookie(local_image_base, nt_headers->OptionalHeader.SizeOfImage, kernel_image_base))
@@ -395,7 +441,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 			break;
 		}
 
-		if (!ResolveImports(imports)) {
+		if (!Mapper::ResolveImports(imports, ResolveImportFromKernel, nullptr)) {
 			Log(L"[-] Failed to resolve imports" << std::endl);
 			kernel_image_base = realBase;
 			break;
@@ -479,10 +525,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 * Reached by hooking NtAddAtom (see Driver::CallKernelFunction), which
 		 * is why a failure here is reported rather than fatal.
 		 */
-		const ULONG64 address_of_entry_point = kernel_image_base + nt_headers->OptionalHeader.AddressOfEntryPoint;
-
-		LogBlank();
-		Log(L"[!] Calling DriverEntry | " << Val(reinterpret_cast<void*>(address_of_entry_point)) << std::endl);
+const ULONG64 address_of_entry_point = kernel_image_base + nt_headers->OptionalHeader.AddressOfEntryPoint;
 
 		if (callback) {
 			if (!callback(&param1, &param2, realBase, image_size)) {
@@ -492,17 +535,91 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 			}
 		}
 
+		/*
+		 * Build the DRIVER_OBJECT this driver is entered with.
+		 *
+		 * DriverEntry's first argument is a PDRIVER_OBJECT and a driver calls
+		 * IoCreateDevice before it has done anything else, which dereferences
+		 * DriverExtension and its back-pointer. Passing NULL there is not
+		 * something a driver can ignore - it is a bugcheck on the first call -
+		 * so a real object is built unless the caller explicitly asked for the
+		 * raw allocation pointer instead.
+		 *
+		 * DriverSection is given the image base. A driver that reads it (to
+		 * compare against its own image, for instance) sees a plausible
+		 * address; there is no real section object, because fabricating one
+		 * means walking kernel loader structures that only the load path owns.
+		 *
+		 * Lives until after DriverEntry returns, and on the success path it is
+		 * deliberately not released: the driver holds a reference to it for as
+		 * long as it is loaded, exactly like the image itself.
+		 */
+		ULONG64 driver_object = 0;
+		if (PassAllocationAddressAsFirstParam) {
+			Log(L"[INFO] Passing the allocation base as the first DriverEntry argument, as requested" << std::endl);
+			param1 = realBase;
+		}
+		else {
+			driver_object = Driver::CreateDriverObjectForEntry(realBase, image_size, realBase);
+			if (!driver_object) {
+				Log(L"[-] Failed to build the driver object; refusing to call DriverEntry with a null one" << std::endl);
+				kernel_image_base = realBase;
+				break;
+			}
+		}
+
+		/*
+		 * Announced here rather than before the object is built: the banner said
+		 * "calling DriverEntry" while a DRIVER_OBJECT still had to be created,
+		 * so the setup line printed under it and made the order look wrong.
+		 *
+		 * The two arguments are printed as they are actually passed rather than
+		 * labelled "DriverObject", because --PassAllocationPtr deliberately
+		 * passes something else and a fixed label would then name a null.
+		 */
+		LogBlank();
+		Log(L"[!] Calling DriverEntry | Entry " << Val(reinterpret_cast<void*>(address_of_entry_point))
+			<< L" | DriverEntry (" << Val(param1) << L", " << Val(param2) << L")" << std::endl);
+
 		NTSTATUS status = 0;
-		if (!Driver::CallKernelFunction(&status, address_of_entry_point, (PassAllocationAddressAsFirstParam ? realBase : param1), param2)) {
+		if (!Driver::CallKernelFunction(&status, address_of_entry_point, param1, param2)) {
+			/*
+			 * The hook never went in, so DriverEntry never executed. Nothing the
+			 * driver would have owned exists yet, so releasing both the image and
+			 * the object it would have been given is safe here.
+			 *
+			 * The other direction is the one that must not happen: once
+			 * CallKernelFunction returns true the driver has run and holds
+			 * pointers into both, and no failure from here on may free them.
+			 */
 			Log(L"[-] Failed to call driver entry" << std::endl);
+
+			if (driver_object) {
+				Driver::DestroyDriverObjectForEntry(driver_object);
+				driver_object = 0;
+			}
+
 			kernel_image_base = realBase;
 			break;
 		}
+
+		/*
+		 * DriverEntry has run, so the allocation and the driver object are now
+		 * owned in part by the driver. Capture the hook outcome, which is
+		 * reported separately from the call above, and carry on to the success
+		 * return below regardless: a failed restore is an emergency to surface,
+		 * not a reason to release memory the driver is using.
+		 */
+		const bool hook_restored = Driver::RestoreSucceeded();
 
 		if (exitCode)
 			*exitCode = status;
 
 		Log(L"[+] DriverEntry returned: " << Val(Hex(status)) << std::endl);
+
+		if (!hook_restored)
+			Log(L"[!] ntoskrnl.NtAddAtom was not restored; the image is kept because the "
+				"driver may still reference it. See the earlier CRITICAL line." << std::endl);
 
 		//Optional early release, --free. Only safe for drivers that have copied
 		//out everything they need, because the image becomes invalid as soon as
@@ -526,6 +643,37 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 				Log(L"[-] WARNING: Failed to free memory!" << std::endl);
 			}
 		}
+
+		/*
+		 * Say plainly what is still resident.
+		 *
+		 * Without --free the image, and the driver object it was entered with,
+		 * stay in kernel memory with no loader entry pointing at them. Nothing
+		 * can reach them again and nothing reclaims them before a reboot, which
+		 * is the intended outcome for a driver that is meant to stay loaded -
+		 * but it used to be invisible, and a run that only prints "mapped
+		 * successfully" reads like nothing was left behind.
+		 */
+		LogBlank();
+		if (free) {
+			Log(L"[+] Image released (--free); only the driver object at "
+				<< Val(reinterpret_cast<void*>(driver_object))
+				<< L" remains, which the loaded driver still references" << std::endl);
+		}
+		else {
+			//Dot leaders, so the values line up under each other instead of sitting after
+			//labels of different widths. Each label is padded with dots to a fixed
+			//20 character field: "Image" is 5 so it takes 15, "Driver Object" is 13
+			//so it takes 7. Both fields are then the same width, so the two spaces
+			//that follow put both values in the same column.
+			Log(L"[+] Resident In Kernel Memory:" << std::endl);
+			LogBlank();
+			Log(L"      Image...............  " << Val(reinterpret_cast<void*>(realBase))
+				<< L"   (" << Val(Hex(image_size)) << L" Bytes)" << std::endl);
+			if (driver_object)
+				Log(L"      Driver Object.......  " << Val(reinterpret_cast<void*>(driver_object)) << std::endl);
+		}
+		LogBlank();
 
 		//Success: the driver is loaded. The user mode copy is no longer needed.
 		VirtualFree(local_image_base, 0, MEM_RELEASE);
