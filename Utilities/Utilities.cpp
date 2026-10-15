@@ -14,6 +14,20 @@
 
 #include "../App/NT.hpp"
 
+namespace
+{
+	/*
+	 * Upper bound on a file this project will read into memory.
+	 *
+	 * The only file read through here is the driver image the operator named on
+	 * the command line, and a driver is tens of kilobytes. 256 MB is three
+	 * orders of magnitude above that and below anything that could exhaust
+	 * memory, so the check exists to turn "this is not a driver" into a refused
+	 * read rather than into an allocation failure.
+	 */
+	constexpr uint64_t kMaxReadFileSize = 256ull * 1024ull * 1024ull;
+}
+
 //Widens an ASCII identifier. A per byte copy is correct for the narrow ASCII
 //module and export names used here and is cheaper than a codepage conversion,
 //which would need a locale.
@@ -42,7 +56,29 @@ bool Utilities::ReadFileToMemory(const std::wstring& file_path, std::vector<BYTE
 	if (!file_ifstream)
 		return false;
 
-	out_buffer->assign((std::istreambuf_iterator<char>(file_ifstream)), std::istreambuf_iterator<char>());
+	/*
+	 * Seek to the end and read exactly that much, rather than streaming the file
+	 * into a container until it stops.
+	 *
+	 * The streaming form allocates whatever the file turns out to be, so pointing
+	 * this at anything larger than a driver - a disk image, say - is an
+	 * unhandled bad_alloc that takes the process down with it, at a point where
+	 * the only sensible response would have been "that is not a driver".
+	 */
+	file_ifstream.seekg(0, std::ios::end);
+	const std::streamoff length = file_ifstream.tellg();
+	if (length < 0 || static_cast<uint64_t>(length) > kMaxReadFileSize) {
+		file_ifstream.close();
+		return false;
+	}
+	file_ifstream.seekg(0, std::ios::beg);
+
+	out_buffer->assign(static_cast<size_t>(length), 0);
+	if (length > 0 && !file_ifstream.read(reinterpret_cast<char*>(out_buffer->data()), length)) {
+		file_ifstream.close();
+		out_buffer->clear();
+		return false;
+	}
 	file_ifstream.close();
 
 	return true;
@@ -90,14 +126,66 @@ uint64_t Utilities::GetKernelModuleAddress(const std::string& module_name) {
 		return 0;
 	}
 
+	/*
+	 * Does this module list carry addresses at all?
+	 *
+	 * SystemModuleInformation reports ImageBase as 0 for every module to a process
+	 * that does not hold SeDebugPrivilege - the names are filled in, the addresses
+	 * are not. Verified on a run of this machine: 289 modules, 289 of them with an
+	 * ImageBase of zero, and the same query issued after enabling the privilege
+	 * returned 289 populated ones.
+	 *
+	 * Without this check, a caller that has not enabled the privilege sees a
+	 * perfectly ordinary module list and reports the module it asked for as "not
+	 * found", which is indistinguishable from a genuinely absent module and points
+	 * at entirely the wrong thing. Scanned once rather than per lookup, because
+	 * the answer is the same for every entry.
+	 */
+	bool any_address = false;
 	for (auto i = 0u; i < modules->NumberOfModules; ++i) {
-		//FullPathName holds the whole path; OffsetToFileName is where the base
-		//name starts inside it.
-		const std::string current_module_name = std::string(reinterpret_cast<char*>(modules->Modules[i].FullPathName) + modules->Modules[i].OffsetToFileName);
+		if (modules->Modules[i].ImageBase != 0) {
+			any_address = true;
+			break;
+		}
+	}
+
+	if (!any_address) {
+		Log(L"[-] The kernel module list reports no addresses at all ("
+			<< Val(modules->NumberOfModules) << L" modules, every ImageBase zero)."
+			<< L" That is what Windows returns without SeDebugPrivilege." << std::endl);
+		VirtualFree(buffer, 0, MEM_RELEASE);
+		return 0;
+	}
+
+	for (auto i = 0u; i < modules->NumberOfModules; ++i) {
+		const auto& current = modules->Modules[i];
+
+		/*
+		 * The base name is the tail of FullPathName from OffsetToFileName.
+		 *
+		 * FullPathName is a fixed 256 byte field inside a structure the kernel
+		 * fills, not a C string: the entry is exactly as long as the header says
+		 * and is not terminated. Building a std::string from
+		 * FullPathName + OffsetToFileName read past the end of the field looking
+		 * for a zero byte - inside the next module entry for every entry but the
+		 * last, and past the end of the buffer for the last. The comparison below
+		 * only needs the tail, so the tail is copied and that is all.
+		 */
+		const size_t path_length = strnlen_s(
+			reinterpret_cast<const char*>(current.FullPathName), sizeof(current.FullPathName));
+
+		//OffsetToFileName is an offset into that field; a value past the end
+		//means the layout is not the one assumed, so nothing is matched.
+		if (current.OffsetToFileName >= path_length)
+			continue;
+
+		const std::string current_module_name(
+			reinterpret_cast<const char*>(current.FullPathName) + current.OffsetToFileName,
+			path_length - current.OffsetToFileName);
 
 		if (!_stricmp(current_module_name.c_str(), module_name.c_str()))
 		{
-			const uint64_t result = reinterpret_cast<uint64_t>(modules->Modules[i].ImageBase);
+			const uint64_t result = reinterpret_cast<uint64_t>(current.ImageBase);
 
 			VirtualFree(buffer, 0, MEM_RELEASE);
 			return result;

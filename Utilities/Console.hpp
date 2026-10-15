@@ -31,25 +31,48 @@
 
 namespace Console
 {
-	//True when AMEGER_NO_COLOR=1 asks for plain output. Read once, at first
+	/*
+	 * Read an on/off environment variable.
+	 *
+	 * Accepts the spellings a user would actually type - 1, true, yes, on and
+	 * their negatives - rather than the single leading character the old test
+	 * compared against. AMEGER_NO_COLOR=10 and =true both used to enable colour,
+	 * so the variable was very nearly the opposite of what it says.
+	 */
+	inline bool EnvironmentFlag(const wchar_t* name) {
+		wchar_t value[16] = { 0 };
+		const DWORD length = GetEnvironmentVariableW(name, value, static_cast<DWORD>(std::size(value)));
+		//0 is "not set", at or above the buffer size is truncation: neither is a
+		//value this can judge, and neither should be read as one.
+		if (length == 0 || length >= std::size(value))
+			return false;
+
+		std::wstring text(value, length);
+		for (wchar_t& c : text) {
+			if (c >= L'A' && c <= L'Z')
+				c = static_cast<wchar_t>(c - L'A' + L'a');
+		}
+
+		if (text == L"1" || text == L"true" || text == L"yes" || text == L"on")
+			return true;
+		if (text == L"0" || text == L"false" || text == L"no" || text == L"off")
+			return false;
+
+		//Something else entirely: not a request for the behaviour.
+		return false;
+	}
+
+	//True when AMEGER_NO_COLOR asks for plain output. Read once, at first
 	//use, so every colour below and EnableAnsiColors() agree on the answer.
 	inline bool ColorsDisabled() {
-		static const bool disabled = [] {
-			wchar_t optOut[8] = { 0 };
-			const DWORD length = GetEnvironmentVariableW(L"AMEGER_NO_COLOR", optOut, static_cast<DWORD>(std::size(optOut)));
-			return length > 0 && length < std::size(optOut) && optOut[0] == L'1';
-		}();
+		static const bool disabled = EnvironmentFlag(L"AMEGER_NO_COLOR");
 		return disabled;
 	}
 
-	//True when AMEGER_VERBOSE=1 asks for the per-entry diagnostics that would
+	//True when AMEGER_VERBOSE asks for the per-entry diagnostics that would
 	//otherwise flood the log (e.g. every restored page-table entry).
 	inline bool Verbose() {
-		static const bool verbose = [] {
-			wchar_t optIn[8] = { 0 };
-			const DWORD length = GetEnvironmentVariableW(L"AMEGER_VERBOSE", optIn, static_cast<DWORD>(std::size(optIn)));
-			return length > 0 && length < std::size(optIn) && optIn[0] == L'1';
-		}();
+		static const bool verbose = EnvironmentFlag(L"AMEGER_VERBOSE");
 		return verbose;
 	}
 
@@ -244,10 +267,16 @@ namespace Console
 }
 
 //Indented, tag-coloured diagnostic line.
-#define Log(content) Console::Line() << content
+//
+// Variadic rather than a single parameter: the single parameter form breaks on
+//any top level comma in the argument, so a call that streamed two values as
+//`a, b` - a pair, a ternary, a constructor call - did not compile, and the fix
+//was to add parentheses at that call site rather than here. __VA_ARGS__ is the
+//one spelling that treats the whole expression list as the stream argument.
+#define Log(...) Console::Line() << __VA_ARGS__
 
 //Flush left variant, for the interactive prompt and the usage text.
-#define LogRaw(content) Console::Line(false) << content
+#define LogRaw(...) Console::Line(false) << __VA_ARGS__
 
 //A bare blank line, used to separate output sections. Never indented.
 #define LogBlank() (std::wcout << std::endl)

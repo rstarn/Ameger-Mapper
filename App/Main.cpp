@@ -31,8 +31,11 @@
 #include <bcrypt.h>
 #include <wintrust.h>
 #include <softpub.h>
+//advapi32, for the elevation check below: CheckTokenMembership and the SID
+//helpers live there, not in kernel32.
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "wintrust.lib")
+#pragma comment(lib, "advapi32.lib")
 
 #include "../Mapper/Mapper.hpp"
 #include "../PE/PE.hpp"
@@ -203,17 +206,19 @@ namespace
 
 		const PIMAGE_NT_HEADERS64 nt_headers = PE::GetNtHeaders(image.data(), image.size());
 		if (!nt_headers) {
-			Log(L"[-] \"" << Val(path) << L"\" is not a valid PE image" << std::endl);
+			Log(L"[-] \"" << Val(path) << L"\" is not a valid PE32+ image" << std::endl);
 			return false;
 		}
 
 		//The section table sits at IMAGE_FIRST_SECTION, whose position comes from
 		//the file controlled SizeOfOptionalHeader, so it is bounds checked before
-		//any section name below is read.
-		const size_t section_offset = reinterpret_cast<const BYTE*>(IMAGE_FIRST_SECTION(nt_headers)) - image.data();
-		const size_t section_bytes = static_cast<size_t>(nt_headers->FileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER);
-		if (section_offset > image.size() || section_bytes > image.size() - section_offset) {
-			Log(L"[-] \"" << Val(path) << L"\" is not a valid PE image" << std::endl);
+		//any section below is read. This is the same check the mapper makes
+		//through PE::GetSectionTable, so a file that summarises cleanly here is
+		//also a file the mapper can walk.
+		PIMAGE_SECTION_HEADER section = nullptr;
+		uint16_t section_count = 0;
+		if (!PE::GetSectionTable(image.data(), image.size(), section, section_count)) {
+			Log(L"[-] \"" << Val(path) << L"\" has a section table that lies outside the file" << std::endl);
 			return false;
 		}
 
@@ -263,8 +268,7 @@ namespace
 		Log(L"[+] Entry point:  " << Val(entry.str()) << std::endl);
 
 		std::wstring sections;
-		const PIMAGE_SECTION_HEADER section = IMAGE_FIRST_SECTION(nt_headers);
-		for (uint16_t i = 0; i < nt_headers->FileHeader.NumberOfSections; ++i) {
+		for (uint16_t i = 0; i < section_count; ++i) {
 			//The name is an 8 byte field that is not null terminated when it uses
 			//all eight bytes, so it is copied into a wider buffer first.
 			char name[IMAGE_SIZEOF_SHORT_NAME + 1] = { 0 };
@@ -393,7 +397,9 @@ LONG WINAPI SimplestCrashHandler(EXCEPTION_POINTERS* ExceptionInfo)
 
 //Index of a command line flag, -1 when absent.
 //Accepts both /flag and --flag, case insensitively, so the two styles in the
-//help text both work.
+//help text both work. A single leading dash is deliberately not one of them:
+//Windows convention reserves -flag for a POSIX tool, which this is not, and
+//accepting it silently would make a mistyped -free run with the flag ignored.
 int paramExists(const int argc, wchar_t** argv, const wchar_t* param) {
 	size_t plen = wcslen(param);
 	for (int i = 1; i < argc; i++) {
@@ -405,6 +411,48 @@ int paramExists(const int argc, wchar_t** argv, const wchar_t* param) {
 		}
 	}
 	return -1;
+}
+
+//True when argv[i] is a value some option consumed rather than an option or the
+//driver path. Only --offsetsPath takes a separate value today, but this is a
+//property of the argument list and is asked here rather than duplicated at each
+//place that walks it.
+static bool IsOptionValue(const int argc, wchar_t** argv, int i) {
+	if (i < 1)
+		return false;
+	return paramExists(argc, argv, L"offsetsPath") == i - 1;
+}
+
+/*
+ * Is this process running with the administrator token enabled?
+ *
+ * The manifest asks for requireAdministrator, so on the supported launch paths
+ * this is always true. It is checked anyway because the tool can also be started
+ * from a shell that ignores the manifest - a debugger, or a host that creates
+ * the process itself - and the failure that produces is the least legible one in
+ * the project: SE_LOAD_DRIVER_PRIVILEGE cannot be acquired, Service.cpp reports
+ * "make sure you are running as administrator" after the provider has already
+ * been written to %TEMP%, and nothing has been mapped.
+ */
+static bool IsElevated() {
+	SID_IDENTIFIER_AUTHORITY nt_authority = SECURITY_NT_AUTHORITY;
+	PSID administrators = nullptr;
+
+	if (!AllocateAndInitializeSid(&nt_authority, 2,
+		SECURITY_BUILTIN_DOMAIN_RID,
+		DOMAIN_ALIAS_RID_ADMINS,
+		0, 0, 0, 0, 0, 0,
+		&administrators))
+		return false;
+
+	BOOL member = FALSE;
+	const BOOL checked = CheckTokenMembership(nullptr, administrators, &member);
+	FreeSid(administrators);
+
+	//A failed check is reported as "not elevated" rather than as elevated: the
+	//caller's response to each is the same, and guessing wrong in the other
+	//direction would only produce the failure this is meant to explain early.
+	return checked && member != FALSE;
 }
 
 void help() {
@@ -487,9 +535,22 @@ int wmain(const int argc, wchar_t** argv) {
 		if (arg[0] != L'-')
 			continue;
 		//The argument after --offsetsPath is its value, not a flag.
-		if (i > 1 && (_wcsicmp(argv[i - 1], L"--offsetsPath") == 0 || _wcsicmp(argv[i - 1], L"/offsetsPath") == 0))
+		if (IsOptionValue(argc, argv, i))
 			continue;
-		const wchar_t* name = (arg[1] == L'-') ? arg + 2 : arg + 1;
+
+		if (arg[1] != L'-') {
+			//A single dash, which paramExists does not accept. It used to be
+			//stripped down to the flag name and compared against the known list,
+			//so -free came out as "free" - a known flag - and produced no
+			//warning, while paramExists never matched it. The run then went
+			//ahead with the memory free silently disabled. Say which form is
+			//accepted instead.
+			Log(L"[-] Unrecognized option: " << Val(arg)
+				<< L" (flags are written as --name or /name, not -name)" << std::endl);
+			continue;
+		}
+
+		const wchar_t* name = arg + 2;
 		bool known = false;
 		for (const wchar_t* flag : knownFlags) {
 			if (_wcsicmp(name, flag) == 0) {
@@ -501,8 +562,21 @@ int wmain(const int argc, wchar_t** argv) {
 			Log(L"[-] Unrecognized option: " << Val(arg) << std::endl);
 	}
 
+	/*
+	 * The driver path, taken as the first argument that names a .sys file and is
+	 * not some other option's value.
+	 *
+	 * Skipping option values matters: --offsetsPath takes one, and an offsets
+	 * file is called Offsets.ini rather than anything .sys, but the check used to
+	 * be "first argument whose extension is .sys" over every argument. Give
+	 * --offsetsPath a path that ends in .sys and it was taken as the driver, the
+	 * offsets file was never read from where it was asked for, and the run went
+	 *on with the previous Offsets.ini.
+	 */
 	int drvIndex = -1;
 	for (int i = 1; i < argc; i++) {
+		if (IsOptionValue(argc, argv, i))
+			continue;
 		if (_wcsicmp(std::filesystem::path(argv[i]).extension().c_str(), L".sys") == 0) {
 			drvIndex = i;
 			break;
@@ -564,6 +638,13 @@ int wmain(const int argc, wchar_t** argv) {
 		return -1;
 	}
 
+	if (!IsElevated()) {
+		Log(L"[-] Mapper.exe has to run elevated." << std::endl);
+		Log(L"[-] Start it from an administrator terminal, or run it again and accept the UAC prompt." << std::endl);
+		PauseBeforeExit();
+		return -1;
+	}
+
 	if (!SymbolsHandler::GetInstance()->ReloadFile(offsetFilePath, UpdateOffset ? Utilities::GetCurrentAppFolder() + L"\\" + SYMBOL_TOOL_EXE : L"")) {
 		Log(L"[-] Error: Failed To Get Symbols Info." << std::endl);
 		PauseBeforeExit();
@@ -594,12 +675,47 @@ int wmain(const int argc, wchar_t** argv) {
 		return -1;
 	}
 
-	if (!NT_SUCCESS(Driver::Unload())) {
-		Log(L"[-] Warning failed to fully unload vulnerable driver " << std::endl);
-	}
+	/*
+	 * The final verdict on the run.
+	 *
+	 * Unload failing and the mapping succeeding are independent facts, and only
+	 * one of them was ever reported. A run that loaded the provider, could not
+	 * unload it, and therefore left a vulnerable signed driver resident in the
+	 * kernel with its complete binary still on disk printed "has been mapped
+	 * successfully" and exited 0 - which is the one thing an operator scanning a
+	 * log should never be able to take away from a run that left that behind.
+	 *
+	 * The two are reported separately and the exit code follows the worse of
+	 * them, because the exit code is what a script or a wrapper keys on and it
+	 * has to mean the same thing as the log.
+	 */
+	const bool provider_clean = NT_SUCCESS(Driver::Unload());
+
+	LogBlank();
 	Log(L"[+] \"" << Val(std::filesystem::path(driver_path).filename().wstring())
 		<< L"\" has been mapped successfully." << std::endl);
 
+	if (!provider_clean) {
+		//Unmissable on purpose: this is the state the whole tool exists to avoid
+		//leaving behind, and it is the one condition where the machine is no safer
+		//than before the run started - in fact it is less safe, because the run
+		//also removed the provider's traces from PiDDB, the hash cache and
+		//MmUnloadedDrivers while leaving the driver itself loaded.
+		LogBlank();
+		Log(L"[!!] The provider driver was NOT unloaded and is still resident in kernel memory." << std::endl);
+		LogBlank();
+		Log(L"      This machine is left exposed. Until the provider unloads, it can be" << std::endl);
+		Log(L"      reached by anything holding that driver, and its service key has" << std::endl);
+		Log(L"      already been deleted, so the service manager cannot be used to stop it." << std::endl);
+		LogBlank();
+		Log(L"      Rebooting is the only reliable way to clear it." << std::endl);
+		LogBlank();
+	}
+
 	PauseBeforeExit();
-	return 0;
+
+	//The mapping itself succeeded, so a non-zero exit would misrepresent that;
+	//but a provider left loaded is a failure of the task as a whole and the
+	//caller has to be able to act on it.
+	return provider_clean ? 0 : -1;
 }

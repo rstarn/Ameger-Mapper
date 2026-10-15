@@ -53,9 +53,30 @@ namespace PE
 
 	//Locate and sanity check the NT headers.
 	//image_size is the length of the buffer at image_base.
-	//Returns nullptr when the buffer is not a PE image, when e_lfanew points
-	//outside it, or when the NT signature does not match.
+	//
+	//Returns nullptr when the buffer is too small to hold a DOS header, when it
+	//is not a PE image, when e_lfanew points outside it, when the NT signature
+	//does not match, or when the optional header is not a PE32+ one.
+	//
+	//The Magic test is here rather than at the call sites because every field
+	//this file reads afterwards - ImageBase, Subsystem, every DataDirectory entry
+	//and the position of the section table - is a different width or a different
+	//offset in a PE32 optional header. Parsing a 32-bit image as PE32+ produces
+	//values that are wrong in a way nothing downstream can detect.
 	PIMAGE_NT_HEADERS64 GetNtHeaders(void* image_base, size_t image_size);
+
+	//Locate the section table and prove the whole of it lies inside the buffer.
+	//
+	//IMAGE_FIRST_SECTION is not a fixed offset: it is the end of the optional
+	//header, and SizeOfOptionalHeader is a file controlled field, so it is what
+	//positions the section table. Every consumer here walks NumberOfSections
+	//entries from it, and that count is a file controlled WORD, so without this
+	//check a handful of header bytes decide how far out of bounds a loop walks.
+	//
+	//On success `out_sections` points at the first IMAGE_SECTION_HEADER and
+	//`out_count` is the number of entries proven to fit. On failure both are
+	//left untouched and false is returned.
+	bool GetSectionTable(void* image_base, size_t image_size, PIMAGE_SECTION_HEADER& out_sections, uint16_t& out_count);
 
 	//Collect the base relocation blocks into `relocs`.
 	//Returns true with an empty `relocs` when the image has no relocation

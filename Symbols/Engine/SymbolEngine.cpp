@@ -24,8 +24,10 @@
 #include <Windows.h>
 #include <string>
 #include <memory>
+#include <random>
 #include <filesystem>
 #include <iostream>
+#include <iomanip>
 #include <cstdio>
 #include <dbghelp.h>
 
@@ -171,26 +173,40 @@ namespace
 		return a.hasGuid ? a.guid == b.guid : a.sig == b.sig;
 	}
 
-	/*
-	 * A unique empty folder under %TEMP% for symsrv to write its symstore layout
-	 * into. The caller removes it once the PDB has been moved out; it exists
-	 * only so the flat cache folder is never turned back into a symstore tree.
-	 */
-	std::wstring MakeTempSymbolStore() {
-		wchar_t tempRoot[MAX_PATH + 1] = { 0 };
-		if (!GetTempPathW(MAX_PATH, tempRoot))
-			return {};
-
-		for (int attempt = 0; attempt < 16; ++attempt) {
-			const std::wstring candidate = std::wstring(tempRoot)
-				+ L"amager_sym_" + std::to_wstring(GetCurrentProcessId())
-				+ L"_" + std::to_wstring(GetTickCount64())
-				+ L"_" + std::to_wstring(attempt);
-			if (CreateDirectoryW(candidate.c_str(), nullptr))
-				return candidate;
-		}
+/*
+ * A unique empty folder under %TEMP% for symsrv to write its symstore layout
+ * into. The caller removes it once the PDB has been moved out; it exists
+ * only so the flat cache folder is never turned back into a symstore tree.
+ *
+ * The name carries a per-process random component, not just the pid and the
+ * tick count. %TEMP% is writable by every process on the box, so a name an
+ * attacker can predict is a name they can pre-create: CreateDirectoryW then
+ * fails for a path that already exists and is theirs, and after the attempts run
+ * out symbol resolution aborts for the whole run. The random component does not
+ * make the path unguessable, it makes a pre-created one impossible to land.
+ */
+std::wstring MakeTempSymbolStore() {
+	wchar_t tempRoot[MAX_PATH + 1] = { 0 };
+	if (!GetTempPathW(MAX_PATH, tempRoot))
 		return {};
+
+	//Seeded once, like every other generator in this project. 64 bits of it; the
+	//whole value is rendered as hex so nothing here is short either.
+	static std::mt19937_64 engine{ std::random_device{}() };
+
+	for (int attempt = 0; attempt < 16; ++attempt) {
+		std::wostringstream name;
+		name << L"amager_sym_" << GetCurrentProcessId()
+			<< L"_" << GetTickCount64()
+			<< L"_" << std::hex << std::setw(16) << std::setfill(L'0') << engine()
+			<< L"_" << attempt;
+
+		const std::wstring candidate = std::wstring(tempRoot) + name.str();
+		if (CreateDirectoryW(candidate.c_str(), nullptr))
+			return candidate;
 	}
+	return {};
+}
 }
 
 /*
@@ -292,7 +308,7 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 	const std::wstring tempSearch = L"cache*" + tempStore + L";SRV*http://msdl.microsoft.com/download/symbols";
 
 	auto pdbPath = std::make_unique<wchar_t[]>(4096);
-	dbg.SymFindFileInPathW(
+	const BOOL found = dbg.SymFindFileInPathW(
 		(HANDLE)process,
 		tempSearch.c_str(),
 		binaryInfo.pdbfile,
@@ -306,8 +322,21 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 	);
 
 	const std::wstring downloadedPath = pdbPath.get();
-	// Windows don't provide symsrv.dll and dbghelp loads it from his current path, if its not loaded after those calls means that symsrv/dbghelp are invalid
-	if (downloadedPath.empty() && GetModuleHandleA("symsrv.dll") == nullptr) {
+
+	//The return value was discarded, so a failure was inferred from an empty
+	//output buffer - and the only diagnostic that could fire checked whether
+	//symsrv.dll was loaded at all. A network outage, a 404 for a PDB Microsoft
+	//has not published, or a cache ACL problem all produced silence: no message
+	//and no file, and the caller reported only "no symbols available".
+	if (!found) {
+		Log(L"[-] SymFindFileInPathW could not retrieve " << Val(binaryInfo.pdbfile)
+			<< L", error " << Val(static_cast<unsigned long>(GetLastError())) << std::endl);
+	}
+	//Windows does not ship symsrv.dll and dbghelp loads it from its own folder.
+	//If it is not loaded after those calls, the DLLs folder is wrong or the file
+	//is not the one that was meant to be there - a different problem from the
+	//lookup failing, and worth saying so.
+	else if (downloadedPath.empty() && GetModuleHandleA("symsrv.dll") == nullptr) {
 		Log(L"[-] Please provide proper dbghelp.dll and symsrv.dll!" << std::endl);
 	}
 
@@ -411,6 +440,16 @@ std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const
 	return offsets;
 }
 
+namespace
+{
+	/*
+	 * Upper bound on the members a type may declare before this file stops
+	 * enumerating it. Used where the count comes out of the PDB and sizes an
+	 * allocation directly; see the use below.
+	 */
+	constexpr DWORD kMaxTypeChildren = 0x10000;
+}
+
 //Resolve one field offset.
 //
 // The offset of a field cannot be looked up by name directly, so the type is
@@ -431,7 +470,7 @@ static bool GetFieldOffsetInternal(HANDLE hProcess, ULONG64 ModBase, const std::
 	//Resolved once; every call below goes through these pointers.
 	const auto& dbg = Dbg();
 	if (!dbg.module)
-		return {};
+		return false;
 	//Fallback spellings for the types this project cares about.
 	static const std::vector<std::wstring> alternateNames = {
 		L"_PiDDBCacheEntry", L"PiDDBCacheEntry", L"_PIDDBCACHE_ENTRY", L"_PIDDB_CACHE_ENTRY",
@@ -456,11 +495,27 @@ static bool GetFieldOffsetInternal(HANDLE hProcess, ULONG64 ModBase, const std::
 
 		const ULONG typeIndex = package.si.TypeIndex;
 
-			//Members have to be enumerated before their offsets can be read;
-			//SymGetTypeInfo has no "find a member by name" call.
-			DWORD childrenCount = 0;
+//Members have to be enumerated before their offsets can be read;
+		//SymGetTypeInfo has no "find a member by name" call.
+		DWORD childrenCount = 0;
 		if (!dbg.SymGetTypeInfo(hProcess, ModBase, typeIndex, TI_GET_CHILDRENCOUNT, &childrenCount) || !childrenCount)
 			continue;
+
+		/*
+		 * Capped before it is multiplied.
+		 *
+		 * childrenCount is a 32-bit value out of the PDB and it sizes the
+		 * allocation directly, so a malformed or hostile one asks for up to
+		 * 256 GB and the failure is an uncaught bad_alloc that takes the whole
+		 * tool down. A UDT with more members than this is not one this project
+		 * resolves against; treating it as a miss costs the field, and refusing
+		 * to allocate costs nothing.
+		 */
+		if (childrenCount > kMaxTypeChildren) {
+			Log(L"[!] " << Val(structName) << L" reports " << Val(childrenCount)
+				<< L" members, above the supported maximum; skipping it" << std::endl);
+			continue;
+		}
 
 		const size_t bufferSize = sizeof(TI_FINDCHILDREN_PARAMS) + (size_t)childrenCount * sizeof(ULONG);
 		auto children = std::make_unique<BYTE[]>(bufferSize);

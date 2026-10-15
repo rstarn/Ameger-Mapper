@@ -10,6 +10,12 @@
 #include <string>
 
 PIMAGE_NT_HEADERS64 PE::GetNtHeaders(void* image_base, size_t image_size) {
+	//e_magic is at offset 0 and e_lfanew at 0x3C, so the DOS header has to fit
+	//before either is read. Without this a four byte file was an out of bounds
+	//read in the mapper's own address space rather than a refused image.
+	if (image_size < sizeof(IMAGE_DOS_HEADER))
+		return nullptr;
+
 	const auto dos_header = reinterpret_cast<PIMAGE_DOS_HEADER>(image_base);
 
 	if (dos_header->e_magic != IMAGE_DOS_SIGNATURE)
@@ -27,7 +33,62 @@ PIMAGE_NT_HEADERS64 PE::GetNtHeaders(void* image_base, size_t image_size) {
 	if (nt_headers->Signature != IMAGE_NT_SIGNATURE)
 		return nullptr;
 
+	//A PE32 image has the same Signature and the same DOS stub. Everything this
+	//file reads afterwards - ImageBase, Subsystem, SizeOfImage, the DataDirectory
+	//entries and the offset of the section table - is a different width or a
+	//different offset there, so parsing one as PE32+ yields values that look
+	//reasonable and are wrong. Refused here, once, rather than at each consumer.
+	if (nt_headers->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+		return nullptr;
+
 	return nt_headers;
+}
+
+/*
+ * The section table sits at the end of the optional header, whose length is the
+ * file controlled SizeOfOptionalHeader, so its position is only known after that
+ * field has been read - and it has to be read before anything below can be
+ * trusted. The span is then computed as a byte offset into the buffer and proved
+ * to fit, rather than as a pointer comparison, so the arithmetic cannot wrap.
+ */
+bool PE::GetSectionTable(void* image_base, size_t image_size, PIMAGE_SECTION_HEADER& out_sections, uint16_t& out_count) {
+	const PIMAGE_NT_HEADERS64 nt_headers = GetNtHeaders(image_base, image_size);
+
+	if (!nt_headers)
+		return false;
+
+	//The number of entries is a file controlled WORD and each entry is 40 bytes,
+	//so the table it claims is at most 2.6 MB. Widened before the multiply.
+	const size_t table_bytes = static_cast<size_t>(nt_headers->FileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER);
+
+//IMAGE_FIRST_SECTION expands to the optional header plus SizeOfOptionalHeader,
+	//so the same sum taken from the NT header base is the same address, expressed
+	//as an offset into the buffer that can be range checked without any pointer
+	//arithmetic.
+	//
+	//The NT header's offset is e_lfanew, taken from the DOS header, rather than a
+	//difference of two PIMAGE_NT_HEADERS64 pointers. Those two pointers are not
+	//into the same array - one points at the start of the caller's byte buffer and
+	//the other 128 bytes into it - so subtracting them is undefined behaviour, and
+	//MSVC resolves it by dividing the byte distance by sizeof(IMAGE_NT_HEADERS64)
+	//and truncating, which turns every e_lfanew below 264 into an offset of 0.
+	//e_lfanew is the field GetNtHeaders just validated and used to place the
+	//headers, so reading it again says the same thing without the arithmetic.
+	const auto dos_header = reinterpret_cast<const IMAGE_DOS_HEADER*>(image_base);
+	const size_t nt_offset = static_cast<size_t>(dos_header->e_lfanew);
+	const size_t table_offset = nt_offset
+		+ offsetof(IMAGE_NT_HEADERS, OptionalHeader)
+		+ static_cast<size_t>(nt_headers->FileHeader.SizeOfOptionalHeader);
+
+	//Written as a subtraction from the buffer length rather than as a sum against
+	//a pointer, so an oversized SizeOfOptionalHeader cannot wrap the check.
+	if (table_offset > image_size || table_bytes > image_size - table_offset)
+		return false;
+
+	out_sections = reinterpret_cast<PIMAGE_SECTION_HEADER>(
+		reinterpret_cast<BYTE*>(image_base) + table_offset);
+	out_count = nt_headers->FileHeader.NumberOfSections;
+	return true;
 }
 
 bool PE::GetRelocs(void* image_base, size_t image_size, vec_relocs& relocs) {
@@ -115,15 +176,34 @@ bool PE::GetImports(void* image_base, size_t image_size, vec_imports& imports) {
 	if (!import_va)
 		return true;
 
-	const DWORD size_of_image = nt_headers->OptionalHeader.SizeOfImage;
+	const DWORD declared_size = nt_headers->OptionalHeader.SizeOfImage;
+
+	/*
+	 * Two different bounds, and both are needed.
+	 *
+	 * SizeOfImage is a value from the file, so on its own it proves nothing about
+	 * where the caller's buffer ends - it is exactly what an over-long walk would
+	 * rely on. image_size is the length of the allocation that was actually handed
+	 * over. Bounding the walk by whichever is smaller means a caller that passed a
+	 * buffer shorter than the image declares cannot be walked off the end of, and
+	 * this is the same pair GetRelocs checks; see the comment there for why the
+	 * declared size alone was never enough.
+	 */
+	const size_t image_extent = declared_size < image_size
+		? static_cast<size_t>(declared_size) : image_size;
+
+	if (image_extent == 0)
+		return true;
+
 	//A non-zero directory that points outside the image is malformed, not
 	//empty: the descriptor walk below would start out of bounds.
-	if (import_va >= size_of_image)
+	if (import_va >= image_extent)
 		return false;
 
 	//The end of the buffer the image occupies. Every pointer derived from the
-	//image below is checked against it before it is dereferenced.
-	const auto image_limit = reinterpret_cast<ULONG64>(image_base) + size_of_image;
+	//image below is checked against it before it is dereferenced. Written as a
+	//subtraction from the base rather than as a sum so the end cannot wrap.
+	const auto image_limit = reinterpret_cast<ULONG64>(image_base) + image_extent;
 
 	auto current_import_descriptor = reinterpret_cast<PIMAGE_IMPORT_DESCRIPTOR>(reinterpret_cast<ULONG64>(image_base) + import_va);
 
@@ -136,7 +216,19 @@ bool PE::GetImports(void* image_base, size_t image_size, vec_imports& imports) {
 	bool terminated = false;
 
 	while (reinterpret_cast<ULONG64>(current_import_descriptor) + sizeof(IMAGE_IMPORT_DESCRIPTOR) <= image_limit) {
-		if (!current_import_descriptor->FirstThunk) {
+		/*
+		 * The terminator is the all-zero descriptor, the same test the loader
+		 * makes. Testing FirstThunk alone was both too early and too late: a
+		 * descriptor is legal with OriginalFirstThunk == 0, and a directory whose
+		 * first descriptor has a zero IAT but a real module name is not the
+		 * end of the list - stopping there silently dropped every import after
+		 * it and left those IAT slots holding the file's placeholder values.
+		 */
+		if (!current_import_descriptor->OriginalFirstThunk &&
+			!current_import_descriptor->TimeDateStamp &&
+			!current_import_descriptor->ForwarderChain &&
+			!current_import_descriptor->Name &&
+			!current_import_descriptor->FirstThunk) {
 			terminated = true;
 			break;
 		}
@@ -150,7 +242,7 @@ bool PE::GetImports(void* image_base, size_t image_size, vec_imports& imports) {
 
 		//The module name is a null terminated string: both it and its
 		//terminator have to sit inside the image.
-		if (current_import_descriptor->Name >= size_of_image)
+		if (current_import_descriptor->Name >= image_extent)
 			return false;
 
 		const auto module_name_ptr = reinterpret_cast<const char*>(reinterpret_cast<ULONG64>(image_base) + current_import_descriptor->Name);
@@ -163,8 +255,8 @@ bool PE::GetImports(void* image_base, size_t image_size, vec_imports& imports) {
 
 		//FirstThunk is addressed by a file controlled RVA and has to fit inside
 		//the image before the thunk loop below reads it.
-		if (current_import_descriptor->FirstThunk >= size_of_image ||
-			sizeof(IMAGE_THUNK_DATA64) > size_of_image - current_import_descriptor->FirstThunk)
+		if (current_import_descriptor->FirstThunk >= image_extent ||
+			sizeof(IMAGE_THUNK_DATA64) > image_extent - current_import_descriptor->FirstThunk)
 			return false;
 
 		auto current_first_thunk = reinterpret_cast<PIMAGE_THUNK_DATA64>(reinterpret_cast<ULONG64>(image_base) + current_import_descriptor->FirstThunk);
@@ -176,8 +268,8 @@ bool PE::GetImports(void* image_base, size_t image_size, vec_imports& imports) {
 		//of range value is a broken descriptor and refuses the image.
 		PIMAGE_THUNK_DATA64 name_table = current_first_thunk;
 		if (current_import_descriptor->OriginalFirstThunk) {
-			if (current_import_descriptor->OriginalFirstThunk >= size_of_image ||
-				sizeof(IMAGE_THUNK_DATA64) > size_of_image - current_import_descriptor->OriginalFirstThunk)
+			if (current_import_descriptor->OriginalFirstThunk >= image_extent ||
+				sizeof(IMAGE_THUNK_DATA64) > image_extent - current_import_descriptor->OriginalFirstThunk)
 				return false;
 
 			name_table = reinterpret_cast<PIMAGE_THUNK_DATA64>(reinterpret_cast<ULONG64>(image_base) + current_import_descriptor->OriginalFirstThunk);
@@ -202,8 +294,8 @@ bool PE::GetImports(void* image_base, size_t image_size, vec_imports& imports) {
 			if (!(name_table->u1.Ordinal & IMAGE_ORDINAL_FLAG64)) {
 				//The name/hint pair has to fit, and its name has to be null
 				//terminated inside the image.
-				if (name_table->u1.AddressOfData >= size_of_image ||
-					sizeof(WORD) > size_of_image - name_table->u1.AddressOfData)
+				if (name_table->u1.AddressOfData >= image_extent ||
+					sizeof(WORD) > image_extent - name_table->u1.AddressOfData)
 					return false;
 
 				const auto thunk_data = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>(reinterpret_cast<ULONG64>(image_base) + name_table->u1.AddressOfData);
@@ -265,9 +357,15 @@ bool PE::VerifyNoAbsoluteReferences(void* image_base, size_t image_size) {
 		return false;
 
 	const auto base_address = reinterpret_cast<ULONG64>(image_base);
-	const auto section = IMAGE_FIRST_SECTION(nt_headers);
 
-	for (uint16_t i = 0; i < nt_headers->FileHeader.NumberOfSections; ++i) {
+	//The section table is positioned by a file controlled field, so it is proved
+	//to lie inside the buffer before the walk below indexes it.
+	PIMAGE_SECTION_HEADER section = nullptr;
+	uint16_t section_count = 0;
+	if (!GetSectionTable(image_base, image_size, section, section_count))
+		return false;
+
+	for (uint16_t i = 0; i < section_count; ++i) {
 		const ULONG32 virtual_size = section[i].Misc.VirtualSize;
 		const ULONG32 raw_size = section[i].SizeOfRawData;
 
@@ -287,8 +385,16 @@ bool PE::VerifyNoAbsoluteReferences(void* image_base, size_t image_size) {
 		for (ULONG32 offset = 0; offset + sizeof(ULONG64) <= scan_length; offset += sizeof(ULONG64)) {
 			const ULONG64 value = *reinterpret_cast<const ULONG64*>(start + offset);
 
-			//A pointer back into this image is a field that was never relocated.
-			if (value >= preferred_base && value < preferred_base + image_size_declared)
+			/*
+			 * A pointer back into this image is a field that was never relocated.
+			 *
+			 * Tested as a subtraction rather than as value < base + size, because
+			 * that sum is over a file controlled preferred base and a preferred
+			 * base near the top of the address space wraps it to a small number -
+			 * which would make the range test match almost nothing and let a real
+			 * self-pointer through.
+			 */
+			if (value >= preferred_base && value - preferred_base < image_size_declared)
 				return false;
 		}
 	}

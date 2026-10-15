@@ -22,17 +22,39 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 	const std::wstring nPath = L"\\??\\" + driver_path;
 
 	HKEY dservice;
-	LSTATUS status = RegCreateKeyW(HKEY_LOCAL_MACHINE, servicesPath.c_str(), &dservice); //Returns Ok if already exists
+	LSTATUS status = RegCreateKeyW(HKEY_LOCAL_MACHINE, servicesPath.c_str(), &dservice);
 	if (status != ERROR_SUCCESS) {
 		Log("[-] Can't create service key" << std::endl);
 		return STATUS_REGISTRY_IO_FAILED;
 	}
 
+	/*
+	 * Whether this key already existed.
+	 *
+	 * Every failure path below deletes the whole key, which is right for a key
+	 * this run created and wrong for one it found: RegCreateKeyW opens an
+	 * existing key rather than failing, so a vendor-installed service under a
+	 * colliding name was silently removed by a run that had failed before it
+	 * ever loaded anything. The cleanup deletes only what was created here, and
+	 * otherwise leaves the pre-existing key alone.
+	 */
+	const bool key_existed = RegQueryValueExW(dservice, L"ImagePath", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS ||
+		RegQueryValueExW(dservice, L"Type", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS ||
+		RegQueryValueExW(dservice, L"Start", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+
+	const auto discard_service_key = [&]() {
+		if (key_existed) {
+			Log(L"[*] A service key of this name already existed and was left in place" << std::endl);
+			return;
+		}
+		RegDeleteTreeW(HKEY_LOCAL_MACHINE, servicesPath.c_str());
+	};
+
 	//REG_EXPAND_SZ includes the terminating null in the stored length.
 	status = RegSetKeyValueW(dservice, NULL, L"ImagePath", REG_EXPAND_SZ, nPath.c_str(), (DWORD)(nPath.size() + 1) * sizeof(wchar_t));
 	if (status != ERROR_SUCCESS) {
 		RegCloseKey(dservice);
-		RegDeleteTreeW(HKEY_LOCAL_MACHINE, servicesPath.c_str());
+		discard_service_key();
 		Log("[-] Can't create 'ImagePath' registry value" << std::endl);
 		return STATUS_REGISTRY_IO_FAILED;
 	}
@@ -40,26 +62,20 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 	status = RegSetKeyValueW(dservice, NULL, L"Type", REG_DWORD, &ServiceTypeKernel, sizeof(DWORD));
 	if (status != ERROR_SUCCESS) {
 		RegCloseKey(dservice);
-		RegDeleteTreeW(HKEY_LOCAL_MACHINE, servicesPath.c_str());
+		discard_service_key();
 		Log("[-] Can't create 'Type' registry value" << std::endl);
 		return STATUS_REGISTRY_IO_FAILED;
 	}
 
 	RegCloseKey(dservice);
 
-	HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-	if (ntdll == NULL) {
-		RegDeleteTreeW(HKEY_LOCAL_MACHINE, servicesPath.c_str());
-		return STATUS_UNSUCCESSFUL;
-	}
-
 	ULONG SE_LOAD_DRIVER_PRIVILEGE = 10UL;
-	BOOLEAN SeLoadDriverWasEnabled;
+	BOOLEAN SeLoadDriverWasEnabled = FALSE;
 	//NtLoadDriver needs this privilege, which a normal administrator token has
 	//but does not have enabled by default.
 	NTSTATUS ntStatus = Nt::RtlAdjustPrivilege(SE_LOAD_DRIVER_PRIVILEGE, TRUE, FALSE, &SeLoadDriverWasEnabled);
 	if (!NT_SUCCESS(ntStatus)) {
-		RegDeleteTreeW(HKEY_LOCAL_MACHINE, servicesPath.c_str());
+		discard_service_key();
 		Log("[-] Fatal error: failed to acquire SE_LOAD_DRIVER_PRIVILEGE. Make sure you are running as administrator." << std::endl);
 		return ntStatus;
 	}
@@ -88,15 +104,27 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 			Log("[-] Can't delete service registry key after NtLoadDriver failure" << std::endl);
 		}
 	}
+	else {
+		/*
+		 * Put the privilege back the way it was found.
+		 *
+		 * RtlAdjustPrivilege was asked to enable it and reported what it was
+		 * before doing so, and the answer was never used. The privilege stays on
+		 * for the rest of the process - and StopAndRemove, which runs afterwards,
+		 * is the one call that does not need it. Nothing breaks because of it
+		 * here, but a process that quietly raises its own privilege and leaves
+		 * it raised is not a thing to leave in place by accident.
+		 */
+		if (!SeLoadDriverWasEnabled) {
+			BOOLEAN restored = FALSE;
+			Nt::RtlAdjustPrivilege(SE_LOAD_DRIVER_PRIVILEGE, FALSE, FALSE, &restored);
+		}
+	}
 
 	return ntStatus;
 }
 
 NTSTATUS Service::StopAndRemove(const std::wstring& serviceName) {
-	HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-	if (ntdll == NULL)
-		return STATUS_UNSUCCESSFUL;
-
 	std::wstring wdriver_reg_path = L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\" + serviceName;
 	UNICODE_STRING serviceStr;
 	RtlInitUnicodeString(&serviceStr, wdriver_reg_path.c_str());

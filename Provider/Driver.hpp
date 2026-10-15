@@ -237,10 +237,18 @@ namespace Driver
 	 * because the next call overwrites it. It exists for the one caller that
 	 * owns memory the target may have adopted: CallKernelFunction returning true
 	 * says the target ran, and this says whether ntoskrnl was left clean.
+	 *
+	 * A file scope inline variable rather than a local static, so the one piece of
+	 * state it names is visible as such at the point it is read. It is still a
+	 * plain bool with no synchronisation, which is correct for the single
+	 * threaded flow this runs in and is not correct for two threads calling
+	 * CallKernelFunction at once - see CallKernelFunction's own note for why that
+	 * is not something a flag could fix anyway.
 	 */
+	inline bool g_restore_succeeded = false;
+
 	inline bool& RestoreSucceeded() {
-		static bool restored = false;
-		return restored;
+		return g_restore_succeeded;
 	}
 
 	/*
@@ -338,6 +346,12 @@ namespace Driver
 		//ntoskrnlAddr was resolved cached 0 forever and every later call
 		//reported the same failure without retrying. Same shape as the export
 		//resolvers in Driver.cpp.
+		//
+		//One copy per instantiation, not one per process: each distinct argument
+		//list A... gets its own variable, so each signature resolves NtAddAtom
+		//once rather than sharing a single lookup. That is a redundant export
+		//walk per signature on first use, which is not worth a template-level
+		//cache with its own lifetime rules in exchange for.
 		static uint64_t kernel_NtAddAtom = 0;
 		if (!kernel_NtAddAtom) {
 			kernel_NtAddAtom = GetKernelModuleExport(Driver::ntoskrnlAddr, "NtAddAtom");

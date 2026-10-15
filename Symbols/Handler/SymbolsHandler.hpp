@@ -56,6 +56,13 @@ public:
 	 *
 	 * Returns false when the file is missing, the updater fails, or the file
 	 * cannot be parsed; in every case the symbol set is left empty.
+	 *
+	 * Also returns false when the file parses but is not usable: no entries at
+	 * all, or missing one of the offsets the run cannot proceed without. That
+	 * case used to return true, which reported success and then walked kernel
+	 * structures on the compiled-in defaults - the opposite of what a successful
+	 * load is supposed to mean for a file whose whole purpose is to describe this
+	 * build.
 	 */
 	bool ReloadFile(const std::wstring& path, const std::wstring& updater);
 

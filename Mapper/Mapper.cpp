@@ -1,6 +1,7 @@
 #include "Mapper.hpp"
 #include <Windows.h>
 #include <iostream>
+#include <random>
 
 #include "../Utilities/Utilities.hpp"
 #include "../Utilities/Console.hpp"
@@ -69,6 +70,29 @@ static std::wstring SectionName(const PIMAGE_SECTION_HEADER section) {
 }
 
 /*
+ * A replacement /GS cookie for FixSecurityCookie below.
+ *
+ * Unpredictable rather than derived: the cookie's only job is to make
+ * __security_check_cookie fail when something has written past a local buffer,
+ * so a value an attacker can compute is a value an attacker writes past. See the
+ * call site for what this replaced.
+ */
+static uintptr_t RandomSecurityCookie() {
+	//Lazy, so the generator is seeded once per run rather than on every image.
+	static std::mt19937_64 engine{ std::random_device{}() };
+
+	uintptr_t value = 0;
+	//Two outcomes are excluded rather than one: 0, which is the value
+	//__security_check_cookie compares against, and ~0, whose complement is 0 -
+	//so the pair the CRT keeps consistent can never be (0, ~0) by accident.
+	do {
+		value = static_cast<uintptr_t>(engine());
+	} while (value == 0 || value == ~static_cast<uintptr_t>(0));
+
+	return value;
+}
+
+/*
  * Replace the image's /GS security cookie with one that matches the base it is
  * actually running at.
  *
@@ -98,12 +122,29 @@ bool Mapper::FixSecurityCookie(void* local_image, size_t image_size, ULONG64 ker
 		return true;
 	}
 
+	/*
+	 * Only the bytes up to and including SecurityCookie are read, and how many
+	 * those are comes from the image rather than from the SDK.
+	 *
+	 * The declared directory Size is what the file says the load config occupies,
+	 * and most drivers emit a load config far smaller than the current
+	 * IMAGE_LOAD_CONFIG_DIRECTORY - the SDK has grown members over time and old
+	 * drivers never gained them. Requiring the whole SDK struct to fit therefore
+	 * refused a perfectly usable image whose load config sat near the end of its
+	 * section, and because that refusal returns true with a log line, the cookie
+	 * was silently left unfixed. The declared Size has to cover the cookie field
+	 * itself, and only that field has to be inside the buffer.
+	 */
+	const DWORD load_config_size = headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].Size;
+	const size_t cookie_field_end = offsetof(IMAGE_LOAD_CONFIG_DIRECTORY, SecurityCookie) + sizeof(uintptr_t);
+
 	//The load config directory is a file controlled RVA: it has to lie inside
-	//the local image, with room for the structure the field is read from.
-	if (load_config_directory >= image_size ||
-		sizeof(IMAGE_LOAD_CONFIG_DIRECTORY) > image_size - load_config_directory)
+	//the local image, with room for the field that is read from it.
+	if (load_config_size < cookie_field_end ||
+		load_config_directory >= image_size ||
+		cookie_field_end > image_size - load_config_directory)
 	{
-		Log(L"[-] Load config directory is outside the image, fix cookie skipped" << std::endl);
+		Log(L"[-] Load config directory is truncated or outside the image, fix cookie skipped" << std::endl);
 		return true;
 	}
 
@@ -141,11 +182,26 @@ bool Mapper::FixSecurityCookie(void* local_image, size_t image_size, ULONG64 ker
 
 	Log(L"[+] Fixing stack cookie" << std::endl);
 
-	auto new_cookie = kDefaultCookie ^ GetCurrentProcessId() ^ GetCurrentThreadId(); // here we don't really care about the value of stack cookie, it will still works and produce nice result
-	if (new_cookie == kDefaultCookie)
-		new_cookie = kDefaultCookie + 1;
+	/*
+	 * The replacement value only has to be unpredictable to anything that can read
+	 * the image out of memory, because the check it backs is a canary: a guessable
+	 * cookie is one an attacker writes past.
+	 *
+	 * It used to be the toolchain default XORed with the process and thread ids.
+	 * All three inputs are printed by any process enumerator on the box and the
+	 * constant is in this source, so the whole expression was public - it cost a
+	 * few clocks over a constant and bought nothing. Drawn from the process PRNG
+	 * instead, seeded once from std::random_device.
+	 */
+	const auto new_cookie = RandomSecurityCookie();
 
-	*(uintptr_t*)(stack_cookie) = new_cookie; // the _security_cookie_complement will be init by the driver itself if they use crt
+	//Kept separate from the image's own .data on purpose: the CRT
+	//(GsDriverEntry -> __security_init_cookie) re-derives the complement from
+	//whatever it finds in the cookie slot during the driver's own startup, so it
+	//must not be pre-set here to a value that disagrees with what is written
+	//above. A driver that never calls the CRT initialiser keeps its link-time
+	//complement, which is the same limitation this comment already described.
+	*(uintptr_t*)(stack_cookie) = new_cookie;
 	return true;
 }
 
@@ -263,12 +319,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 	const PIMAGE_NT_HEADERS64 nt_headers = PE::GetNtHeaders(data, data_size);
 
 	if (!nt_headers) {
-		Log(L"[-] Invalid format of PE image" << std::endl);
-		return 0;
-	}
-
-	if (nt_headers->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
-		Log(L"[-] Image is not 64 bit" << std::endl);
+		Log(L"[-] Invalid format of PE image (not a PE32+ image, or its headers do not fit)" << std::endl);
 		return 0;
 	}
 
@@ -287,13 +338,42 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 	if (!local_image_base)
 		return 0;
 
-	if (nt_headers->FileHeader.NumberOfSections == 0) {
+	//The section table is located once, here, and every walk below uses this
+	//pointer rather than recomputing IMAGE_FIRST_SECTION. Its position comes from
+	//the file controlled SizeOfOptionalHeader, so the check that proves the table
+	//fits inside the buffer is what the three loops below were relying on without
+	//making.
+	PIMAGE_SECTION_HEADER image_section = nullptr;
+	uint16_t section_count = 0;
+	if (!PE::GetSectionTable(data, data_size, image_section, section_count)) {
+		Log(L"[-] Section table is outside the file, refusing to map" << std::endl);
+		VirtualFree(local_image_base, 0, MEM_RELEASE);
+		return 0;
+	}
+
+	if (section_count == 0) {
 		Log(L"[-] Image has no sections, refusing to map" << std::endl);
 		VirtualFree(local_image_base, 0, MEM_RELEASE);
 		return 0;
 	}
 
-	DWORD TotalVirtualHeaderSize = (IMAGE_FIRST_SECTION(nt_headers))->VirtualAddress;
+	/*
+	 * How much of the image sits ahead of the first section.
+	 *
+	 * The header span is the lowest VirtualAddress of any section, not the first
+	 * section's. Reading it off section[0] assumed the table is ordered by
+	 * ascending RVA, which is a convention and not a guarantee: an unsorted table
+	 * produced a header size that was wrong, and because that one value feeds the
+	 * allocation size, the relocation delta and the entry point together, every
+	 * one of them was wrong in the same direction and the failure surfaced later
+	 * and far from its cause. The minimum is correct whatever order the table is
+	 * in, and costs one pass.
+	 */
+	DWORD TotalVirtualHeaderSize = image_section[0].VirtualAddress;
+	for (uint16_t i = 1; i < section_count; ++i) {
+		if (image_section[i].VirtualAddress < TotalVirtualHeaderSize)
+			TotalVirtualHeaderSize = image_section[i].VirtualAddress;
+	}
 	if (destroyHeader && TotalVirtualHeaderSize > image_size) {
 		Log(L"[-] Header span exceeds the image, refusing to skip it" << std::endl);
 		VirtualFree(local_image_base, 0, MEM_RELEASE);
@@ -330,10 +410,10 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 
 		// Copy image sections
 
-		const PIMAGE_SECTION_HEADER current_image_section = IMAGE_FIRST_SECTION(nt_headers);
+		const PIMAGE_SECTION_HEADER current_image_section = image_section;
 		bool sections_ok = true;
 
-		for (auto i = 0; i < nt_headers->FileHeader.NumberOfSections; ++i) {
+		for (auto i = 0; i < section_count; ++i) {
 			if ((current_image_section[i].Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA) > 0)
 				continue;
 
@@ -475,8 +555,10 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 				}
 				};
 
-			for (int i = 0; i < nt_headers->FileHeader.NumberOfSections; i++) {
-				auto sec = &IMAGE_FIRST_SECTION(nt_headers)[i];
+			int protection_failures = 0;
+
+			for (int i = 0; i < section_count; i++) {
+				auto sec = &image_section[i];
 				uintptr_t secAddr = kernel_image_base + sec->VirtualAddress;
 				uint32_t secSize = sec->Misc.VirtualSize;
 
@@ -514,8 +596,20 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 				<< std::endl);
 
 				if (!Driver::MmSetPageProtection(secAddr, secSize, prot)) {
+					//Counted, not just logged. A section that should be
+					//PAGE_EXECUTE_READ but stayed PAGE_READWRITE prints exactly one
+					//line and is then indistinguishable from every other section in
+					//the log, so a run where the protection call was unavailable
+					//across the board read as a clean success. The summary below
+					//says how many of them there were.
 					Log(L"[-] Failed to set protection for section: " << Val(SectionName(sec)) << std::endl);
+					++protection_failures;
 				}
+			}
+
+			if (protection_failures) {
+				Log(L"[!] " << Val(protection_failures) << L" of " << Val(static_cast<int>(section_count))
+					<< L" section(s) were left with the allocation's default protection" << std::endl);
 			}
 		}
 
