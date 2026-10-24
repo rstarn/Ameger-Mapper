@@ -2089,6 +2089,56 @@ uint64_t Driver::AllocatePool(Nt::POOL_TYPE pool_type, uint64_t size) {
 	return allocated_pool;
 }
 
+//Allocate a page aligned, physically contiguous block for the mapped image.
+//ExAllocatePoolWithTag only guarantees 16-byte alignment, so a pool block can
+//share its first and last page with a POOL_HEADER or with the neighbouring
+//block. A driver that blanks whole pages of its own image (memhv's self-hide)
+//would then zero pool metadata the guest allocator still reads, which is an
+//arbitrary write on the next free/coalesce. MmAllocateContiguousMemory returns
+//a page aligned base, so every page of the image belongs to the image alone.
+//Returns 0 on failure.
+uint64_t Driver::AllocateContiguous(uint64_t size) {
+	if (!size)
+		return 0;
+
+	//Retry-on-zero, same shape as AllocatePool: a lookup that failed once is
+	//not cached as a permanent failure.
+	static uint64_t kernel_MmAllocateContiguousMemory = 0;
+	if (!kernel_MmAllocateContiguousMemory) {
+		kernel_MmAllocateContiguousMemory = GetKernelModuleExport(Driver::ntoskrnlAddr, "MmAllocateContiguousMemory");
+		if (!kernel_MmAllocateContiguousMemory) {
+			Log(L"[-] Failed to find MmAllocateContiguousMemory" << std::endl);
+			return 0;
+		}
+	}
+
+	uint64_t allocated_contiguous = 0;
+
+	//The second argument is a PHYSICAL_ADDRESS passed by value; -1 means "no
+	//upper bound", i.e. anywhere in physical memory.
+	if (!CallKernelFunction(&allocated_contiguous, kernel_MmAllocateContiguousMemory, size, static_cast<int64_t>(-1)))
+		return 0;
+
+	return allocated_contiguous;
+}
+
+//Release a block allocated by AllocateContiguous.
+bool Driver::MmFreeContiguousMemory(uint64_t address) {
+	if (!address)
+		return false;
+
+	static uint64_t kernel_MmFreeContiguousMemory = 0;
+	if (!kernel_MmFreeContiguousMemory) {
+		kernel_MmFreeContiguousMemory = GetKernelModuleExport(Driver::ntoskrnlAddr, "MmFreeContiguousMemory");
+		if (!kernel_MmFreeContiguousMemory) {
+			Log(L"[-] Failed to find MmFreeContiguousMemory" << std::endl);
+			return false;
+		}
+	}
+
+	return CallKernelFunction<void>(nullptr, kernel_MmFreeContiguousMemory, address);
+}
+
 //Release a pool block allocated by AllocatePool.
 bool Driver::FreePool(uint64_t address) {
 	if (!address)
@@ -2109,13 +2159,13 @@ bool Driver::FreePool(uint64_t address) {
 /*
  * DRIVER_OBJECT construction.
  *
- * _OBJECT_TYPE_DRIVER is the value the kernel keeps in DRIVER_OBJECT.Type. It is
- * not a symbol the mapper resolves, because nothing the mapper calls checks it:
- * IoCreateDevice looks at DriverExtension, and IopXxx routines reached later
- * identify the object by the pointer the driver already holds. It is written
- * anyway so a driver that inspects its own object sees a plausible value.
+ * Type is IO_TYPE_DRIVER (0x04 in wdm.h), not _OBJECT_TYPE_DRIVER: the kernel
+ * keeps a pointer to the object type elsewhere, while .Type is the object's
+ * kind. The mapper itself does not need it - IoCreateDevice looks at
+ * DriverExtension - but a driver that validates its own object does, and
+ * memhv's Entry() rejects the object unless Type == IO_TYPE_DRIVER.
  */
-static constexpr uint16_t kDriverObjectType = 0x0F;
+static constexpr uint16_t kDriverObjectType = 0x04; // IO_TYPE_DRIVER
 
 /*
  * Type is the first member of every _OBJECT_HEADER-derived structure in the
@@ -2205,6 +2255,14 @@ static bool WriteBounded(uint64_t object, uint64_t object_size, uint32_t offset,
 //Read back a pointer-sized field and require it to be one this process holds.
 static bool ReadBoundedPointer(uint64_t object, uint64_t object_size, uint32_t offset, uint64_t& out) {
 	if (offset > object_size || sizeof(uint64_t) > object_size - offset)
+		return false;
+	out = 0;
+	return Driver::ReadMemory(object + offset, &out, sizeof(out));
+}
+
+//Read back a ULONG field, bounded the same way.
+static bool ReadBoundedULong(uint64_t object, uint64_t object_size, uint32_t offset, uint32_t& out) {
+	if (offset > object_size || sizeof(uint32_t) > object_size - offset)
 		return false;
 	out = 0;
 	return Driver::ReadMemory(object + offset, &out, sizeof(out));
@@ -2312,11 +2370,13 @@ uint64_t Driver::CreateDriverObjectForEntry(uint64_t driver_start, uint64_t driv
 	uint64_t check_extension = 0;
 	uint64_t check_section = 0;
 	uint64_t check_start = 0;
+	uint32_t check_driver_size = 0;
 
 	const bool readable =
 		ReadBoundedPointer(object, object_needed, o.DriverObject_DriverExtension, check_extension) &&
 		ReadBoundedPointer(object, object_needed, o.DriverObject_DriverSection, check_section) &&
-		ReadBoundedPointer(object, object_needed, o.DriverObject_DriverStart, check_start);
+		ReadBoundedPointer(object, object_needed, o.DriverObject_DriverStart, check_start) &&
+		ReadBoundedULong(object, object_needed, o.DriverObject_DriverSize, check_driver_size);
 
 	uint64_t check_back_pointer = 0;
 	const bool back_readable = readable &&
@@ -2326,6 +2386,7 @@ uint64_t Driver::CreateDriverObjectForEntry(uint64_t driver_start, uint64_t driv
 		check_extension != extension ||
 		check_section != driver_section ||
 		check_start != driver_start ||
+		check_driver_size != static_cast<uint32_t>(driver_size) ||
 		check_back_pointer != object) {
 		Log(L"[-] CreateDriverObjectForEntry: the object did not read back as written; refusing to hand it to DriverEntry" << std::endl);
 		FreePool(object);
@@ -2338,6 +2399,7 @@ uint64_t Driver::CreateDriverObjectForEntry(uint64_t driver_start, uint64_t driv
 		<< L" | Extension " << Val(reinterpret_cast<void*>(extension))
 		<< L" | Size " << Val(Hex(object_needed))
 		<< L" | Start " << Val(reinterpret_cast<void*>(driver_start))
+		<< L" | Image Size " << Val(Hex(check_driver_size))
 		<< L" | Fields From Symbols " << Val(o.DriverObjectResolvedCount)
 		<< L"/" << Val(DriverOffsets::kDriverObjectResolvableFieldCount) << std::endl);
 

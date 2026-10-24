@@ -193,7 +193,23 @@ bool Mapper::FixSecurityCookie(void* local_image, size_t image_size, ULONG64 ker
 	 * few clocks over a constant and bought nothing. Drawn from the process PRNG
 	 * instead, seeded once from std::random_device.
 	 */
-	const auto new_cookie = RandomSecurityCookie();
+	/*
+	 * The high 16 bits stay zero: that is the invariant the toolchain's default
+	 * cookie (0x2B992DDFA232) has, and everything that compares against the
+	 * cookie in this image was linked for a value in that range. The image is
+	 * entered through Entry, not GsDriverEntry, so __security_init_cookie never
+	 * runs and the link-time cookie/complement pair is never re-derived here -
+	 * a full 64-bit replacement leaves that pair inconsistent, and
+	 * __security_check_cookie then fails on a cookie nothing corrupted, i.e. a
+	 * 0x139 (subcode 2) inside the driver on its first protected function.
+	 *
+	 * Zero stays excluded as well: it is the value the check treats as "cookie
+	 * not initialised".
+	 */
+	uintptr_t new_cookie = 0;
+	do {
+		new_cookie = RandomSecurityCookie() & static_cast<uintptr_t>(0x0000FFFFFFFFFFFFull);
+	} while (new_cookie == 0);
 
 	//Kept separate from the image's own .data on purpose: the CRT
 	//(GsDriverEntry -> __security_init_cookie) re-derives the complement from
@@ -386,7 +402,14 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 	{
 		kernel_image_base = Driver::MmAllocateIndependentPagesEx(image_size);
 	}
-	else { // AllocatePool by default
+	else if (mode == AllocationMode::AllocateContiguous)
+	{
+		//Page aligned, so the image occupies whole pages: a driver that hides
+		//its own image page by page must not be handed a base that shares its
+		//first page with a POOL_HEADER.
+		kernel_image_base = Driver::AllocateContiguous(image_size);
+	}
+	else { // AllocatePool
 		kernel_image_base = Driver::AllocatePool(Nt::POOL_TYPE::NonPagedPool, image_size);
 	}
 
@@ -652,6 +675,12 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 				kernel_image_base = realBase;
 				break;
 			}
+
+			/*
+			 * DriverEntry must actually receive the object, otherwise the
+			 * driver sees a null first argument and cannot record its range.
+			 */
+			param1 = driver_object;
 		}
 
 		/*
@@ -718,6 +747,10 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 			{
 				free_status = Driver::MmFreeIndependentPages(realBase, image_size);
 			}
+			else if (mode == AllocationMode::AllocateContiguous)
+			{
+				free_status = Driver::MmFreeContiguousMemory(realBase);
+			}
 			else {
 				free_status = Driver::FreePool(realBase);
 			}
@@ -778,6 +811,10 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 	if (mode == AllocationMode::AllocateIndependentPages)
 	{
 		free_status = Driver::MmFreeIndependentPages(kernel_image_base, image_size);
+	}
+	else if (mode == AllocationMode::AllocateContiguous)
+	{
+		free_status = Driver::MmFreeContiguousMemory(kernel_image_base);
 	}
 	else {
 		free_status = Driver::FreePool(kernel_image_base);

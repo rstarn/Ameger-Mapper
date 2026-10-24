@@ -45,12 +45,56 @@
 #include "../Symbols/Handler/SymbolsHandler.hpp"
 
 /*
+ * Build number of the running kernel.
+ *
+ * Taken from ntdll rather than GetVersionEx, whose answer depends on the
+ * process manifest: a manifest claiming compatibility with an older release
+ * makes GetVersionEx report that release's version regardless of the build
+ * actually running. The value gates a kernel call whose prototype changed in
+ * 24H2, so it has to be the real build.
+ */
+extern "C" NTSTATUS NTAPI RtlGetVersion(PRTL_OSVERSIONINFOW version_information);
+
+/*
  * Console colour and layout come from Console.hpp, which is shared with
  * SymbolTool so both programs print the same way: two-space indent, coloured
  * leading tags and green values, all inert under AMEGER_NO_COLOR=1.
  */
 namespace
 {
+	/*
+	 * Symbolic name for the NTSTATUS values a DriverEntry is likely to return,
+	 * so a failed run reads as something other than a bare number. Codes not
+	 * listed here still print their hex value; only the name is generic.
+	 */
+	const wchar_t* StatusName(NTSTATUS status) {
+		switch (status) {
+		case STATUS_SUCCESS:                  return L"STATUS_SUCCESS";
+		case STATUS_UNSUCCESSFUL:             return L"STATUS_UNSUCCESSFUL";
+		case STATUS_INVALID_PARAMETER:        return L"STATUS_INVALID_PARAMETER";
+		case STATUS_ACCESS_DENIED:            return L"STATUS_ACCESS_DENIED";
+		case STATUS_INSUFFICIENT_RESOURCES:   return L"STATUS_INSUFFICIENT_RESOURCES";
+		case STATUS_NOT_SUPPORTED:            return L"STATUS_NOT_SUPPORTED";
+		case STATUS_NOT_IMPLEMENTED:          return L"STATUS_NOT_IMPLEMENTED";
+		case STATUS_INVALID_DEVICE_REQUEST:   return L"STATUS_INVALID_DEVICE_REQUEST";
+		case STATUS_OBJECT_NAME_COLLISION:    return L"STATUS_OBJECT_NAME_COLLISION";
+		case STATUS_INVALID_IMAGE_FORMAT:     return L"STATUS_INVALID_IMAGE_FORMAT";
+		case STATUS_PRIVILEGE_NOT_HELD:       return L"STATUS_PRIVILEGE_NOT_HELD";
+		default:                              return L"unknown status";
+		}
+	}
+
+	//Build number of the running Windows kernel, or 0 when ntdll cannot report
+	//it. The --indPages guard treats 0 as "unknown" and refuses rather than
+	//running a kernel routine whose prototype it cannot confirm for this build.
+	DWORD RunningBuildNumber() {
+		RTL_OSVERSIONINFOW version = {};
+		version.dwOSVersionInfoSize = sizeof(version);
+		if (!NT_SUCCESS(RtlGetVersion(&version)))
+			return 0;
+		return version.dwBuildNumber;
+	}
+
 	//Trim ASCII whitespace from both ends of a string.
 	std::wstring TrimWhitespace(const std::wstring& text) {
 		static const wchar_t* whitespace = L" \t\r\n\f\v";
@@ -457,7 +501,7 @@ static bool IsElevated() {
 
 void help() {
 	LogBlank();
-	LogRaw(L"[+] Usage: Mapper.exe [--free][--indPages][--PassAllocationPtr][--copy-header][--no-forensics]");
+	LogRaw(L"[+] Usage: Mapper.exe [--free [--force-free]][--indPages][--PassAllocationPtr][--copy-header][--no-forensics]");
 	LogRaw(L"[--dontUpdateOffsets [--offsetsPath \"FilePath\"]] [driver.sys]" << std::endl);
 	LogRaw(L"[+] Run with no driver path to be prompted for one interactively." << std::endl);
 }
@@ -479,15 +523,62 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 
 	bool free = paramExists(argc, argv, L"free") > 0;
+	bool forceFree = paramExists(argc, argv, L"force-free") > 0;
 	bool indPagesMode = paramExists(argc, argv, L"indPages") > 0;
 	bool passAllocationPtr = paramExists(argc, argv, L"PassAllocationPtr") > 0;
 	bool copyHeader = paramExists(argc, argv, L"copy-header") > 0;
 
+	/*
+	 * --free releases the kernel image as soon as DriverEntry returns. That is
+	 * only safe for a driver that copied everything it needs out of the image
+	 * first; a driver that keeps running - a system thread, a registered
+	 * callback, a device object - still executes code out of that allocation,
+	 * and freeing it under the running thread is an immediate bugcheck.
+	 *
+	 * The mapper cannot tell the two apart, so --free is ignored unless the
+	 * caller confirms with --force-free. Ignoring it keeps the image, which is
+	 * the default behaviour and the safe one.
+	 */
 	if (free) {
-		Log(L"[+] Free memory after driver execution enabled" << std::endl);
+		if (!forceFree) {
+			Log(L"[!] --free ignored: the image would be released while the driver may still be running." << std::endl);
+			Log(L"[!] Freeing the image under a driver that keeps running after DriverEntry returns is an instant bugcheck." << std::endl);
+			Log(L"[!] The image is kept, which is the default. Add --force-free only for a driver that never touches its image again." << std::endl);
+			free = false;
+		}
+		else {
+			Log(L"[!] WARNING: --free is unsafe for drivers that keep running after DriverEntry returns." << std::endl);
+			Log(L"[!] Freeing as requested because --force-free was given." << std::endl);
+			Log(L"[+] Free memory after driver execution enabled" << std::endl);
+		}
 	}
 
+	/*
+	 * MmAllocateIndependentPagesEx changed signature in 24H2 (build 26100).
+	 * Driver.cpp still calls it with the pre-24H2 shape (size, -1, 0, 0),
+	 * which is correct only for earlier builds. The signature cannot be
+	 * verified from here, so this refuses on 26100 and later rather than
+	 * calling a routine with arguments it may not accept. The default pool
+	 * mode is unaffected and is the verified path.
+	 *
+	 * This runs before the driver file is read and before Driver::Load, so a
+	 * refused run has not touched the kernel.
+	 */
 	if (indPagesMode) {
+		const DWORD build = RunningBuildNumber();
+		if (build == 0) {
+			Log(L"[-] --indPages: could not determine the running Windows build; refusing to use it." << std::endl);
+			Log(L"[-] Use the default pool mode on this build: drop --indPages." << std::endl);
+			PauseBeforeExit();
+			return -1;
+		}
+		if (build >= 26100) {
+			Log(L"[-] --indPages is not supported on Windows build " << Val(build) << L"." << std::endl);
+			Log(L"[-] MmAllocateIndependentPagesEx changed signature in 24H2 (build 26100); the call this mapper uses is only valid before that." << std::endl);
+			Log(L"[-] Use the default pool mode on this build: drop --indPages." << std::endl);
+			PauseBeforeExit();
+			return -1;
+		}
 		Log(L"[+] Allocate Independent Pages mode enabled" << std::endl);
 	}
 
@@ -527,7 +618,7 @@ int wmain(const int argc, wchar_t** argv) {
 	//in an option name would otherwise be silently ignored, and the run would
 	//proceed with the default behaviour instead of what was asked for.
 	static const wchar_t* knownFlags[] = {
-		L"free", L"indPages", L"PassAllocationPtr", L"copy-header",
+		L"free", L"force-free", L"indPages", L"PassAllocationPtr", L"copy-header",
 		L"no-forensics", L"dontUpdateOffsets", L"offsetsPath", L"help"
 	};
 	for (int i = 1; i < argc; i++) {
@@ -662,13 +753,15 @@ int wmain(const int argc, wchar_t** argv) {
 		return -1;
 	}
 
-	Mapper::AllocationMode mode = Mapper::AllocationMode::AllocatePool;
+	Mapper::AllocationMode mode = Mapper::AllocationMode::AllocateContiguous;
 
 	if (indPagesMode) {
 		mode = Mapper::AllocationMode::AllocateIndependentPages;
 	}
 
-	if (!Mapper::MapDriver(raw_image.data(), raw_image.size(), 0, 0, free, !copyHeader, mode, passAllocationPtr)) {
+	NTSTATUS driver_status = STATUS_SUCCESS;
+
+	if (!Mapper::MapDriver(raw_image.data(), raw_image.size(), 0, 0, free, !copyHeader, mode, passAllocationPtr, &driver_status)) {
 		Log(L"[-] Failed to map " << Val(driver_path) << std::endl);
 		Driver::Unload();
 		PauseBeforeExit();
@@ -678,6 +771,13 @@ int wmain(const int argc, wchar_t** argv) {
 	/*
 	 * The final verdict on the run.
 	 *
+	 * Three independent facts are reported: whether DriverEntry succeeded,
+	 * whether the image was mapped, and whether the provider unloaded. A
+	 * DriverEntry that returns an error used to be reported as success because
+	 * MapDriver returned the allocation base regardless of the entry status, so
+	 * the tool printed "mapped successfully" for a driver that had failed to
+	 * initialise. That is the case this now distinguishes.
+	 *
 	 * Unload failing and the mapping succeeding are independent facts, and only
 	 * one of them was ever reported. A run that loaded the provider, could not
 	 * unload it, and therefore left a vulnerable signed driver resident in the
@@ -685,15 +785,25 @@ int wmain(const int argc, wchar_t** argv) {
 	 * successfully" and exited 0 - which is the one thing an operator scanning a
 	 * log should never be able to take away from a run that left that behind.
 	 *
-	 * The two are reported separately and the exit code follows the worse of
+	 * The facts are reported separately and the exit code follows the worse of
 	 * them, because the exit code is what a script or a wrapper keys on and it
 	 * has to mean the same thing as the log.
 	 */
+	const bool driver_ok = NT_SUCCESS(driver_status);
 	const bool provider_clean = NT_SUCCESS(Driver::Unload());
 
 	LogBlank();
-	Log(L"[+] \"" << Val(std::filesystem::path(driver_path).filename().wstring())
-		<< L"\" has been mapped successfully." << std::endl);
+	if (driver_ok) {
+		Log(L"[+] \"" << Val(std::filesystem::path(driver_path).filename().wstring())
+			<< L"\" has been mapped successfully." << std::endl);
+	}
+	else {
+		Log(L"[-] \"" << Val(std::filesystem::path(driver_path).filename().wstring())
+			<< L"\" was mapped, but DriverEntry returned "
+			<< Val(Hex(static_cast<unsigned long>(driver_status)))
+			<< L" (" << Val(StatusName(driver_status)) << L")." << std::endl);
+		Log(L"[-] The image is left resident, but the driver reported failure and may not be usable." << std::endl);
+	}
 
 	if (!provider_clean) {
 		//Unmissable on purpose: this is the state the whole tool exists to avoid
@@ -714,8 +824,7 @@ int wmain(const int argc, wchar_t** argv) {
 
 	PauseBeforeExit();
 
-	//The mapping itself succeeded, so a non-zero exit would misrepresent that;
-	//but a provider left loaded is a failure of the task as a whole and the
-	//caller has to be able to act on it.
-	return provider_clean ? 0 : -1;
+	//A DriverEntry that returned an error, or a provider left loaded, is a
+	//failure of the task as a whole and the caller has to be able to act on it.
+	return (driver_ok && provider_clean) ? 0 : -1;
 }

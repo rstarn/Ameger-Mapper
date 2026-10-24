@@ -168,6 +168,11 @@ namespace Driver
 	uint64_t AllocatePool(Nt::POOL_TYPE pool_type, uint64_t size);
 	bool FreePool(uint64_t address);
 
+	//Page aligned, physically contiguous allocation for the image. Needed
+	//because a pool block's first and last page are shared with pool metadata.
+	uint64_t AllocateContiguous(uint64_t size);
+	bool MmFreeContiguousMemory(uint64_t address);
+
 	/*
 	 * Build the DRIVER_OBJECT handed to a mapped driver's DriverEntry.
 	 *

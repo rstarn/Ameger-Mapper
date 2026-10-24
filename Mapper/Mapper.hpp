@@ -38,6 +38,13 @@ namespace Mapper
 		//per section protection to a pool block.
 		AllocatePool,
 
+		//One page aligned, physically contiguous block for the whole image.
+		//Same lifetime and protection properties as AllocatePool, but the base
+		//is page aligned: a driver that blanks whole pages of its own image
+		//(memhv's self-hide) must not touch the pool header in front of the
+		//allocation or the block that follows it. This is the default.
+		AllocateContiguous,
+
 		//One independent-page allocation per section, so each section can be
 		//given its own protection through MmSetPageProtection after the copy.
 		//Closer to how the loader maps a driver, but requires that export.
@@ -64,7 +71,7 @@ namespace Mapper
 	 * is released before returning.
 	 */
 	//Note: if you set PassAllocationAddressAsFirstParam as true, param1 will be ignored
-	ULONG64 MapDriver(BYTE* data, size_t data_size, ULONG64 param1 = 0, ULONG64 param2 = 0, bool free = false, bool destroyHeader = true, AllocationMode mode = AllocationMode::AllocatePool, bool PassAllocationAddressAsFirstParam = false, NTSTATUS* exitCode = nullptr);
+	ULONG64 MapDriver(BYTE* data, size_t data_size, ULONG64 param1 = 0, ULONG64 param2 = 0, bool free = false, bool destroyHeader = true, AllocationMode mode = AllocationMode::AllocateContiguous, bool PassAllocationAddressAsFirstParam = false, NTSTATUS* exitCode = nullptr);
 
 	/*
 	 * The three image fixups, exposed rather than kept file-local.

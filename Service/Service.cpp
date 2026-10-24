@@ -110,10 +110,13 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 		 *
 		 * RtlAdjustPrivilege was asked to enable it and reported what it was
 		 * before doing so, and the answer was never used. The privilege stays on
-		 * for the rest of the process - and StopAndRemove, which runs afterwards,
-		 * is the one call that does not need it. Nothing breaks because of it
-		 * here, but a process that quietly raises its own privilege and leaves
-		 * it raised is not a thing to leave in place by accident.
+		 * for the rest of the process - nothing in the map path after the load
+		 * needs it. StopAndRemove does need it (NtUnloadDriver requires the same
+		 * SeLoadDriverPrivilege), so it re-enables it itself before it calls
+		 * NtUnloadDriver, which is why restoring it here does not block the
+		 * later unload. A process that quietly raises its own privilege and leaves
+		 * it raised is not a thing to leave in place by accident, so the earlier
+		 * state is still restored here.
 		 */
 		if (!SeLoadDriverWasEnabled) {
 			BOOLEAN restored = FALSE;
@@ -140,8 +143,40 @@ NTSTATUS Service::StopAndRemove(const std::wstring& serviceName) {
 	}
 	RegCloseKey(driver_service);
 
+	/*
+	 * NtUnloadDriver needs SeLoadDriverPrivilege enabled, just like NtLoadDriver.
+	 *
+	 * RegisterAndStart enables that privilege for the load and then restores it
+	 * to its pre-load state afterwards, so by the time StopAndRemove runs it is
+	 * disabled again. Calling NtUnloadDriver without it fails with
+	 * STATUS_PRIVILEGE_NOT_HELD (0xc0000061): the driver stays loaded, its
+	 * service key is deleted out from under it, and the wipe that follows can no
+	 * longer free the file because the I/O manager still holds it open - which is
+	 * exactly the "still resident, file can't be removed" state StopAndRemove's
+	 * caller has to warn about. Re-enable the privilege here for the unload, then
+	 * restore the prior state so the teardown does not leave it raised for the
+	 * rest of the process, matching RegisterAndStart's least-privilege handling.
+	 */
+	const ULONG kSeLoadDriverPrivilege = 10UL;
+	BOOLEAN SeLoadDriverWasEnabled = FALSE;
+	const NTSTATUS priv_status = Nt::RtlAdjustPrivilege(kSeLoadDriverPrivilege, TRUE, FALSE, &SeLoadDriverWasEnabled);
+	if (!NT_SUCCESS(priv_status)) {
+		Log(L"[-] Failed to enable SeLoadDriverPrivilege for NtUnloadDriver (" << Val(Hex(priv_status)) << L")" << std::endl);
+	}
+
 	NTSTATUS st = Nt::NtUnloadDriver(&serviceStr);
 	Log(L"[+] NtUnloadDriver Status: " << Val(Hex(st)) << std::endl);
+
+	/*
+	 * Restore the privilege to its prior state before the failure path below
+	 * runs: the registry key is still deleted whether or not the unload
+	 * succeeded, and nothing should be left raised either way.
+	 */
+	if (NT_SUCCESS(priv_status) && !SeLoadDriverWasEnabled) {
+		BOOLEAN restored = FALSE;
+		Nt::RtlAdjustPrivilege(kSeLoadDriverPrivilege, FALSE, FALSE, &restored);
+	}
+
 	if (!NT_SUCCESS(st)) {
 		Log("[-] Driver Unload Failed!!" << std::endl);
 		RegDeleteTreeW(HKEY_LOCAL_MACHINE, servicesPath.c_str());
