@@ -325,7 +325,7 @@ bool Mapper::ResolveImports(const PE::vec_imports& imports, ImportResolver resol
  * its first section - but everything that is written or freed uses realBase, so
  * the shifted base is only ever used to compute addresses.
  */
-ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 param2, bool free, bool destroyHeader, AllocationMode mode, bool PassAllocationAddressAsFirstParam, NTSTATUS* exitCode) {
+ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 param2, bool free, bool destroyHeader, AllocationMode mode, bool PassAllocationAddressAsFirstParam, NTSTATUS* exitCode, SIZE_T* residentSize) {
 
 	if (!data || data_size == 0) {
 		Log(L"[-] No image data to map" << std::endl);
@@ -796,6 +796,13 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 
 		//Success: the driver is loaded. The user mode copy is no longer needed.
 		VirtualFree(local_image_base, 0, MEM_RELEASE);
+
+		//image_size was reduced by the stripped header span up front, so it is
+		//the exact byte range resident at realBase - the range a consumer must
+		//cover to reach the whole image and nothing past the allocation.
+		if (residentSize)
+			*residentSize = image_size;
+
 		return realBase;
 
 	} while (false);

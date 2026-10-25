@@ -65,13 +65,18 @@ namespace Mapper
 	 * PassAllocationAddressAsFirstParam  pass the allocation base as the first
 	 *              DriverEntry argument; param1 is ignored when set
 	 * exitCode     optional, receives the DriverEntry NTSTATUS
+	 * residentSize optional, receives the number of bytes resident in the
+	 *              kernel allocation (SizeOfImage minus the stripped header
+	 *              span), i.e. the exact range the image occupies at the base
+	 *              returned - the range a consumer like the hypervisor's NPT
+	 *              self-hide must blank, not the file or SizeOfImage
 	 *
 	 * Returns the kernel base on success and 0 on failure. On failure every
 	 * allocation made along the way (the user mode buffer and the kernel one)
 	 * is released before returning.
 	 */
 	//Note: if you set PassAllocationAddressAsFirstParam as true, param1 will be ignored
-	ULONG64 MapDriver(BYTE* data, size_t data_size, ULONG64 param1 = 0, ULONG64 param2 = 0, bool free = false, bool destroyHeader = true, AllocationMode mode = AllocationMode::AllocateContiguous, bool PassAllocationAddressAsFirstParam = false, NTSTATUS* exitCode = nullptr);
+	ULONG64 MapDriver(BYTE* data, size_t data_size, ULONG64 param1 = 0, ULONG64 param2 = 0, bool free = false, bool destroyHeader = true, AllocationMode mode = AllocationMode::AllocateContiguous, bool PassAllocationAddressAsFirstParam = false, NTSTATUS* exitCode = nullptr, SIZE_T* residentSize = nullptr);
 
 	/*
 	 * The three image fixups, exposed rather than kept file-local.

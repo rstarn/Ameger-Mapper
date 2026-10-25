@@ -44,6 +44,12 @@
 #include "../Provider/Driver.hpp"
 #include "../Symbols/Handler/SymbolsHandler.hpp"
 
+//Hypervisor client header (memhv): --hide issues the nested-page-table hide
+//commands from the very process that did the mapping, so the resident base
+//never has to be typed into a shell or written to a file the way a separate
+//tool would require.
+#include "memhv.h"
+
 /*
  * Build number of the running kernel.
  *
@@ -388,6 +394,56 @@ namespace
 			return path;
 		}
 	}
+
+	/*
+	 * Ask whether the driver being mapped is a hypervisor, and return the
+	 * decision: 1 for a hypervisor (hide it in the nested page table), 0 for a
+	 * non hypervisor (free its image after DriverEntry), and -1 when stdin
+	 * already ended and there is no console to ask, in which case the caller
+	 * keeps whatever the command line set (the image stays resident, the safe
+	 * default).
+	 *
+	 * A hypervisor's code runs out of its own image on every VMEXIT, so freeing
+	 * that image would hang the machine; blanking its pages in the nested page
+	 * table is the safe alternative. A driver that is not a hypervisor may still
+	 * keep running, so freeing its image is only safe for one that will not
+	 * execute in guest mode again.
+	 */
+	int PromptIsHypervisor() {
+		LogRaw(L"Is the driver a Hypervisor? [Y/N]: ");
+
+		for (;;) {
+			std::wstring line;
+			if (!std::getline(std::wcin, line)) {
+				//No console: a pipe or closed stdin, so nothing can be asked.
+				LogBlank();
+				return -1;
+			}
+
+			const wchar_t* p = line.c_str();
+			while (*p == L' ' || *p == L'\t')
+				++p;
+
+			//Anything other than y or n (including an empty answer) re-prompts.
+			if (*p != L'y' && *p != L'Y' && *p != L'n' && *p != L'N') {
+				Log(L"[-] Answer with y or n" << std::endl);
+				continue;
+			}
+
+			return (*p == L'y' || *p == L'Y') ? 1 : 0;
+		}
+	}
+
+	/*
+	 * Whether MmAllocateIndependentPagesEx can be called with the pre-24H2
+	 * signature this mapper uses: only on a known build below 26100. A build
+	 * that cannot be determined, or one of 26100+, returns false and the
+	 * contiguous allocation path is used instead.
+	 */
+	bool IndPagesAvailable() {
+		const DWORD build = RunningBuildNumber();
+		return build != 0 && build < 26100;
+	}
 }
 
 /*
@@ -501,7 +557,7 @@ static bool IsElevated() {
 
 void help() {
 	LogBlank();
-	LogRaw(L"[+] Usage: Mapper.exe [--free [--force-free]][--indPages][--PassAllocationPtr][--copy-header][--no-forensics]");
+	LogRaw(L"[+] Usage: Mapper.exe [--free [--force-free]][--indPages][--PassAllocationPtr][--copy-header][--hide][--no-forensics]");
 	LogRaw(L"[--dontUpdateOffsets [--offsetsPath \"FilePath\"]] [driver.sys]" << std::endl);
 	LogRaw(L"[+] Run with no driver path to be prompted for one interactively." << std::endl);
 }
@@ -527,6 +583,7 @@ int wmain(const int argc, wchar_t** argv) {
 	bool indPagesMode = paramExists(argc, argv, L"indPages") > 0;
 	bool passAllocationPtr = paramExists(argc, argv, L"PassAllocationPtr") > 0;
 	bool copyHeader = paramExists(argc, argv, L"copy-header") > 0;
+	bool hide = paramExists(argc, argv, L"hide") > 0;
 
 	/*
 	 * --free releases the kernel image as soon as DriverEntry returns. That is
@@ -590,6 +647,11 @@ int wmain(const int argc, wchar_t** argv) {
 		Log(L"[+] Copying driver header enabled" << std::endl);
 	}
 
+	if (hide) {
+		Log(L"[+] NPT hide enabled: the hypervisor will blank the mapped driver's" << std::endl);
+		Log(L"[+] resident pages and its own image in the nested page table" << std::endl);
+	}
+
 	bool UpdateOffset = !(paramExists(argc, argv, L"dontUpdateOffsets") > 0);
 	int FilePathParamIdx = paramExists(argc, argv, L"offsetsPath");
 	std::wstring offsetFilePath = Utilities::GetCurrentAppFolder() + L"\\Offsets.ini";
@@ -619,7 +681,7 @@ int wmain(const int argc, wchar_t** argv) {
 	//proceed with the default behaviour instead of what was asked for.
 	static const wchar_t* knownFlags[] = {
 		L"free", L"force-free", L"indPages", L"PassAllocationPtr", L"copy-header",
-		L"no-forensics", L"dontUpdateOffsets", L"offsetsPath", L"help"
+		L"hide", L"no-forensics", L"dontUpdateOffsets", L"offsetsPath", L"help"
 	};
 	for (int i = 1; i < argc; i++) {
 		const wchar_t* arg = argv[i];
@@ -729,6 +791,69 @@ int wmain(const int argc, wchar_t** argv) {
 		return -1;
 	}
 
+	/*
+	 * Decide the stealth mode when the command line did not already choose one.
+	 * An interactive run that gave neither --hide nor --force-free is asked
+	 * whether the driver is a hypervisor, because the two need opposite
+	 * treatment:
+	 *
+	 *   hypervisor  -> --hide       (blank its pages in the nested page table;
+	 *                                its code runs in host mode, so freeing it
+	 *                                would hang the machine)
+	 *   otherwise   -> --force-free (release the image after DriverEntry, for a
+	 *                                driver that does not keep running in guest
+	 *                                mode)
+	 *
+	 * An explicit --hide or --force-free on the command line wins and skips the
+	 * prompt, so scripted runs are unaffected. With no interactive console the
+	 * prompt reports and keeps the image resident, the safe default.
+	 */
+	if (!hide && !free && !forceFree) {
+		//Scatter the allocation across independent pages whenever this build
+		//allows it: a discontiguous physical run is harder to fingerprint than
+		//a contiguous blob. This is auto-applied, not requested, so on a build
+		//where MmAllocateIndependentPagesEx changed (26100+) it falls back to
+		//contiguous with a note instead of aborting. Used by both answers below.
+		auto enableIndPages = []() {
+			if (IndPagesAvailable()) {
+				Log(L"[+] Scattered independent-page allocation enabled" << std::endl);
+				return true;
+			}
+			Log(L"[!] Scattered independent pages unavailable on this build; using contiguous allocation" << std::endl);
+			return false;
+		};
+
+		switch (PromptIsHypervisor()) {
+		case 1:
+			hide = true;
+			Log(L"[+] NPT hide enabled: the mapped driver's resident pages and the hypervisor's own image will be hidden in the nested page table" << std::endl);
+
+			//Never free it: the hypervisor's code runs in host mode on every
+			//VMEXIT, so releasing its image would hang the machine. The NPT hide
+			//is the safe stealth measure; scattering composes with it because
+			//the virtual range stays contiguous, so the hide still targets it.
+			if (enableIndPages())
+				indPagesMode = true;
+			break;
+		case 0:
+			//The interactive answer is the confirmation --force-free normally
+			//asks for: this driver will not keep executing in guest mode.
+			free = true;
+			forceFree = true;
+			Log(L"[+] Free memory after driver execution enabled" << std::endl);
+			Log(L"[!] The image is only safe to free for a driver that will not run in guest mode again." << std::endl);
+
+			//Never hide it: --hide is for a running hypervisor, and blanking an
+			//ordinary driver's pages in guest mode is both unnecessary and unsafe.
+			if (enableIndPages())
+				indPagesMode = true;
+			break;
+		default:
+			Log(L"[!] No interactive console: the image is kept resident and the nested page table is left untouched" << std::endl);
+			break;
+		}
+	}
+
 	if (!IsElevated()) {
 		Log(L"[-] Mapper.exe has to run elevated." << std::endl);
 		Log(L"[-] Start it from an administrator terminal, or run it again and accept the UAC prompt." << std::endl);
@@ -760,8 +885,13 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 
 	NTSTATUS driver_status = STATUS_SUCCESS;
+	SIZE_T resident_size = 0;
 
-	if (!Mapper::MapDriver(raw_image.data(), raw_image.size(), 0, 0, free, !copyHeader, mode, passAllocationPtr, &driver_status)) {
+	const ULONG64 resident_base = Mapper::MapDriver(
+		raw_image.data(), raw_image.size(), 0, 0, free, !copyHeader, mode, passAllocationPtr,
+		&driver_status, &resident_size);
+
+	if (!resident_base) {
 		Log(L"[-] Failed to map " << Val(driver_path) << std::endl);
 		Driver::Unload();
 		PauseBeforeExit();
@@ -791,6 +921,79 @@ int wmain(const int argc, wchar_t** argv) {
 	 */
 	const bool driver_ok = NT_SUCCESS(driver_status);
 	const bool provider_clean = NT_SUCCESS(Driver::Unload());
+
+	/*
+	 * --hide: blank the driver's resident pages and the hypervisor's own image
+	 * in the nested page table, so neither is readable in guest mode.
+	 *
+	 * Issued straight from this process (the one that holds the exact base
+	 * and size) rather than a separate tool, because a second step would mean
+	 * the resident base crosses a process boundary - typed into a shell or
+	 * written to a file - which is exactly the trace this exists to avoid.
+	 *
+	 * Only attempted when a hypervisor is actually present; without one there
+	 * is nothing to answer the vmmcall, so it is skipped rather than failing.
+	 *
+	 * Hiding a range redirects its pages to the shared blank page, so any later
+	 * guest-mode access (a driver callback, DPC, image enumeration) faults.
+	 * That is the same precondition --free has: it is only safe for a driver
+	 * that will not be executed in guest mode again after this point.
+	 */
+	/*
+	 * hide_ok folds into the exit code only when --hide was requested, so a
+	 * run that did not ask for it keeps the documented contract (the worse of
+	 * driver_ok and provider_clean). A requested hide that did not fully
+	 * happen - no hypervisor, or any operation that failed - must read as a
+	 * failure to a script keying on the exit code.
+	 */
+	bool hide_ok = !hide;
+
+	if (hide) {
+		LogBlank();
+		Log(L"[!] NPT hide" << std::endl);
+
+		if (!HV::CheckPresence()) {
+			Log(L"[-] No hypervisor present; nothing to hide" << std::endl);
+			hide_ok = false;
+		}
+		else {
+			Log(L"[+] hypervisor present" << std::endl);
+
+			// Hide the hypervisor's own image first. Safe by design: its VMEXIT
+			// handlers run in host mode on the host CR3, never through the NPT,
+			// so blanking the guest-mode mapping does not break the handler.
+			if (!HV::Protect()) {
+				Log(L"[-] Hypervisor self-hide failed" << std::endl);
+				hide_ok = false;
+			}
+			else {
+				Log(L"[+] Hypervisor image hidden" << std::endl);
+
+				// Hide the driver this run mapped. Moot once --free freed the
+				// allocation, and only meaningful once DriverEntry succeeded.
+				if (driver_ok && !free && resident_size > 0) {
+					if (!HV::HideMemory(resident_base, resident_size)) {
+						Log(L"[-] Failed to hide the mapped driver's range" << std::endl);
+						hide_ok = false;
+					}
+					else {
+						Log(L"[+] Mapped driver hidden: " << Val(reinterpret_cast<void*>(resident_base))
+							<< L" (" << Val(Hex(resident_size)) << L" bytes)" << std::endl);
+					}
+				}
+
+				// Publish the NPT rewrites to every CPU.
+				Log(L"[*] flushing all processors" << std::endl);
+				if (!HV::FlushAllProcessors()) {
+					Log(L"[!] Not every processor confirmed the NPT flush" << std::endl);
+					hide_ok = false;
+				}
+				else {
+					Log(L"[+] NPT flush confirmed on every processor" << std::endl);
+				}
+			}
+		}
+	}
 
 	LogBlank();
 	if (driver_ok) {
@@ -824,7 +1027,8 @@ int wmain(const int argc, wchar_t** argv) {
 
 	PauseBeforeExit();
 
-	//A DriverEntry that returned an error, or a provider left loaded, is a
-	//failure of the task as a whole and the caller has to be able to act on it.
-	return (driver_ok && provider_clean) ? 0 : -1;
+	//A DriverEntry that returned an error, a provider left loaded, or a
+	//requested hide that did not happen, is a failure of the task as a whole
+	//and the caller has to be able to act on it.
+	return (driver_ok && provider_clean && hide_ok) ? 0 : -1;
 }
