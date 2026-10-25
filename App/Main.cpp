@@ -44,11 +44,11 @@
 #include "../Provider/Driver.hpp"
 #include "../Symbols/Handler/SymbolsHandler.hpp"
 
-//Hypervisor client header (memhv): --hide issues the nested-page-table hide
+//Hypervisor client header (Hypervisor.h): --hide issues the nested-page-table hide
 //commands from the very process that did the mapping, so the resident base
 //never has to be typed into a shell or written to a file the way a separate
 //tool would require.
-#include "memhv.h"
+#include "Hypervisor.h"
 
 /*
  * Build number of the running kernel.
@@ -86,6 +86,12 @@ namespace
 		case STATUS_OBJECT_NAME_COLLISION:    return L"STATUS_OBJECT_NAME_COLLISION";
 		case STATUS_INVALID_IMAGE_FORMAT:     return L"STATUS_INVALID_IMAGE_FORMAT";
 		case STATUS_PRIVILEGE_NOT_HELD:       return L"STATUS_PRIVILEGE_NOT_HELD";
+		//The hypervisor's CheckSupport() refuses to launch and reports this
+		//custom code instead of a standard NTSTATUS. It means the AMD SVM
+		//support gate failed - most often a stale resident hypervisor
+		//(EFER.SVME left set by a prior run), not an Intel CPU, or a CPU
+		//lacking the SVM/NP feature bits.
+		case 0xc0350057:                    return L"STATUS_HV_SUPPORT_CHECK_FAILED";
 		default:                              return L"unknown status";
 		}
 	}
@@ -952,7 +958,11 @@ int wmain(const int argc, wchar_t** argv) {
 		LogBlank();
 		Log(L"[!] NPT hide" << std::endl);
 
-		if (!HV::CheckPresence()) {
+		if (!Driver::IsRunning()) {
+			Log(L"[-] Load Hypervisor.sys via sc start Hypervisor before running --hide" << std::endl);
+			hide_ok = false;
+		}
+		else if (!Hypervisor::CheckPresence()) {
 			Log(L"[-] No hypervisor present; nothing to hide" << std::endl);
 			hide_ok = false;
 		}
@@ -962,7 +972,7 @@ int wmain(const int argc, wchar_t** argv) {
 			// Hide the hypervisor's own image first. Safe by design: its VMEXIT
 			// handlers run in host mode on the host CR3, never through the NPT,
 			// so blanking the guest-mode mapping does not break the handler.
-			if (!HV::Protect()) {
+			if (!Hypervisor::Protect()) {
 				Log(L"[-] Hypervisor self-hide failed" << std::endl);
 				hide_ok = false;
 			}
@@ -972,7 +982,7 @@ int wmain(const int argc, wchar_t** argv) {
 				// Hide the driver this run mapped. Moot once --free freed the
 				// allocation, and only meaningful once DriverEntry succeeded.
 				if (driver_ok && !free && resident_size > 0) {
-					if (!HV::HideMemory(resident_base, resident_size)) {
+					if (!Hypervisor::HideMemory(resident_base, resident_size)) {
 						Log(L"[-] Failed to hide the mapped driver's range" << std::endl);
 						hide_ok = false;
 					}
@@ -984,7 +994,7 @@ int wmain(const int argc, wchar_t** argv) {
 
 				// Publish the NPT rewrites to every CPU.
 				Log(L"[*] flushing all processors" << std::endl);
-				if (!HV::FlushAllProcessors()) {
+				if (!Hypervisor::FlushAllProcessors()) {
 					Log(L"[!] Not every processor confirmed the NPT flush" << std::endl);
 					hide_ok = false;
 				}

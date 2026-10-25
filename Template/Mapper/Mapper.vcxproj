@@ -49,10 +49,10 @@
       <TreatWarningAsError>false</TreatWarningAsError>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <!-- The memhv hypervisor client header, pulled in for the hide flag (see App\Main.cpp).
+      <!-- The Hypervisor client header, pulled in for the hide flag (see App\Main.cpp).
        Referenced in place rather than copied so the VMCall ABI cannot drift
        between the two projects. -->
-      <AdditionalIncludeDirectories>$(SolutionDir)..\..\..\Hypervisor\client\client\Library;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)..\..\..\Hypervisor\Client\Library;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/D "PDB_OFFSETS" %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
