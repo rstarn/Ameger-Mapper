@@ -832,7 +832,8 @@ int wmain(const int argc, wchar_t** argv) {
 		switch (PromptIsHypervisor()) {
 		case 1:
 			hide = true;
-			Log(L"[+] NPT hide enabled: the mapped driver's resident pages and the hypervisor's own image will be hidden in the nested page table" << std::endl);
+			Log(L"[+] --hide auto-enabled" << std::endl);
+			Log(L"[+] NPT hide enabled: the mapped driver's image will be hidden in the nested page table, except its executable span" << std::endl);
 
 			//Never free it: the hypervisor's code runs in host mode on every
 			//VMEXIT, so releasing its image would hang the machine. The NPT hide
@@ -905,6 +906,86 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 
 	/*
+	 * The executable span of the image that was just mapped, for --hide.
+	 *
+	 * ProtectSelf blanks the mapped image in the nested page table but has to
+	 * leave the driver's executable code mapped: the NPF restore path runs out
+	 * of that image in guest mode, so hiding the pages it executes from
+	 * livelocks the handler that would bring them back. This process is the
+	 * only one holding both the raw image and the resident base, so the span is
+	 * computed here and passed to the driver, which hides everything else.
+	 *
+	 * The resident image is the raw image shifted down by the header span
+	 * MapDriver strips when !copyHeader (the default): image RVA r lives at
+	 * resident_base + r - header_skip. With --copy-header nothing is stripped
+	 * and the image keeps its RVAs from resident_base, so header_skip is 0.
+	 *
+	 * header_size is the lowest section VirtualAddress - the same value
+	 * MapDriver strips - not section[0]'s, because the table is not guaranteed
+	 * to be sorted by RVA.
+	 */
+	ULONG64 text_base = 0;
+	SIZE_T text_size = 0;
+
+	PIMAGE_SECTION_HEADER image_section = nullptr;
+	uint16_t image_section_count = 0;
+	if (PE::GetSectionTable(raw_image.data(), raw_image.size(), image_section, image_section_count) && image_section_count > 0) {
+		ULONG32 header_size = image_section[0].VirtualAddress;
+		ULONG32 text_rva = 0;
+		ULONG64 text_end = 0;
+		bool text_found = false;
+
+		for (uint16_t i = 0; i < image_section_count; ++i) {
+			const PIMAGE_SECTION_HEADER section = &image_section[i];
+
+			if (section->VirtualAddress < header_size)
+				header_size = section->VirtualAddress;
+
+			if (!(section->Characteristics & IMAGE_SCN_MEM_EXECUTE))
+				continue;
+
+			//Widened before the add: both fields are file controlled 32-bit
+			//values whose sum can wrap in 32 bits.
+			const ULONG64 section_end = static_cast<ULONG64>(section->VirtualAddress) + section->Misc.VirtualSize;
+
+			if (!text_found || section->VirtualAddress < text_rva)
+				text_rva = section->VirtualAddress;
+			if (!text_found || section_end > text_end)
+				text_end = section_end;
+			text_found = true;
+		}
+
+		const ULONG64 header_skip = copyHeader ? 0 : header_size;
+
+		if (!text_found || text_end <= text_rva) {
+			Log(L"[!] No executable section found; the whole image will be hidden" << std::endl);
+		}
+		else {
+			const ULONG64 offset = (text_rva >= header_skip) ? text_rva - header_skip : 0;
+			const ULONG64 span = text_end - text_rva;
+
+			if (offset >= resident_size) {
+				Log(L"[!] Executable span starts outside the resident image; the whole image will be hidden" << std::endl);
+			}
+			else {
+				//Clamped to what was allocated: the span comes from the file
+				//and the size from the headers, and the range handed to the
+				//driver has to stay inside the resident image.
+				const ULONG64 available = resident_size - offset;
+				text_base = resident_base + offset;
+				text_size = static_cast<SIZE_T>(span < available ? span : available);
+
+				Log(L"[+] Executable span kept mapped: RVA " << Val(Hex(text_rva))
+					<< L", size " << Val(Hex(span)) << L", resident "
+					<< Val(reinterpret_cast<void*>(text_base)) << std::endl);
+			}
+		}
+	}
+	else {
+		Log(L"[!] Section table unreadable; the whole image will be hidden" << std::endl);
+	}
+
+	/*
 	 * The final verdict on the run.
 	 *
 	 * Three independent facts are reported: whether DriverEntry succeeded,
@@ -929,8 +1010,9 @@ int wmain(const int argc, wchar_t** argv) {
 	const bool provider_clean = NT_SUCCESS(Driver::Unload());
 
 	/*
-	 * --hide: blank the driver's resident pages and the hypervisor's own image
-	 * in the nested page table, so neither is readable in guest mode.
+	 * --hide: blank the image this run mapped in the nested page table, minus
+	 * its executable span, so it is not readable in guest mode while the code
+	 * the driver still executes from stays mapped.
 	 *
 	 * Issued straight from this process (the one that holds the exact base
 	 * and size) rather than a separate tool, because a second step would mean
@@ -943,7 +1025,8 @@ int wmain(const int argc, wchar_t** argv) {
 	 * Hiding a range redirects its pages to the shared blank page, so any later
 	 * guest-mode access (a driver callback, DPC, image enumeration) faults.
 	 * That is the same precondition --free has: it is only safe for a driver
-	 * that will not be executed in guest mode again after this point.
+	 * that will not be executed in guest mode again after this point - which is
+	 * why the executable span, the part that does execute, is left mapped.
 	 */
 	/*
 	 * hide_ok folds into the exit code only when --hide was requested, so a
@@ -958,49 +1041,48 @@ int wmain(const int argc, wchar_t** argv) {
 		LogBlank();
 		Log(L"[!] NPT hide" << std::endl);
 
-		if (!Driver::IsRunning()) {
-			Log(L"[-] Load Hypervisor.sys via sc start Hypervisor before running --hide" << std::endl);
-			hide_ok = false;
-		}
-		else if (!Hypervisor::CheckPresence()) {
+		if (!Hypervisor::CheckPresence()) {
 			Log(L"[-] No hypervisor present; nothing to hide" << std::endl);
 			hide_ok = false;
 		}
 		else {
 			Log(L"[+] hypervisor present" << std::endl);
 
-			// Hide the hypervisor's own image first. Safe by design: its VMEXIT
-			// handlers run in host mode on the host CR3, never through the NPT,
-			// so blanking the guest-mode mapping does not break the handler.
-			if (!Hypervisor::Protect()) {
+			/*
+			 * Hide the image this run mapped, minus its executable span.
+			 *
+			 * ProtectSelf rewrites the NPT for the mapped image but leaves
+			 * [text_base, text_base + text_size) mapped: that is the code the
+			 * driver executes on the NPF restore path, so hiding it would
+			 * livelock the restore. The range was computed from the raw image
+			 * above; with 0/0 the driver hides the whole image, the legacy
+			 * behaviour, and that path is logged when it is taken.
+			 *
+			 * There is deliberately no HideMemory() fallback here. It covers
+			 * the whole resident range, executable span included, which is the
+			 * exact livelock ProtectSelf is being given the span to avoid.
+			 */
+			if (!Hypervisor::Protect(text_base, text_size)) {
 				Log(L"[-] Hypervisor self-hide failed" << std::endl);
 				hide_ok = false;
 			}
+			else if (text_size) {
+				Log(L"[+] Hypervisor image hidden except its executable span: "
+					<< Val(reinterpret_cast<void*>(text_base)) << L" (" << Val(Hex(text_size))
+					<< L" bytes)" << std::endl);
+			}
 			else {
-				Log(L"[+] Hypervisor image hidden" << std::endl);
+				Log(L"[+] Hypervisor image hidden (whole image)" << std::endl);
+			}
 
-				// Hide the driver this run mapped. Moot once --free freed the
-				// allocation, and only meaningful once DriverEntry succeeded.
-				if (driver_ok && !free && resident_size > 0) {
-					if (!Hypervisor::HideMemory(resident_base, resident_size)) {
-						Log(L"[-] Failed to hide the mapped driver's range" << std::endl);
-						hide_ok = false;
-					}
-					else {
-						Log(L"[+] Mapped driver hidden: " << Val(reinterpret_cast<void*>(resident_base))
-							<< L" (" << Val(Hex(resident_size)) << L" bytes)" << std::endl);
-					}
-				}
-
-				// Publish the NPT rewrites to every CPU.
-				Log(L"[*] flushing all processors" << std::endl);
-				if (!Hypervisor::FlushAllProcessors()) {
-					Log(L"[!] Not every processor confirmed the NPT flush" << std::endl);
-					hide_ok = false;
-				}
-				else {
-					Log(L"[+] NPT flush confirmed on every processor" << std::endl);
-				}
+			// Publish the NPT rewrites to every CPU.
+			Log(L"[*] flushing all processors" << std::endl);
+			if (!Hypervisor::FlushAllProcessors()) {
+				Log(L"[!] Not every processor confirmed the NPT flush" << std::endl);
+				hide_ok = false;
+			}
+			else {
+				Log(L"[+] NPT flush confirmed on every processor" << std::endl);
 			}
 		}
 	}

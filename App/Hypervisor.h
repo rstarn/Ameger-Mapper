@@ -134,9 +134,17 @@ namespace Hypervisor
         return output == Shared::COMM_CHECK;
     }
 
-    inline bool Protect()
+    //
+    // Hides the mapped image in the NPT, minus [textBase, textBase + textSize).
+    //
+    // The driver's own executable code runs in guest mode on the NPF restore
+    // path, so blanking the pages it is executing from livelocks that restore.
+    // textBase is the resident VA of the executable span and textSize its
+    // length; passing 0/0 hides the whole image (the legacy behaviour).
+    //
+    inline bool Protect(ULONG64 textBase = 0, SIZE_T textSize = 0)
     {
-        const ULONG64 output = CallVM(Shared::MAGIC, Shared::CommandId::ProtectSelf);
+        const ULONG64 output = CallVM(Shared::MAGIC, Shared::CommandId::ProtectSelf, textBase, static_cast<ULONG64>(textSize));
         return output == Shared::ErrorCodes::Success;
     }
 
