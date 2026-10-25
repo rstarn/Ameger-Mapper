@@ -91,7 +91,7 @@ namespace
 		//support gate failed - most often a stale resident hypervisor
 		//(EFER.SVME left set by a prior run), not an Intel CPU, or a CPU
 		//lacking the SVM/NP feature bits.
-		case 0xc0350057:                    return L"STATUS_HV_SUPPORT_CHECK_FAILED";
+		case (NTSTATUS)0xc0350057:           return L"STATUS_HV_SUPPORT_CHECK_FAILED";
 		default:                              return L"unknown status";
 		}
 	}
@@ -832,7 +832,7 @@ int wmain(const int argc, wchar_t** argv) {
 		switch (PromptIsHypervisor()) {
 		case 1:
 			hide = true;
-			Log(L"[+] --hide auto-enabled" << std::endl);
+			LogBlank();
 			Log(L"[+] NPT hide enabled: the mapped driver's image will be hidden in the nested page table, except its executable span" << std::endl);
 
 			//Never free it: the hypervisor's code runs in host mode on every
@@ -841,6 +841,7 @@ int wmain(const int argc, wchar_t** argv) {
 			//the virtual range stays contiguous, so the hide still targets it.
 			if (enableIndPages())
 				indPagesMode = true;
+			LogBlank();
 			break;
 		case 0:
 			//The interactive answer is the confirmation --force-free normally
@@ -1039,14 +1040,14 @@ int wmain(const int argc, wchar_t** argv) {
 
 	if (hide) {
 		LogBlank();
-		Log(L"[!] NPT hide" << std::endl);
+		Log(L"[!] NPT Hide = Enabled" << std::endl);
 
 		if (!Hypervisor::CheckPresence()) {
 			Log(L"[-] No hypervisor present; nothing to hide" << std::endl);
 			hide_ok = false;
 		}
 		else {
-			Log(L"[+] hypervisor present" << std::endl);
+			Log(L"[+] Hypervisor Presence = Confirmed" << std::endl);
 
 			/*
 			 * Hide the image this run mapped, minus its executable span.
@@ -1076,13 +1077,13 @@ int wmain(const int argc, wchar_t** argv) {
 			}
 
 			// Publish the NPT rewrites to every CPU.
-			Log(L"[*] flushing all processors" << std::endl);
+			LogBlank();
 			if (!Hypervisor::FlushAllProcessors()) {
 				Log(L"[!] Not every processor confirmed the NPT flush" << std::endl);
 				hide_ok = false;
 			}
 			else {
-				Log(L"[+] NPT flush confirmed on every processor" << std::endl);
+				Log(L"[+] NPT Flush = Confirmed (Every Processor)" << std::endl);
 			}
 		}
 	}

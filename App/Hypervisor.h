@@ -12,6 +12,8 @@
 #include <stdexcept>
 #include <stdint.h>
 
+#include "../Utilities/Console.hpp"
+
 namespace Hypervisor
 {
     namespace Shared
@@ -182,21 +184,26 @@ namespace Hypervisor
             GROUP_AFFINITY previous = { 0 };
             if (!SetThreadGroupAffinity(thread, &affinity, &previous))
             {
-                printf("[*] flush CPU %lu: pin failed\n", index);
+                printf("  [*] flush CPU %lu: pin failed\n", index);
                 allFlushed = false;
                 continue;
             }
 
             if (CallVM(Shared::MAGIC, Shared::CommandId::FlushNpt) != Shared::ErrorCodes::Success)
             {
-                printf("[*] flush CPU %lu: vmmcall failed\n", index);
+                printf("  [*] flush CPU %lu: vmmcall failed\n", index);
                 allFlushed = false;
             }
             else
             {
-                printf("[*] flush CPU %lu: ok\n", index);
+                if (Console::ColorsDisabled())
+                    printf("  [+] Flushing CPU %lu: Success\n", index);
+                else
+                    printf("  \x1b[92m[+]\x1b[0m Flushing CPU \x1b[92m%lu\x1b[0m: \x1b[92mSuccess\x1b[0m\n", index);
             }
         }
+
+        printf("\n");
 
         SetThreadGroupAffinity(thread, &original, nullptr);
 
