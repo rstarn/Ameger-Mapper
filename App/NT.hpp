@@ -32,6 +32,8 @@ namespace Nt
 	extern "C" NTSTATUS NtLoadDriver(PUNICODE_STRING DriverServiceName);
 	extern "C" NTSTATUS NtUnloadDriver(PUNICODE_STRING DriverServiceName);
 	extern "C" NTSTATUS RtlAdjustPrivilege(ULONG Privilege, BOOLEAN Enable, BOOLEAN Client, BOOLEAN* WasEnabled);
+	//ntdll export; fills the same RTL_OSVERSIONINFOW that GetVersionExW uses.
+	extern "C" NTSTATUS RtlGetVersion(PRTL_OSVERSIONINFOW version_information);
 
 	/*
 	 * SystemModuleInformation result, used to locate loaded kernel modules.

@@ -1336,7 +1336,8 @@ bool Driver::MemCopy(uint64_t destination, uint64_t source, uint64_t size) {
 		return false;
 
 	Provider::CopyRequest request{};
-	Provider::FillCopyRequest(request, destination, source, size);
+	if (!Provider::FillCopyRequest(request, destination, source, size))
+		return false;
 
 	DWORD bytes_returned = 0;
 	return DeviceIoControl(hDevice, Provider::kCopyIoctl, &request, sizeof(request), nullptr, 0, &bytes_returned, nullptr) != FALSE;
@@ -1996,6 +1997,20 @@ typedef PVOID(__stdcall* MmAllocateIndependentPagesExFn)(uint32_t size, int part
 //Returns 0 on failure.
 uint64_t Driver::MmAllocateIndependentPagesEx(uint32_t size)
 {
+	/*
+	 * Defense in depth: even if the caller skipped its own gate, refuse to
+	 * invoke this routine on builds where its signature changed.
+	 */
+	RTL_OSVERSIONINFOW osvi{};
+	osvi.dwOSVersionInfoSize = sizeof(osvi);
+	if (NT_SUCCESS(Nt::RtlGetVersion(&osvi)) && osvi.dwBuildNumber >= 26100)
+	{
+		Log(L"[-] MmAllocateIndependentPagesEx: The signature changed on Windows "
+			L"build 26100; refusing to invoke it. Use the default pool mode."
+			<< std::endl);
+		return 0;
+	}
+
 	uint64_t allocated_pages{};
 
 	static uint64_t kernel_MmAllocateIndependentPagesEx = 0;

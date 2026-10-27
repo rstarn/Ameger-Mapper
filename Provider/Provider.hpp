@@ -69,10 +69,15 @@ namespace Provider
 	//This is the whole provider abstraction: MemCopy in Driver.cpp calls this
 	//and issues the IOCTL, and every other memory helper in the project is
 	//built on top of it.
-	inline void FillCopyRequest(CopyRequest& request, uint64_t destination, uint64_t source, uint64_t length) {
+	//Returns false when length is zero or would not fit the DWORD Size field.
+	inline bool FillCopyRequest(CopyRequest& request, uint64_t destination, uint64_t source, uint64_t length)
+	{
+		if (length == 0 || length > 0xFFFFFFFFULL)
+			return false;
 		request = CopyRequest{};
 		request.Destination = (PVOID)destination;
 		request.Source = (PVOID)source;
 		request.Size = (DWORD)length;
+		return true;
 	}
 }

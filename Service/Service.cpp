@@ -11,6 +11,7 @@
 #include <Windows.h>
 #include <string>
 #include <iostream>
+#include <vector>
 
 #include "../Utilities/Console.hpp"
 #include "../App/NT.hpp"
@@ -42,11 +43,68 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 		RegQueryValueExW(dservice, L"Type", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS ||
 		RegQueryValueExW(dservice, L"Start", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
 
-	const auto discard_service_key = [&]() {
-		if (key_existed) {
-			Log(L"[*] A service key of this name already existed and was left in place" << std::endl);
+	DWORD orig_type_len = 0;
+	DWORD orig_type_data = 0;
+	std::wstring orig_image_path;
+	bool have_orig_image = false;
+	bool have_orig_type = false;
+
+	{
+		DWORD sz = 0;
+		if (RegQueryValueExW(dservice, L"ImagePath", nullptr, nullptr, nullptr, &sz) == ERROR_SUCCESS && sz > 0)
+		{
+			std::vector<wchar_t> buf(sz / sizeof(wchar_t) + 1);
+			DWORD got = sz;
+			if (RegQueryValueExW(dservice, L"ImagePath", nullptr, nullptr,
+					reinterpret_cast<LPBYTE>(buf.data()), &got) == ERROR_SUCCESS)
+			{
+				orig_image_path.assign(buf.data());
+				have_orig_image = true;
+			}
+		}
+
+		DWORD got = sizeof(orig_type_data);
+		if (RegQueryValueExW(dservice, L"Type", nullptr, nullptr,
+				reinterpret_cast<LPBYTE>(&orig_type_data), &got) == ERROR_SUCCESS)
+		{
+			orig_type_len = got;
+			have_orig_type = true;
+		}
+	}
+
+	const auto restore_or_delete_service_key = [&]() {
+		if (key_existed)
+		{
+			HKEY restore_key;
+			LSTATUS rs = RegOpenKeyW(HKEY_LOCAL_MACHINE, servicesPath.c_str(), &restore_key);
+			if (rs == ERROR_SUCCESS)
+			{
+				if (have_orig_image)
+				{
+					RegSetKeyValueW(restore_key, NULL, L"ImagePath", REG_EXPAND_SZ,
+						orig_image_path.c_str(),
+						static_cast<DWORD>((orig_image_path.size() + 1) * sizeof(wchar_t)));
+				}
+				else
+				{
+					RegDeleteKeyValueW(restore_key, NULL, L"ImagePath");
+				}
+
+				if (have_orig_type)
+				{
+					RegSetKeyValueW(restore_key, NULL, L"Type", REG_DWORD,
+						&orig_type_data, orig_type_len);
+				}
+				else
+				{
+					RegDeleteKeyValueW(restore_key, NULL, L"Type");
+				}
+				RegCloseKey(restore_key);
+				Log(L"[*] A service key of this name already existed; its original values were restored" << std::endl);
+			}
 			return;
 		}
+
 		RegDeleteTreeW(HKEY_LOCAL_MACHINE, servicesPath.c_str());
 	};
 
@@ -54,7 +112,7 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 	status = RegSetKeyValueW(dservice, NULL, L"ImagePath", REG_EXPAND_SZ, nPath.c_str(), (DWORD)(nPath.size() + 1) * sizeof(wchar_t));
 	if (status != ERROR_SUCCESS) {
 		RegCloseKey(dservice);
-		discard_service_key();
+		restore_or_delete_service_key();
 		Log("[-] Can't create 'ImagePath' registry value" << std::endl);
 		return STATUS_REGISTRY_IO_FAILED;
 	}
@@ -62,7 +120,7 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 	status = RegSetKeyValueW(dservice, NULL, L"Type", REG_DWORD, &ServiceTypeKernel, sizeof(DWORD));
 	if (status != ERROR_SUCCESS) {
 		RegCloseKey(dservice);
-		discard_service_key();
+		restore_or_delete_service_key();
 		Log("[-] Can't create 'Type' registry value" << std::endl);
 		return STATUS_REGISTRY_IO_FAILED;
 	}
@@ -75,7 +133,7 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 	//but does not have enabled by default.
 	NTSTATUS ntStatus = Nt::RtlAdjustPrivilege(SE_LOAD_DRIVER_PRIVILEGE, TRUE, FALSE, &SeLoadDriverWasEnabled);
 	if (!NT_SUCCESS(ntStatus)) {
-		discard_service_key();
+		restore_or_delete_service_key();
 		Log("[-] Fatal error: failed to acquire SE_LOAD_DRIVER_PRIVILEGE. Make sure you are running as administrator." << std::endl);
 		return ntStatus;
 	}
@@ -98,11 +156,11 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 	}
 
 	if (!NT_SUCCESS(ntStatus)) {
-		//Remove the service
-		status = RegDeleteTreeW(HKEY_LOCAL_MACHINE, servicesPath.c_str());
-		if (status != ERROR_SUCCESS) {
-			Log("[-] Can't delete service registry key after NtLoadDriver failure" << std::endl);
-		}
+		//A pre-existing key is restored to its original values; a key this run
+		//created is deleted. The helper reopens its own key handle because
+		//RegCloseKey(dservice) already ran, so the original handle is closed
+		//by the time NtLoadDriver has returned.
+		restore_or_delete_service_key();
 	}
 	else {
 		/*

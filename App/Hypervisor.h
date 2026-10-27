@@ -84,6 +84,15 @@ namespace Hypervisor
                 throw std::runtime_error("Out of memory");
 
             memcpy(Data::Shellcode, code, sizeof(code));
+
+            DWORD old_prot = 0;
+            if (!VirtualProtect(Data::Shellcode, sizeof(code),
+                    PAGE_EXECUTE_READ, &old_prot))
+            {
+                VirtualFree(Data::Shellcode, 0, MEM_RELEASE);
+                Data::Shellcode = nullptr;
+                throw std::runtime_error("Cannot apply execute-read protection to VMCALL stub");
+            }
         }
 
         typedef ULONG64(__stdcall* CallFunc)(ULONG64 arg1, ULONG64 arg2, ULONG64 arg3, ULONG64 arg4);
