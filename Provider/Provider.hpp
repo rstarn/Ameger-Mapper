@@ -36,6 +36,14 @@ namespace Provider
 	//The IOCTL that performs the unchecked copy.
 	constexpr ULONG32 kCopyIoctl = 0x80002014;
 
+	// Upper bound on a single provider copy, enforced in user mode.
+	// The kernel handler is inside the embedded PdFwKrnl binary and
+	// performs no validation of its own; this constant is the only
+	// bound the caller can enforce. Sized so that the largest single
+	// legitimately-needed copy (one page-table install for the PTE
+	// self-map) fits comfortably inside.
+	constexpr ULONG32 kMaxCopySize = 0x10000000; // 256 MB
+
 	/*
 	 * Layout of the IOCTL input buffer.
 	 *

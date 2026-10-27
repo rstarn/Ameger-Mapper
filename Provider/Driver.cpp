@@ -1326,6 +1326,12 @@ NTSTATUS Driver::Unload() {
 }
 
 bool Driver::MemCopy(uint64_t destination, uint64_t source, uint64_t size) {
+	if (size > Provider::kMaxCopySize)
+		return false;
+	if (destination + size < destination)
+		return false;
+	if (source + size < source)
+		return false;
 	if (!destination || !source || !size)
 		return false;
 
