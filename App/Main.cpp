@@ -31,11 +31,8 @@
 #include <bcrypt.h>
 #include <wintrust.h>
 #include <softpub.h>
-//advapi32, for the elevation check below: CheckTokenMembership and the SID
-//helpers live there, not in kernel32.
 #pragma comment(lib, "bcrypt.lib")
 #pragma comment(lib, "wintrust.lib")
-#pragma comment(lib, "advapi32.lib")
 
 #include "../Mapper/Mapper.hpp"
 #include "../PE/PE.hpp"
@@ -43,6 +40,7 @@
 #include "../Utilities/Console.hpp"
 #include "../Provider/Driver.hpp"
 #include "../Symbols/Handler/SymbolsHandler.hpp"
+#include "Probing/Probe.h"
 
 //Hypervisor client header (Hypervisor.h): --hide issues the nested-page-table hide
 //commands from the very process that did the mapping, so the resident base
@@ -526,40 +524,11 @@ int paramExists(const int argc, wchar_t** argv, const wchar_t* param) {
 static bool IsOptionValue(const int argc, wchar_t** argv, int i) {
 	if (i < 1)
 		return false;
-	return paramExists(argc, argv, L"offsetsPath") == i - 1;
+	return paramExists(argc, argv, L"offsetsPath") == i - 1
+		|| paramExists(argc, argv, L"probe-context") == i - 1;
 }
 
-/*
- * Is this process running with the administrator token enabled?
- *
- * The manifest asks for requireAdministrator, so on the supported launch paths
- * this is always true. It is checked anyway because the tool can also be started
- * from a shell that ignores the manifest - a debugger, or a host that creates
- * the process itself - and the failure that produces is the least legible one in
- * the project: SE_LOAD_DRIVER_PRIVILEGE cannot be acquired, Service.cpp reports
- * "make sure you are running as administrator" after the provider has already
- * been written to %TEMP%, and nothing has been mapped.
- */
-static bool IsElevated() {
-	SID_IDENTIFIER_AUTHORITY nt_authority = SECURITY_NT_AUTHORITY;
-	PSID administrators = nullptr;
 
-	if (!AllocateAndInitializeSid(&nt_authority, 2,
-		SECURITY_BUILTIN_DOMAIN_RID,
-		DOMAIN_ALIAS_RID_ADMINS,
-		0, 0, 0, 0, 0, 0,
-		&administrators))
-		return false;
-
-	BOOL member = FALSE;
-	const BOOL checked = CheckTokenMembership(nullptr, administrators, &member);
-	FreeSid(administrators);
-
-	//A failed check is reported as "not elevated" rather than as elevated: the
-	//caller's response to each is the same, and guessing wrong in the other
-	//direction would only produce the failure this is meant to explain early.
-	return checked && member != FALSE;
-}
 
 void help() {
 	LogBlank();
@@ -583,6 +552,12 @@ int wmain(const int argc, wchar_t** argv) {
 		PauseBeforeExit();
 		return 0;
 	}
+
+	//The --probe-context switch runs the param2 propagation probe and returns
+	//immediately, without entering the normal map flow.
+	int probeContextIdx = paramExists(argc, argv, L"probe-context");
+	if (probeContextIdx > 0)
+		return RunProbeContext(argc, argv, probeContextIdx);
 
 	bool free = paramExists(argc, argv, L"free") > 0;
 	bool forceFree = paramExists(argc, argv, L"force-free") > 0;
@@ -687,7 +662,7 @@ int wmain(const int argc, wchar_t** argv) {
 	//proceed with the default behaviour instead of what was asked for.
 	static const wchar_t* knownFlags[] = {
 		L"free", L"force-free", L"indPages", L"PassAllocationPtr", L"copy-header",
-		L"hide", L"no-forensics", L"dontUpdateOffsets", L"offsetsPath", L"help"
+		L"hide", L"no-forensics", L"dontUpdateOffsets", L"offsetsPath", L"help", L"probe-context"
 	};
 	for (int i = 1; i < argc; i++) {
 		const wchar_t* arg = argv[i];

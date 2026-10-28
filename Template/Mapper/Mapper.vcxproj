@@ -73,6 +73,7 @@ copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Comm
   <ItemGroup>
     <!-- App -->
     <ClCompile Include="..\..\App\Main.cpp" />
+    <ClCompile Include="..\..\App\Probing\Probe.cpp" />
     <!-- Mapper -->
     <ClCompile Include="..\..\Mapper\Mapper.cpp" />
     <!-- PE -->

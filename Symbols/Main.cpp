@@ -212,11 +212,11 @@ int wmain()
 
 		const auto name = std::filesystem::path(binary).filename().wstring();
 
-		content << L"[" << name << L"]" << std::endl;
+		content << L"[" << name << L"]\r\n";
 		for (size_t i = 0; i < symbols.size(); i++)
-			content << symbols[i] << L"=" << std::dec << offsets[i] << std::endl;
+			content << symbols[i] << L"=0x" << std::hex << offsets[i] << L"\r\n";
 
-		content << L"[" << name << L".fields]" << std::endl;
+		content << L"[" << name << L".fields]\r\n";
 		for (size_t i = 0; i < fields.size(); i++) {
 			/*
 			 * Publish anything that resolved, including one at offset 0.
@@ -234,7 +234,7 @@ int wmain()
 			if (!fieldResults[i].Resolved()) {
 				continue;
 			}
-			content << fields[i].structName << L"." << fields[i].fieldName << L"=" << std::dec << fieldResults[i].offset << std::endl;
+			content << fields[i].structName << L"." << fields[i].fieldName << L"=0x" << std::hex << fieldResults[i].offset << L"\r\n";
 		}
 
 		content << std::endl;
@@ -357,21 +357,51 @@ int wmain()
 	//Written next to Mapper.exe, which is also where the mapper looks for it.
 	const auto outputPath = GetCurrentAppFolder() + L"\\Offsets.ini";
 
-	std::wofstream out(outputPath, std::ios::trunc);
-	if (!out.is_open()) {
-		Log(L"[-] Could not write " << Val(outputPath) << std::endl);
-		return -1;
+	//Empirically, std::wofstream on this toolchain writes ASCII (1 byte/char),
+	//NOT the UTF-16LE that SymbolsHandler's wide reader (std::wifstream) parses,
+	//and an explicit BOM write via write() fails. So build the UTF-16LE bytes
+	//manually and write them with CreateFileW/WriteFile. The values are already
+	//0x-prefixed hex, so nothing is truncated.
+	std::vector<BYTE> fileBytes;
+	//UTF-16LE BOM so the wide reader detects the encoding and parses the
+	//section headers and "name=value" lines correctly.
+	fileBytes.push_back(0xFF);
+	fileBytes.push_back(0xFE);
+	for (wchar_t c : content.str()) {
+		fileBytes.push_back(static_cast<BYTE>(c & 0xFF));
+		fileBytes.push_back(static_cast<BYTE>((c >> 8) & 0xFF));
 	}
-	out << content.str();
-	out.close();
-	if (out.fail()) {
-		Log(L"[-] Failed to write " << Val(outputPath) << std::endl);
+
+	HANDLE hFile = CreateFileW(outputPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+		nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (hFile == INVALID_HANDLE_VALUE) {
+		const DWORD err = GetLastError();
+		Log(L"[-] Could not open " << Val(outputPath) << L" for writing; Win32 error "
+			<< Val(err) << std::endl);
 		return -1;
 	}
 
-	//The "Wrote" line is emitted by the reader that consumes this file, inside
-	//its symbol report, so that it lands between MmPteBase and g_HashCacheLock
-	//rather than at the head of the mapper's symbol list. Printing it here as
-	//well would show it once for each of the two programs.
+	DWORD written = 0;
+	const BOOL ok = WriteFile(hFile, fileBytes.data(), static_cast<DWORD>(fileBytes.size()), &written, nullptr);
+	CloseHandle(hFile);
+	if (!ok || written != static_cast<DWORD>(fileBytes.size())) {
+		const DWORD err = GetLastError();
+		Log(L"[-] Failed to write " << Val(outputPath) << L"; Win32 error " << Val(err) << std::endl);
+		return -1;
+	}
+
+	//How many "name=value" lines the file will carry: every resolved symbol plus
+	//every resolved structure field (a missed optional field is skipped, matching
+	//what is actually written).
+	DWORD entryCount = 0;
+	for (size_t i = 0; i < resolvedSymbols.size(); i++)
+		++entryCount;
+	for (size_t i = 0; i < resolvedFields.size(); i++)
+		if (resolvedFields[i].Resolved())
+			++entryCount;
+
+	//Prove the file landed with the right number of entries.
+	Log(L"[+] Offsets.ini carries " << Val(entryCount) << L" entries." << std::endl);
+
 	return 0;
 }

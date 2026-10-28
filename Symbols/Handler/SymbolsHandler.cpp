@@ -15,6 +15,8 @@
 #include <filesystem>
 #include <utility>
 #include <vector>
+#include <sstream>
+#include <iterator>
 
 #include "../../Utilities/Utilities.hpp"
 #include "../../Utilities/Console.hpp"
@@ -195,6 +197,10 @@ constexpr size_t kPathBufferChars = 32768;
 bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::wstring& updater) {
 	symbols.clear();
 
+	//Trace the exact path being read so a failed run shows where the offsets
+	//file was looked for instead of failing silently.
+	Log(L"[*] Attempting to load Offsets.ini from: " << Val(requestedPath) << std::endl);
+
 	std::wstring path = requestedPath;
 
 	//Grouped explicitly: the original relied on && binding tighter than ||,
@@ -258,14 +264,52 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 		path = outputPath;
 	}
 
+	//Prove the file actually exists before parsing, using the Win32 API so a
+	//missing file reports its absence rather than a generic open failure.
+	const DWORD attributes = GetFileAttributesW(path.c_str());
+	if (attributes == INVALID_FILE_ATTRIBUTES) {
+		Log(L"[-] File does not exist! " << Val(path) << std::endl);
+		return false;
+	}
+
+	//Log the file size so a zero-byte or truncated file stands out.
+	{
+		HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+			nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (hFile != INVALID_HANDLE_VALUE) {
+			const DWORD fileSize = GetFileSize(hFile, nullptr);
+			Log(L"[*] Offsets.ini size: " << Val(fileSize) << L" bytes." << std::endl);
+			CloseHandle(hFile);
+		}
+	}
+
 	//INI shaped: [section] headers are read for the log only, the entries
 	//themselves are a flat name = offset list.
 	//load file with ini format
-	std::wifstream file(path);
-	if (!file.is_open()) {
+	//
+	//std::wifstream on this toolchain decodes the file in the ANSI code page,
+	//treating each UTF-16LE byte as a separate wchar_t, so a UTF-16LE
+	//Offsets.ini comes out as char+null pairs and every offset is rejected as
+	//malformed. Read the file as raw bytes and decode the UTF-16LE content
+	//explicitly, then feed the decoded lines to the parser below.
+	std::ifstream bytes(path, std::ios::binary);
+	if (!bytes.is_open()) {
 		Log(L"[-] Failed to open offsets file" << std::endl);
 		return false;
 	}
+
+	std::vector<char> raw((std::istreambuf_iterator<char>(bytes)), std::istreambuf_iterator<char>());
+	std::wstring text;
+	//Skip the UTF-16LE BOM if present.
+	size_t start = 0;
+	if (raw.size() >= 2 && (unsigned char)raw[0] == 0xFF && (unsigned char)raw[1] == 0xFE)
+		start = 2;
+	for (size_t i = start; i + 1 < raw.size(); i += 2) {
+		const unsigned short u = static_cast<unsigned char>(raw[i]) |
+			(static_cast<unsigned short>(static_cast<unsigned char>(raw[i + 1])) << 8);
+		text.push_back(static_cast<wchar_t>(u));
+	}
+	std::wstringstream tss(text);
 
 	//Lines are buffered and reported in two groups - every symbol, then every
 	//structure field - so the console report has the same shape SymbolTool.exe
@@ -292,7 +336,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	size_t symbolCount = 0;
 	size_t fieldCount = 0;
 
-	while (std::getline(file, line)) {
+	while (std::getline(tss, line)) {
 		if (line.empty() || line[0] == L';' || line[0] == L'#') {
 			continue;
 		}
@@ -507,7 +551,25 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 			<< (missing.empty() ? std::wstring(L" - no entries were parsed")
 				: std::wstring(L" - missing: ") + missing)
 			<< std::endl);
-		Log(L"[-] Refusing to map on compiled-in defaults; run without --dontUpdateOffsets to regenerate it" << std::endl);
+
+		//Prove what the parser actually read: dump the first 100 wide chars of
+		//the file (BOM included) so a mangled or empty file is visible at a glance.
+		if (!missing.empty()) {
+			std::wifstream peek(path);
+			if (peek.is_open()) {
+				wchar_t buf[100] = { 0 };
+				peek.read(buf, 100);
+				const std::wstring head(buf, peek.gcount());
+				const std::wstring headToShow = head.empty() ? std::wstring(L"(empty)") : head;
+				Log(L"[*] First 100 characters of " << Val(path) << L":");
+				LogRaw(headToShow);
+			}
+		}
+
+		const std::wstring toolCommand = Utilities::GetCurrentAppFolder() + L"\\" + SYMBOL_TOOL_EXE;
+		Log(L"[-] Refusing to map on compiled-in defaults; run '" << Val(toolCommand)
+			<< L"' (no arguments, from the release folder) to regenerate Offsets.ini" << std::endl);
+		Log(L"[-] Equivalently, run Mapper.exe without --dontUpdateOffsets to auto-regenerate it" << std::endl);
 		LogBlank();
 		symbols.clear();
 		return false;

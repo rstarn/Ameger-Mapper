@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>15.0</VCProjectVersion>
+    <ProjectGuid>{9E1D0A37-5B2C-4F6D-8A12-COREBASE0001}</ProjectGuid>
+    <RootNamespace>Base</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.28000.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <PropertyGroup Label="WDK Bootstrap">
+    <WDKContentRoot>C:\Program Files (x86)\Windows Kits\10\</WDKContentRoot>
+    <TargetPlatformVersion>10.0.28000.0</TargetPlatformVersion>
+    <DDKPlatform>x64</DDKPlatform>
+    <WDKBuildFolder>10.0.28000.0</WDKBuildFolder>
+    <WDKBinRoot_x86>$(WDKContentRoot)bin\10.0.28000.0\x86\</WDKBinRoot_x86>
+    <WDKBinRoot_x64>$(WDKContentRoot)bin\10.0.28000.0\x64\</WDKBinRoot_x64>
+    <DriverTargetPlatform>Desktop</DriverTargetPlatform>
+    <DDKPropsPath>$(WDKContentRoot)DesignTime\CommonConfiguration\Neutral\WDK\$(TargetPlatformVersion)\WDK.props</DDKPropsPath>
+    <DDKTARGETS>$(WDKContentRoot)build\$(WDKBuildFolder)\WindowsDriver.KernelMode.CX.targets</DDKTARGETS>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <Import Project="$(DDKPropsPath)" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Driver</ConfigurationType>
+    <DriverType>WDM</DriverType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <SpectreMitigation>false</SpectreMitigation>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(ProjectDir)Release\</OutDir>
+    <IntDir>$(ProjectDir)obj\$(PlatformShortName)\</IntDir>
+    <TargetName>Base</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <PreprocessorDefinitions>NTDDK_EXTRAS;_AMD64_;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>
+        C:\Program Files (x86)\Windows Kits\10\Include\10.0.28000.0\km;
+        D:\Ameger\Injector\Ameger;
+        %(AdditionalIncludeDirectories)
+      </AdditionalIncludeDirectories>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <Link>
+      <SubSystem>NATIVE</SubSystem>
+      <EntryPointSymbol>DriverEntry</EntryPointSymbol>
+      <DriverType>WDM</DriverType>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <LinkerPath>C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.51.36231\bin\Hostx86\x64\link.exe</LinkerPath>
+      <AdditionalLibraryDirectories>
+        C:\Program Files (x86)\Windows Kits\10\Lib\10.0.28000.0\km\x64;
+        C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.51.36231\lib\x64;
+        %(AdditionalLibraryDirectories)
+      </AdditionalLibraryDirectories>
+      <AdditionalDependencies>ntoskrnl.lib;wdm.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="Entry.c" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="$(DDKTARGETS)" />
+</Project>

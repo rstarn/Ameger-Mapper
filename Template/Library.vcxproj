@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release_Pdb_Offset|x64">
+      <Configuration>Release_Pdb_Offset</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <VCProjectVersion>17.0</VCProjectVersion>
+    <ProjectGuid>{3A7C9E21-5B4D-4F6A-9C8E-2D1B7A4E0F35}</ProjectGuid>
+    <RootNamespace>AmegerMapper</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_Pdb_Offset|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v145</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_Pdb_Offset|x64'">
+    <TargetName>AmegerMapper</TargetName>
+    <OutDir>D:\Ameger\Injector\Build\Lib\</OutDir>
+    <IntDir>$(TEMP)\amager_build\obj\MapperLib\</IntDir>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release_Pdb_Offset|x64'">
+    <ClCompile>
+      <WarningLevel>Level4</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalIncludeDirectories>..\Mapper;..\PE;..\Provider;..\Symbols\Handler;..\Utilities;..\Service;D:\Ameger\Injector\Ameger;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Lib>
+      <OutputDirectory>D:\Ameger\Injector\Build\Lib\</OutputDirectory>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClInclude Include="..\Provider\Resource.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\Mapper\Mapper.cpp" />
+    <ClCompile Include="..\PE\PE.cpp" />
+    <ClCompile Include="..\Provider\Driver.cpp" />
+    <ClCompile Include="..\Symbols\Handler\SymbolsHandler.cpp" />
+    <ClCompile Include="..\Utilities\Utilities.cpp" />
+    <ClCompile Include="..\Service\Service.cpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
