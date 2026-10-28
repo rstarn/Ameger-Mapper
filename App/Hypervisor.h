@@ -71,8 +71,20 @@ namespace Hypervisor
         inline ULONG64 TargetDirectoryBase = 0;
     }
 
-    inline ULONG64 CallVM(ULONG64 arg1 = 0, ULONG64 arg2 = 0, ULONG64 arg3 = 0, ULONG64 arg4 = 0)
+    /*
+     * Issues the vmmcall.
+     *
+     * trapped, when given, reports whether the instruction itself faulted: the
+     * #UD a vmmcall raises on a machine where no hypervisor intercepts it. It
+     * stays false when the call completed, which is what the caller needs in
+     * order to say which of the two happened instead of assuming the trap.
+     * Optional so every existing four argument caller is unchanged.
+     */
+    inline ULONG64 CallVM(ULONG64 arg1 = 0, ULONG64 arg2 = 0, ULONG64 arg3 = 0, ULONG64 arg4 = 0, bool* trapped = nullptr)
     {
+        if (trapped)
+            *trapped = false;
+
         if (!Data::Shellcode)
         {
             // vmmcall
@@ -99,13 +111,17 @@ namespace Hypervisor
         const CallFunc func = reinterpret_cast<CallFunc>(Data::Shellcode);
 
         ULONG64 output;
-        __try
+        try
         {
             output = func(arg1, arg2, arg3, arg4);
         }
-        __except (EXCEPTION_EXECUTE_HANDLER)
+        catch (...)
         {
-            printf("[!] SEH handler called\n");
+            //Nothing intercepted the vmmcall, so it raised #UD. The caller
+            //reports the trap; printing here as well would duplicate it in a
+            //line that carries no colour and no indent.
+            if (trapped)
+                *trapped = true;
             output = 0xAABB;
         }
 

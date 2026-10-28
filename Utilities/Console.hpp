@@ -133,6 +133,23 @@ namespace Console
 		return stream << kGreen << value.text << kReset;
 	}
 
+	/*
+	 * A value to print in a colour other than the default green.
+	 *
+	 * Val() stays the common case: most values are just values. This exists for
+	 * the few whose colour carries a verdict - amber for a state that is
+	 * informational rather than an error, red for one that makes a path
+	 * unusable - and is built by Tint() below.
+	 */
+	struct ColoredText {
+		const wchar_t* color;
+		std::wstring text;
+	};
+
+	inline std::wostream& operator<<(std::wostream& stream, const ColoredText& value) {
+		return stream << value.color << value.text << kReset;
+	}
+
 	//An integer as 0x-prefixed hexadecimal.
 	template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
 	inline std::wstring Hex(T value) {
@@ -157,6 +174,14 @@ namespace Console
 	}
 	template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
 	inline GreenText Val(T value) { return GreenText{ std::to_wstring(value) }; }
+
+	//Wrap a value so it prints in `color` rather than the default green. The
+	//colour is one of the k* constants above, chosen by the caller from what
+	//the value turned out to be.
+	inline ColoredText Tint(const wchar_t* color, const std::wstring& text) { return ColoredText{ color, text }; }
+	inline ColoredText Tint(const wchar_t* color, const wchar_t* text) { return ColoredText{ color, text ? text : L"" }; }
+	template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
+	inline ColoredText Tint(const wchar_t* color, T value) { return ColoredText{ color, std::to_wstring(value) }; }
 
 	//Colour of a one character tag, or null when the tag is not one of ours.
 	inline const wchar_t* TagColor(wchar_t tag) {
@@ -205,6 +230,21 @@ namespace Console
 	 * exactly one place. A Line with indent = false is the flush left variant
 	 * used by the interactive prompt and the usage text.
 	 */
+	//Write a single newline straight to the console handle rather than through
+	//the iostream path. The 0xC0000096 this was written for is
+	//STATUS_PRIVILEGED_INSTRUCTION (a ring 3 RDMSR), not a /GS stack overrun,
+	//so it is not what fixed that crash; it is kept because it still writes a
+	//newline without the MSVCP140 detour. Defined before Line so its
+	//operator<< can call it.
+	inline void WriteNewline() {
+		const HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
+		if (console == INVALID_HANDLE_VALUE || console == nullptr)
+			return;
+		const wchar_t newline[] = L"\n";
+		DWORD written = 0;
+		WriteConsoleW(console, newline, 1, &written, nullptr);
+	}
+
 	class Line {
 	public:
 		explicit Line(bool indent = true) : indent_(indent) {}
@@ -233,8 +273,13 @@ namespace Console
 		//std::endl and friends; resolved explicitly because a function
 		//template cannot be deduced by the generic overload below.
 		Line& operator<<(std::wostream& (*manipulator)(std::wostream&)) {
+			(void)manipulator; // overload identity only; newline path below
 			Begin();
-			std::wcout << manipulator;
+			//Bypass MSVCP140's std::endl and write the newline straight to the
+			//console handle. The 0xC0000096 this was blamed on is
+			//STATUS_PRIVILEGED_INSTRUCTION (a ring 3 RDMSR), not a stack
+			//overrun, so it is not what fixed that crash.
+			Console::WriteNewline();
 			return *this;
 		}
 
@@ -279,8 +324,12 @@ namespace Console
 #define LogRaw(...) Console::Line(false) << __VA_ARGS__
 
 //A bare blank line, used to separate output sections. Never indented.
-#define LogBlank() (std::wcout << std::endl)
+//Writes the newline straight to the console handle rather than through the
+//iostream/MSVCP140 path. The 0xC0000096 this was blamed on is
+//STATUS_PRIVILEGED_INSTRUCTION (a ring 3 RDMSR), not a /GS stack overrun.
+#define LogBlank() Console::WriteNewline()
 
-//Val()/Hex() are used unqualified at the call sites to keep them readable.
+//Val()/Hex()/Tint() are used unqualified at the call sites to keep them readable.
 using Console::Val;
 using Console::Hex;
+using Console::Tint;

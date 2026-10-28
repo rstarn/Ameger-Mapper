@@ -17,6 +17,7 @@
  */
 
 #include <Windows.h>
+#include <psapi.h>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cstring>
+#include <intrin.h>
 
 //bcrypt backs the SHA-256 in the driver summary and wintrust the Authenticode
 //check. Both are system libraries, so their import libraries are pulled in here
@@ -84,6 +86,12 @@ namespace
 		case STATUS_OBJECT_NAME_COLLISION:    return L"STATUS_OBJECT_NAME_COLLISION";
 		case STATUS_INVALID_IMAGE_FORMAT:     return L"STATUS_INVALID_IMAGE_FORMAT";
 		case STATUS_PRIVILEGE_NOT_HELD:       return L"STATUS_PRIVILEGE_NOT_HELD";
+		//0xC0000096 is a privileged instruction executed in user mode
+		//(RDMSR/WRMSR/HLT/CLI/IN/OUT), not a stack overrun. The stack overrun
+		//is 0xC0000409; conflating the two is what made a ring-3 RDMSR look
+		//like a /GS canary failure.
+		case STATUS_PRIVILEGED_INSTRUCTION:   return L"STATUS_PRIVILEGED_INSTRUCTION";
+		case STATUS_STACK_BUFFER_OVERRUN:     return L"STATUS_STACK_BUFFER_OVERRUN";
 		//The hypervisor's CheckSupport() refuses to launch and reports this
 		//custom code instead of a standard NTSTATUS. It means the AMD SVM
 		//support gate failed - most often a stale resident hypervisor
@@ -97,6 +105,13 @@ namespace
 	//Build number of the running Windows kernel, or 0 when ntdll cannot report
 	//it. The --indPages guard treats 0 as "unknown" and refuses rather than
 	//running a kernel routine whose prototype it cannot confirm for this build.
+	//noinline: this function's 276-byte RTL_OSVERSIONINFOW local used to be
+	//inlined into wmain, inflating its stack frame. Keep it as its own
+	//function so the buffer lives in this function's small frame instead of
+	//wmain's. The 0xC0000096 this split was blamed for is
+	//STATUS_PRIVILEGED_INSTRUCTION (a ring-3 RDMSR), not a /GS stack overrun;
+	//the split is kept because it still keeps wmain's frame small.
+	__declspec(noinline)
 	DWORD RunningBuildNumber() {
 		RTL_OSVERSIONINFOW version = {};
 		version.dwOSVersionInfoSize = sizeof(version);
@@ -364,6 +379,10 @@ namespace
 	 */
 	std::wstring PromptForDriverPath(std::vector<BYTE>* out_image) {
 		for (;;) {
+			//Separates the diagnostic block above from the prompt, so the
+			//prompt reads as the question it is rather than as one more line
+			//of the probe output.
+			LogBlank();
 			LogRaw(L"Driver path: ");
 
 			std::wstring line;
@@ -470,6 +489,85 @@ void PauseBeforeExit() {
 	std::wcin.get();
 }
 
+//What the crash-time module walk found. Plain data, so the walk that fills it
+//can run inside __try.
+struct FaultingModule
+{
+	uint64_t base;
+	uint64_t size;
+	uint64_t rva;
+	wchar_t name[MAX_PATH];
+};
+
+/*
+ * Locate the module that contains `address` and report its base, SizeOfImage,
+ * RVA and file name.
+ *
+ * The headers are read from the image already mapped into this process, never
+ * from the module's file. The previous version re-read the file from disk
+ * inside the exception filter, and a failed open made tellg() return -1, which
+ * became std::vector<BYTE>((size_t)-1) - a std::bad_alloc thrown from inside
+ * the filter, which suppresses the very report it exists to print.
+ *
+ * This lives in its own function because a __try cannot appear in a function
+ * that needs C++ object unwinding (C2712), and the handler streams its report
+ * through std::wstring and iostreams. Everything inside the guarded block is
+ * POD and allocation free, so a corrupt module header makes this report
+ * nothing instead of faulting the filter.
+ *
+ * Returns false when no module contains the address.
+ */
+bool FindFaultingModule(const void* address, FaultingModule* out_module)
+{
+	out_module->base = 0;
+	out_module->size = 0;
+	out_module->rva = 0;
+	out_module->name[0] = L'\0';
+
+	bool found = false;
+	__try
+	{
+		const uint64_t fault = reinterpret_cast<uint64_t>(address);
+		HMODULE modules[512];
+		DWORD needed = 0;
+		if (EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed))
+		{
+			for (DWORD i = 0; i < needed / sizeof(HMODULE) && !found; ++i)
+			{
+				const uint64_t base = reinterpret_cast<uint64_t>(modules[i]);
+				const auto* dos = reinterpret_cast<const PIMAGE_DOS_HEADER>(base);
+				if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0)
+					continue;
+
+				//e_lfanew is read out of the mapped image and is the only field
+				//that can point this walk outside it. A loaded image keeps its
+				//NT headers in the first page.
+				if (static_cast<uint64_t>(dos->e_lfanew) + sizeof(IMAGE_NT_HEADERS64) > 0x1000)
+					continue;
+
+				const auto* nt = reinterpret_cast<const PIMAGE_NT_HEADERS64>(base + static_cast<uint64_t>(dos->e_lfanew));
+				if (nt->Signature != IMAGE_NT_SIGNATURE)
+					continue;
+
+				const uint64_t image_size = nt->OptionalHeader.SizeOfImage;
+				if (image_size == 0 || fault < base || fault >= base + image_size)
+					continue;
+
+				out_module->base = base;
+				out_module->size = image_size;
+				out_module->rva = fault - base;
+				found = GetModuleFileNameW(modules[i], out_module->name, MAX_PATH) != 0;
+			}
+		}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER)
+	{
+		found = false;
+	}
+
+	return found;
+}
+
 /*
  * Unhandled exception handler.
  *
@@ -484,6 +582,28 @@ LONG WINAPI SimplestCrashHandler(EXCEPTION_POINTERS* ExceptionInfo)
 		const auto* rec = ExceptionInfo->ExceptionRecord;
 		Log(L"[!!] Crash at addr " << Val(reinterpret_cast<void*>(rec->ExceptionAddress))
 			<< L" by " << Val(Hex(rec->ExceptionCode)) << std::endl);
+
+		//0xC0000096 is the one code this tool has actually hit, and the number
+		//alone does not say what it means: it is a privileged instruction
+		//(RDMSR/WRMSR/HLT/CLI/IN/OUT) executed in user mode, which a ring-3
+		//binary raises the moment it touches one.
+		if (rec->ExceptionCode == 0xC0000096)
+			Log(L"[!!] STATUS_PRIVILEGED_INSTRUCTION: a ring 0 instruction (RDMSR/WRMSR/HLT/CLI/IN/OUT) ran in user mode" << std::endl);
+
+		//Name the module that contains the faulting address from its mapped
+		//headers, so the crash resolves to a function in that module's PDB
+		//instead of an anonymous address.
+		FaultingModule module = {};
+		if (FindFaultingModule(rec->ExceptionAddress, &module)) {
+			//Derive the module name from the path rather than a second
+			//module-name API (the SDK's GetModuleBaseNameA maps to a 4-arg
+			//k32 variant here).
+			const std::wstring modName = std::filesystem::path(module.name).filename().wstring();
+			Log(L"[!!] Faulting module: " << Val(modName)
+				<< L" | base " << Val(Hex(module.base))
+				<< L" | size " << Val(Hex(module.size))
+				<< L" | RVA " << Val(Hex(module.rva)) << std::endl);
+		}
 	}
 	else
 		Log(L"[!!] Crash" << std::endl);
@@ -535,6 +655,343 @@ void help() {
 	LogRaw(L"[+] Usage: Mapper.exe [--free [--force-free]][--indPages][--PassAllocationPtr][--copy-header][--hide][--no-forensics]");
 	LogRaw(L"[--dontUpdateOffsets [--offsetsPath \"FilePath\"]] [driver.sys]" << std::endl);
 	LogRaw(L"[+] Run with no driver path to be prompted for one interactively." << std::endl);
+}
+
+/*
+ * The --hide work the caller requested: confirm the hypervisor is present,
+ * hide the mapped image minus its executable span, and publish the NPT flush
+ * to every processor.
+ *
+ * Lived inline in wmain. The 0xC0000096 it was hoisted out of is
+ * STATUS_PRIVILEGED_INSTRUCTION - a ring 3 RDMSR - not the /GS stack overrun
+ * it was read as, so the split did not fix that crash; it is kept because it
+ * keeps wmain's frame smaller.
+ *
+ * Returns hide_ok, which folds into the exit code only when --hide was
+ * requested. A requested hide that did not fully happen - no hypervisor, or
+ * any operation that failed - reads as a failure to a script keying on the
+ * exit code.
+ */
+//noinline: keep this helper's frame separate from wmain's. The 0xC0000096 it
+//was split out for is STATUS_PRIVILEGED_INSTRUCTION, not a stack overrun.
+__declspec(noinline)
+bool ApplyHypervisorHide(bool hide, ULONG64 text_base, SIZE_T text_size) {
+	bool hide_ok = !hide;
+
+	if (hide) {
+		LogBlank();
+		Log(L"[!] NPT Hide = Enabled" << std::endl);
+
+		if (!Hypervisor::CheckPresence()) {
+			Log(L"[-] No hypervisor present; nothing to hide" << std::endl);
+			hide_ok = false;
+		}
+		else {
+			Log(L"[+] Hypervisor Presence = Confirmed" << std::endl);
+
+			/*
+			 * Hide the image this run mapped, minus its executable span.
+			 *
+			 * ProtectSelf rewrites the NPT for the mapped image but leaves
+			 * [text_base, text_base + text_size) mapped: that is the code the
+			 * driver executes on the NPF restore path, so hiding it would
+			 * livelock the restore. The range was computed from the raw image
+			 * above; with 0/0 the driver hides the whole image, the legacy
+			 * behaviour, and that path is logged when it is taken.
+			 *
+			 * There is deliberately no HideMemory() fallback here. It covers
+			 * the whole resident range, executable span included, which is the
+			 * exact livelock ProtectSelf is being given the span to avoid.
+			 */
+			if (!Hypervisor::Protect(text_base, text_size)) {
+				Log(L"[-] Hypervisor self-hide failed" << std::endl);
+				hide_ok = false;
+			}
+			else if (text_size) {
+				Log(L"[+] Hypervisor image hidden except its executable span: "
+					<< Val(reinterpret_cast<void*>(text_base)) << L" (" << Val(Hex(text_size))
+					<< L" bytes)" << std::endl);
+			}
+			else {
+				Log(L"[+] Hypervisor image hidden (whole image)" << std::endl);
+			}
+
+			// Publish the NPT rewrites to every CPU.
+			LogBlank();
+			if (!Hypervisor::FlushAllProcessors()) {
+				Log(L"[!] Not every processor confirmed the NPT flush" << std::endl);
+				hide_ok = false;
+			}
+			else {
+				Log(L"[+] NPT Flush = Confirmed (Every Processor)" << std::endl);
+			}
+		}
+	}
+
+	return hide_ok;
+}
+
+/*
+ * The whole map + executable-span + --hide work the Y path needs, kept in one
+ * frame of its own rather than in wmain's. The 0xC0000096 it was split out for
+ * is STATUS_PRIVILEGED_INSTRUCTION (a ring 3 RDMSR), not a /GS stack overrun,
+ * so the split is not what fixed that crash.
+ *
+ * Chooses the allocation mode, calls Mapper::MapDriver, computes the
+ * executable span, and runs ApplyHypervisorHide. Returns false (after
+ * unloading the provider) when mapping failed, so wmain pauses and returns -1.
+ */
+//Forward declaration: ComputeExecutableSpan is defined later in this file,
+//after wmain, so RunMapAndHide needs it declared before use.
+__declspec(noinline)
+void ComputeExecutableSpan(BYTE* image, size_t image_size, bool copyHeader,
+                           ULONG64 resident_base, SIZE_T resident_size,
+                           ULONG64* text_base, SIZE_T* text_size);
+
+__declspec(noinline)
+bool RunMapAndHide(std::vector<BYTE>& raw_image, const std::wstring& driver_path,
+                    bool hide, bool free, bool copyHeader, bool indPagesMode, bool passAllocationPtr,
+                    NTSTATUS& driver_status, SIZE_T& resident_size,
+                    ULONG64& resident_base, ULONG64& text_base, SIZE_T& text_size,
+                    bool& hide_ok) {
+	Mapper::AllocationMode mode = Mapper::AllocationMode::AllocateContiguous;
+	if (indPagesMode)
+		mode = Mapper::AllocationMode::AllocateIndependentPages;
+
+	driver_status = STATUS_SUCCESS;
+	resident_size = 0;
+
+	resident_base = Mapper::MapDriver(
+		raw_image.data(), raw_image.size(), 0, 0, free, !copyHeader, mode, passAllocationPtr,
+		&driver_status, &resident_size);
+
+	if (!resident_base) {
+		Log(L"[-] Failed to map " << Val(driver_path) << std::endl);
+		Driver::Unload();
+		return false;
+	}
+
+	text_base = 0;
+	text_size = 0;
+	ComputeExecutableSpan(raw_image.data(), raw_image.size(), copyHeader,
+		resident_base, resident_size, &text_base, &text_size);
+
+	hide_ok = ApplyHypervisorHide(hide, text_base, text_size);
+	return true;
+}
+
+/*
+ * Decide the stealth mode when the command line did not already choose one.
+ *
+ * An interactive run that gave neither --hide nor --force-free is asked whether
+ * the driver is a hypervisor, because the two need opposite treatment:
+ *
+ *   hypervisor  -> --hide       (blank its pages in the nested page table;
+ *                                its code runs in host mode, so freeing it
+ *                                would hang the machine)
+ *   otherwise   -> --force-free (release the image after DriverEntry, for a
+ *                                driver that does not keep running in guest mode)
+ *
+ * An explicit --hide or --force-free on the command line wins and skips the
+ * prompt, so scripted runs are unaffected. With no interactive console the
+ * prompt reports and keeps the image resident, the safe default.
+ *
+ * Lived inline in wmain. The 0xC0000096 it was hoisted out of is
+ * STATUS_PRIVILEGED_INSTRUCTION (a ring 3 RDMSR), not a /GS stack overrun, so
+ * the split is not what fixed that crash; it is kept because it keeps wmain's
+ * frame smaller.
+ */
+//noinline: keep this helper's frame separate from wmain's. The 0xC0000096 it
+//was split out for is STATUS_PRIVILEGED_INSTRUCTION, not a stack overrun.
+__declspec(noinline)
+void ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree, bool& indPagesMode) {
+	if (hide || free || forceFree)
+		return;
+
+	//Scatter the allocation across independent pages whenever this build
+	//allows it: a discontiguous physical run is harder to fingerprint than
+	//a contiguous blob. This is auto-applied, not requested, so on a build
+	//where MmAllocateIndependentPagesEx changed (26100+) it falls back to
+	//contiguous with a note instead of aborting. Used by both answers below.
+	auto enableIndPages = []() {
+		if (IndPagesAvailable()) {
+			Log(L"[+] Scattered independent-page allocation enabled" << std::endl);
+			return true;
+		}
+		Log(L"[!] Scattered independent pages unavailable on this build; using contiguous allocation" << std::endl);
+		return false;
+	};
+
+	switch (PromptIsHypervisor()) {
+	case 1:
+		//Answering Y to the prompt is the interactive form of passing
+		//--hide --copy-header on the command line: hide the image in the
+		//nested page table AND keep the header (don't strip it) so the
+		//hypervisor's own header references stay valid.
+		hide = true;
+		copyHeader = true;
+		LogBlank();
+		Log(L"[+] NPT hide enabled: the mapped driver's image will be hidden in the nested page table, except its executable span" << std::endl);
+
+		//Never free it: the hypervisor's code runs in host mode on every
+		//VMEXIT, so releasing its image would hang the machine. The NPT hide
+		//is the safe stealth measure; scattering composes with it because
+		//the virtual range stays contiguous, so the hide still targets it.
+		if (enableIndPages())
+			indPagesMode = true;
+		LogBlank();
+		break;
+	case 0:
+		//The interactive answer is the confirmation --force-free normally
+		//asks for: this driver will not keep executing in guest mode.
+		free = true;
+		forceFree = true;
+		LogBlank();
+		Log(L"[+] Free memory after driver execution enabled" << std::endl);
+		LogBlank();
+		Log(L"[!] The image is only safe to free for a driver that will not run in guest mode again." << std::endl);
+
+		//Never hide it: --hide is for a running hypervisor, and blanking an
+		//ordinary driver's pages in guest mode is both unnecessary and unsafe.
+		if (enableIndPages())
+			indPagesMode = true;
+		break;
+	default:
+		Log(L"[!] No interactive console: the image is kept resident and the nested page table is left untouched" << std::endl);
+		break;
+	}
+}
+
+/*
+ * The executable span of the mapped image, for --hide.
+ *
+ * ProtectSelf blanks the mapped image in the nested page table but has to
+ * leave the driver's executable code mapped: the NPF restore path runs out of
+ * that image in guest mode, so hiding the pages it executes from livelocks the
+ * handler that would bring them back. This process is the only one holding both
+ * the raw image and the resident base, so the span is computed here and passed
+ * to the driver, which hides everything else.
+ *
+ * The resident image is the raw image shifted down by the header span MapDriver
+ * strips when !copyHeader (the default): image RVA r lives at
+ * resident_base + r - header_skip. With --copy-header nothing is stripped and
+ * the image keeps its RVAs from resident_base, so header_skip is 0.
+ *
+ * header_size is the lowest section VirtualAddress - the same value MapDriver
+ * strips - not section[0]'s, because the table is not guaranteed to be sorted
+ * by RVA.
+ *
+ * Lived inline in wmain. The 0xC0000096 it was hoisted out of is
+ * STATUS_PRIVILEGED_INSTRUCTION (a ring 3 RDMSR), not a /GS stack overrun, so
+ * the split is not what fixed that crash; it is kept because it keeps wmain's
+ * frame smaller.
+ */
+//noinline: keep this helper's frame separate from wmain's. The 0xC0000096 it
+//was split out for is STATUS_PRIVILEGED_INSTRUCTION, not a stack overrun.
+__declspec(noinline)
+void ComputeExecutableSpan(BYTE* image, size_t image_size, bool copyHeader,
+                           ULONG64 resident_base, SIZE_T resident_size,
+                           ULONG64* text_base, SIZE_T* text_size) {
+	*text_base = 0;
+	*text_size = 0;
+
+	PIMAGE_SECTION_HEADER image_section = nullptr;
+	uint16_t image_section_count = 0;
+	if (PE::GetSectionTable(image, image_size, image_section, image_section_count) && image_section_count > 0) {
+		ULONG32 header_size = image_section[0].VirtualAddress;
+		ULONG32 text_rva = 0;
+		ULONG64 text_end = 0;
+		bool text_found = false;
+
+		for (uint16_t i = 0; i < image_section_count; ++i) {
+			const PIMAGE_SECTION_HEADER section = &image_section[i];
+
+			if (section->VirtualAddress < header_size)
+				header_size = section->VirtualAddress;
+
+			if (!(section->Characteristics & IMAGE_SCN_MEM_EXECUTE))
+				continue;
+
+			//Widened before the add: both fields are file controlled 32-bit
+			//values whose sum can wrap in 32 bits.
+			const ULONG64 section_end = static_cast<ULONG64>(section->VirtualAddress) + section->Misc.VirtualSize;
+
+			if (!text_found || section->VirtualAddress < text_rva)
+				text_rva = section->VirtualAddress;
+			if (!text_found || section_end > text_end)
+				text_end = section_end;
+			text_found = true;
+		}
+
+		const ULONG64 header_skip = copyHeader ? 0 : header_size;
+
+		if (!text_found || text_end <= text_rva) {
+			Log(L"[!] No executable section found; the whole image will be hidden" << std::endl);
+		}
+		else {
+			const ULONG64 offset = (text_rva >= header_skip) ? text_rva - header_skip : 0;
+			const ULONG64 span = text_end - text_rva;
+
+			if (offset >= resident_size) {
+				Log(L"[!] Executable span starts outside the resident image; the whole image will be hidden" << std::endl);
+			}
+			else {
+				//Clamped to what was allocated: the span comes from the file
+				//and the size from the headers, and the range handed to the
+				//driver has to stay inside the resident image.
+				const ULONG64 available = resident_size - offset;
+				*text_base = resident_base + offset;
+				*text_size = static_cast<SIZE_T>(span < available ? span : available);
+
+				Log(L"[+] Executable span kept mapped: RVA " << Val(Hex(text_rva))
+					<< L", size " << Val(Hex(span)) << L", resident "
+					<< Val(reinterpret_cast<void*>(*text_base)) << std::endl);
+			}
+		}
+	}
+	else {
+		Log(L"[!] Section table unreadable; the whole image will be hidden" << std::endl);
+	}
+}
+
+/*
+ * Report the final verdict (driver_ok / provider_clean / driver_status) and the
+ * provider-left-resident warning, in a frame of its own rather than in wmain's.
+ * The 0xC0000096 it was split out for is STATUS_PRIVILEGED_INSTRUCTION (a ring 3
+ * RDMSR), not a /GS stack overrun, so the split is not what fixed that crash.
+ */
+__declspec(noinline)
+void ReportRunResult(bool driver_ok, bool provider_clean, const std::wstring& driver_path,
+                      NTSTATUS driver_status) {
+	LogBlank();
+	if (driver_ok) {
+		Log(L"[+] \"" << Val(std::filesystem::path(driver_path).filename().wstring())
+			<< L"\" has been mapped successfully." << std::endl);
+	}
+	else {
+		Log(L"[-] \"" << Val(std::filesystem::path(driver_path).filename().wstring())
+			<< L"\" was mapped, but DriverEntry returned "
+			<< Val(Hex(static_cast<unsigned long>(driver_status)))
+			<< L" (" << Val(StatusName(driver_status)) << L")." << std::endl);
+		Log(L"[-] The image is left resident, but the driver reported failure and may not be usable." << std::endl);
+	}
+
+	if (!provider_clean) {
+		//Unmissable on purpose: this is the state the whole tool exists to avoid
+		//leaving behind, and it is the one condition where the machine is no safer
+		//than before the run started - in fact it is less safe, because the run
+		//also removed the provider's traces from PiDDB, the hash cache and
+		//MmUnloadedDrivers while leaving the driver itself loaded.
+		LogBlank();
+		Log(L"[!!] The provider driver was NOT unloaded and is still resident in kernel memory." << std::endl);
+		LogBlank();
+		Log(L"      This machine is left exposed. Until the provider unloads, it can be" << std::endl);
+		Log(L"      reached by anything holding that driver, and its service key has" << std::endl);
+		Log(L"      already been deleted, so the service manager cannot be used to stop it." << std::endl);
+		LogBlank();
+		Log(L"      Rebooting is the only reliable way to clear it." << std::endl);
+		LogBlank();
+	}
 }
 
 int wmain(const int argc, wchar_t** argv) {
@@ -731,6 +1188,101 @@ int wmain(const int argc, wchar_t** argv) {
 	 * These are the bytes that were summarised, and they are the bytes that get
 	 * mapped: nothing re-reads the path in between.
 	 */
+	//
+	// Primary idempotency check: ask CPUID whether a hypervisor is already
+	// present (CPUID.1:ECX[31]) and whether this CPU implements AMD SVM
+	//(CPUID.80000001h:ECX[2]). This used to read IA32_EFER (MSR 0xC0000080)
+	//and test SVME directly, but RDMSR is ring 0 only: executing it here
+	//raised #GP -> 0xC0000096 (STATUS_PRIVILEGED_INSTRUCTION) and the process
+	//died before it had read a driver path. CPUID is ring 3 legal and answers
+	//the same question less precisely, so it only warns: VBS, Hyper-V and
+	//Credential Guard all set the hypervisor-present bit on machines where
+	//this mapper runs perfectly well.
+	//
+	{
+		int registers[4] = { 0 };
+
+		__cpuid(registers, 1);
+		const bool hypervisor_present = (static_cast<unsigned int>(registers[2]) & (1u << 31)) != 0;
+
+		bool svm_supported = false;
+		__cpuid(registers, static_cast<int>(0x80000000u));
+		if (static_cast<unsigned int>(registers[0]) >= 0x8000000Au) {
+			__cpuid(registers, static_cast<int>(0x80000001u));
+			svm_supported = (static_cast<unsigned int>(registers[2]) & (1u << 2)) != 0;
+		}
+
+		//The colour carries the verdict, so the line does not have to say it in
+		//words: a resident hypervisor is informational - VBS, Hyper-V and
+		//Credential Guard all set the bit on machines this mapper runs on - and
+		//a CPU without SVM cannot run the SVM path at all.
+		const wchar_t* const hypervisor_color = hypervisor_present ? Console::kYellow : Console::kGreen;
+		const wchar_t* const svm_color = svm_supported ? Console::kGreen : Console::kRed;
+
+		Log(L"[!] CPUID: Hypervisor Present = " << Tint(hypervisor_color, static_cast<int>(hypervisor_present))
+			<< L", SVM Supported = " << Tint(svm_color, static_cast<int>(svm_supported)) << std::endl);
+		if (hypervisor_present)
+			Log(L"[!] A hypervisor is already resident; the vmmcall probe below decides whether it is this one" << std::endl);
+
+		//Separates the CPUID verdict from the vmmcall probe below, so the two
+		//read as the two separate tests they are rather than as one block.
+		LogBlank();
+	}
+
+	//
+	// Secondary idempotency check: vmmcall probe. This is the authoritative
+	// test for *this* hypervisor - CPUID above cannot tell it apart from VBS
+	// or Hyper-V, and a resident one of those is no reason to refuse to map.
+	// CallVM catches the #UD internally and answers 0xAABB when nothing
+	// intercepts the vmmcall, 0xdead when the hypervisor is present. That
+	// 0xAABB is a sentinel for "nothing ran", not a result, so it is never
+	// printed as one below.
+	//
+	{
+		//CallVM issues the vmmcall and catches the #UD internally: trapped says
+		//whether the instruction faulted (nothing intercepted it) or completed.
+		//A nested __try is illegal here (C2712) because main() holds locals
+		//that need unwinding, so we rely on CallVM's own handler.
+		bool trapped = false;
+		const ULONG64 probeResult = Hypervisor::CallVM(
+			Hypervisor::Shared::MAGIC, Hypervisor::Shared::CommandId::CheckPresence, 0, 0, &trapped);
+
+		if (trapped)
+			Log(L"[!] VMMCALL trapped (no hypervisor intercepted it)" << std::endl);
+		else
+			Log(L"[+] VMMCALL executed without fault" << std::endl);
+
+		//Both values come from where they are decided: the return value from
+		//the call, the expectation from the shared header. The verdict is the
+		//comparison between them, never a claim written into the format.
+		const bool probe_matched = probeResult == Hypervisor::Shared::COMM_CHECK;
+
+		if (trapped) {
+			//Nothing returned: the vmmcall faulted before any hypervisor saw
+			//it, and 0xAABB is only CallVM's sentinel for that. Printing it
+			//would present a sentinel as a probe result and colour it red,
+			//which reads as a failure when a bare metal machine is the normal
+			//case. Amber, and no value at all.
+			Log(L"[!] " << Tint(Console::kYellow, L"Probe skipped: nothing returned (expected COMM_CHECK="
+				+ Hex(Hypervisor::Shared::COMM_CHECK) + L")") << std::endl);
+		}
+		else {
+			const wchar_t* const probe_color = probe_matched ? Console::kGreen : Console::kRed;
+			const std::wstring expectation = L"COMM_CHECK=" + Hex(Hypervisor::Shared::COMM_CHECK)
+				+ (probe_matched ? L", match" : L", no match");
+
+			Log((probe_matched ? L"[+] Probe returned " : L"[!] Probe returned ")
+				<< Tint(probe_color, Hex(probeResult))
+				<< L" (" << Tint(probe_color, expectation) << L")" << std::endl);
+		}
+
+		if (probe_matched) {
+			Log(L"[!] Probe matched COMM_CHECK; treating as active; skipping map" << std::endl);
+			PauseBeforeExit();
+			return -1;
+		}
+	}
+
 	std::vector<BYTE> raw_image;
 	std::wstring driver_path;
 	if (drvIndex > 0) {
@@ -772,72 +1324,10 @@ int wmain(const int argc, wchar_t** argv) {
 		return -1;
 	}
 
-	/*
-	 * Decide the stealth mode when the command line did not already choose one.
-	 * An interactive run that gave neither --hide nor --force-free is asked
-	 * whether the driver is a hypervisor, because the two need opposite
-	 * treatment:
-	 *
-	 *   hypervisor  -> --hide       (blank its pages in the nested page table;
-	 *                                its code runs in host mode, so freeing it
-	 *                                would hang the machine)
-	 *   otherwise   -> --force-free (release the image after DriverEntry, for a
-	 *                                driver that does not keep running in guest
-	 *                                mode)
-	 *
-	 * An explicit --hide or --force-free on the command line wins and skips the
-	 * prompt, so scripted runs are unaffected. With no interactive console the
-	 * prompt reports and keeps the image resident, the safe default.
-	 */
-	if (!hide && !free && !forceFree) {
-		//Scatter the allocation across independent pages whenever this build
-		//allows it: a discontiguous physical run is harder to fingerprint than
-		//a contiguous blob. This is auto-applied, not requested, so on a build
-		//where MmAllocateIndependentPagesEx changed (26100+) it falls back to
-		//contiguous with a note instead of aborting. Used by both answers below.
-		auto enableIndPages = []() {
-			if (IndPagesAvailable()) {
-				Log(L"[+] Scattered independent-page allocation enabled" << std::endl);
-				return true;
-			}
-			Log(L"[!] Scattered independent pages unavailable on this build; using contiguous allocation" << std::endl);
-			return false;
-		};
-
-		switch (PromptIsHypervisor()) {
-		case 1:
-			hide = true;
-			LogBlank();
-			Log(L"[+] NPT hide enabled: the mapped driver's image will be hidden in the nested page table, except its executable span" << std::endl);
-
-			//Never free it: the hypervisor's code runs in host mode on every
-			//VMEXIT, so releasing its image would hang the machine. The NPT hide
-			//is the safe stealth measure; scattering composes with it because
-			//the virtual range stays contiguous, so the hide still targets it.
-			if (enableIndPages())
-				indPagesMode = true;
-			LogBlank();
-			break;
-		case 0:
-			//The interactive answer is the confirmation --force-free normally
-			//asks for: this driver will not keep executing in guest mode.
-			free = true;
-			forceFree = true;
-			LogBlank();
-			Log(L"[+] Free memory after driver execution enabled" << std::endl);
-			LogBlank();
-			Log(L"[!] The image is only safe to free for a driver that will not run in guest mode again." << std::endl);
-
-			//Never hide it: --hide is for a running hypervisor, and blanking an
-			//ordinary driver's pages in guest mode is both unnecessary and unsafe.
-			if (enableIndPages())
-				indPagesMode = true;
-			break;
-		default:
-			Log(L"[!] No interactive console: the image is kept resident and the nested page table is left untouched" << std::endl);
-			break;
-		}
-	}
+	//The stealth-mode decision runs in a helper frame of its own rather than in
+	//wmain's. The 0xC0000096 it was split out for is
+	//STATUS_PRIVILEGED_INSTRUCTION, not a /GS stack overrun.
+	ChooseStealthMode(hide, copyHeader, free, forceFree, indPagesMode);
 
 	if (!IsElevated()) {
 		Log(L"[-] Mapper.exe has to run elevated." << std::endl);
@@ -863,104 +1353,21 @@ int wmain(const int argc, wchar_t** argv) {
 		return -1;
 	}
 
-	Mapper::AllocationMode mode = Mapper::AllocationMode::AllocateContiguous;
-
-	if (indPagesMode) {
-		mode = Mapper::AllocationMode::AllocateIndependentPages;
-	}
-
+	//The map + span + --hide work the Y path needs runs in RunMapAndHide, a
+	//The map + span + --hide work the Y path needs runs in RunMapAndHide, a
+	//helper frame of its own rather than wmain's. The 0xC0000096 it was split
+	//out for is STATUS_PRIVILEGED_INSTRUCTION, not a /GS stack overrun.
 	NTSTATUS driver_status = STATUS_SUCCESS;
 	SIZE_T resident_size = 0;
-
-	const ULONG64 resident_base = Mapper::MapDriver(
-		raw_image.data(), raw_image.size(), 0, 0, free, !copyHeader, mode, passAllocationPtr,
-		&driver_status, &resident_size);
-
-	if (!resident_base) {
-		Log(L"[-] Failed to map " << Val(driver_path) << std::endl);
-		Driver::Unload();
-		PauseBeforeExit();
-		return -1;
-	}
-
-	/*
-	 * The executable span of the image that was just mapped, for --hide.
-	 *
-	 * ProtectSelf blanks the mapped image in the nested page table but has to
-	 * leave the driver's executable code mapped: the NPF restore path runs out
-	 * of that image in guest mode, so hiding the pages it executes from
-	 * livelocks the handler that would bring them back. This process is the
-	 * only one holding both the raw image and the resident base, so the span is
-	 * computed here and passed to the driver, which hides everything else.
-	 *
-	 * The resident image is the raw image shifted down by the header span
-	 * MapDriver strips when !copyHeader (the default): image RVA r lives at
-	 * resident_base + r - header_skip. With --copy-header nothing is stripped
-	 * and the image keeps its RVAs from resident_base, so header_skip is 0.
-	 *
-	 * header_size is the lowest section VirtualAddress - the same value
-	 * MapDriver strips - not section[0]'s, because the table is not guaranteed
-	 * to be sorted by RVA.
-	 */
+	ULONG64 resident_base = 0;
 	ULONG64 text_base = 0;
 	SIZE_T text_size = 0;
+	bool hide_ok = !hide;
 
-	PIMAGE_SECTION_HEADER image_section = nullptr;
-	uint16_t image_section_count = 0;
-	if (PE::GetSectionTable(raw_image.data(), raw_image.size(), image_section, image_section_count) && image_section_count > 0) {
-		ULONG32 header_size = image_section[0].VirtualAddress;
-		ULONG32 text_rva = 0;
-		ULONG64 text_end = 0;
-		bool text_found = false;
-
-		for (uint16_t i = 0; i < image_section_count; ++i) {
-			const PIMAGE_SECTION_HEADER section = &image_section[i];
-
-			if (section->VirtualAddress < header_size)
-				header_size = section->VirtualAddress;
-
-			if (!(section->Characteristics & IMAGE_SCN_MEM_EXECUTE))
-				continue;
-
-			//Widened before the add: both fields are file controlled 32-bit
-			//values whose sum can wrap in 32 bits.
-			const ULONG64 section_end = static_cast<ULONG64>(section->VirtualAddress) + section->Misc.VirtualSize;
-
-			if (!text_found || section->VirtualAddress < text_rva)
-				text_rva = section->VirtualAddress;
-			if (!text_found || section_end > text_end)
-				text_end = section_end;
-			text_found = true;
-		}
-
-		const ULONG64 header_skip = copyHeader ? 0 : header_size;
-
-		if (!text_found || text_end <= text_rva) {
-			Log(L"[!] No executable section found; the whole image will be hidden" << std::endl);
-		}
-		else {
-			const ULONG64 offset = (text_rva >= header_skip) ? text_rva - header_skip : 0;
-			const ULONG64 span = text_end - text_rva;
-
-			if (offset >= resident_size) {
-				Log(L"[!] Executable span starts outside the resident image; the whole image will be hidden" << std::endl);
-			}
-			else {
-				//Clamped to what was allocated: the span comes from the file
-				//and the size from the headers, and the range handed to the
-				//driver has to stay inside the resident image.
-				const ULONG64 available = resident_size - offset;
-				text_base = resident_base + offset;
-				text_size = static_cast<SIZE_T>(span < available ? span : available);
-
-				Log(L"[+] Executable span kept mapped: RVA " << Val(Hex(text_rva))
-					<< L", size " << Val(Hex(span)) << L", resident "
-					<< Val(reinterpret_cast<void*>(text_base)) << std::endl);
-			}
-		}
-	}
-	else {
-		Log(L"[!] Section table unreadable; the whole image will be hidden" << std::endl);
+	if (!RunMapAndHide(raw_image, driver_path, hide, free, copyHeader, indPagesMode, passAllocationPtr,
+		driver_status, resident_size, resident_base, text_base, text_size, hide_ok)) {
+		PauseBeforeExit();
+		return -1;
 	}
 
 	/*
@@ -987,113 +1394,10 @@ int wmain(const int argc, wchar_t** argv) {
 	const bool driver_ok = NT_SUCCESS(driver_status);
 	const bool provider_clean = NT_SUCCESS(Driver::Unload());
 
-	/*
-	 * --hide: blank the image this run mapped in the nested page table, minus
-	 * its executable span, so it is not readable in guest mode while the code
-	 * the driver still executes from stays mapped.
-	 *
-	 * Issued straight from this process (the one that holds the exact base
-	 * and size) rather than a separate tool, because a second step would mean
-	 * the resident base crosses a process boundary - typed into a shell or
-	 * written to a file - which is exactly the trace this exists to avoid.
-	 *
-	 * Only attempted when a hypervisor is actually present; without one there
-	 * is nothing to answer the vmmcall, so it is skipped rather than failing.
-	 *
-	 * Hiding a range redirects its pages to the shared blank page, so any later
-	 * guest-mode access (a driver callback, DPC, image enumeration) faults.
-	 * That is the same precondition --free has: it is only safe for a driver
-	 * that will not be executed in guest mode again after this point - which is
-	 * why the executable span, the part that does execute, is left mapped.
-	 */
-	/*
-	 * hide_ok folds into the exit code only when --hide was requested, so a
-	 * run that did not ask for it keeps the documented contract (the worse of
-	 * driver_ok and provider_clean). A requested hide that did not fully
-	 * happen - no hypervisor, or any operation that failed - must read as a
-	 * failure to a script keying on the exit code.
-	 */
-	bool hide_ok = !hide;
-
-	if (hide) {
-		LogBlank();
-		Log(L"[!] NPT Hide = Enabled" << std::endl);
-
-		if (!Hypervisor::CheckPresence()) {
-			Log(L"[-] No hypervisor present; nothing to hide" << std::endl);
-			hide_ok = false;
-		}
-		else {
-			Log(L"[+] Hypervisor Presence = Confirmed" << std::endl);
-
-			/*
-			 * Hide the image this run mapped, minus its executable span.
-			 *
-			 * ProtectSelf rewrites the NPT for the mapped image but leaves
-			 * [text_base, text_base + text_size) mapped: that is the code the
-			 * driver executes on the NPF restore path, so hiding it would
-			 * livelock the restore. The range was computed from the raw image
-			 * above; with 0/0 the driver hides the whole image, the legacy
-			 * behaviour, and that path is logged when it is taken.
-			 *
-			 * There is deliberately no HideMemory() fallback here. It covers
-			 * the whole resident range, executable span included, which is the
-			 * exact livelock ProtectSelf is being given the span to avoid.
-			 */
-			if (!Hypervisor::Protect(text_base, text_size)) {
-				Log(L"[-] Hypervisor self-hide failed" << std::endl);
-				hide_ok = false;
-			}
-			else if (text_size) {
-				Log(L"[+] Hypervisor image hidden except its executable span: "
-					<< Val(reinterpret_cast<void*>(text_base)) << L" (" << Val(Hex(text_size))
-					<< L" bytes)" << std::endl);
-			}
-			else {
-				Log(L"[+] Hypervisor image hidden (whole image)" << std::endl);
-			}
-
-			// Publish the NPT rewrites to every CPU.
-			LogBlank();
-			if (!Hypervisor::FlushAllProcessors()) {
-				Log(L"[!] Not every processor confirmed the NPT flush" << std::endl);
-				hide_ok = false;
-			}
-			else {
-				Log(L"[+] NPT Flush = Confirmed (Every Processor)" << std::endl);
-			}
-		}
-	}
-
-	LogBlank();
-	if (driver_ok) {
-		Log(L"[+] \"" << Val(std::filesystem::path(driver_path).filename().wstring())
-			<< L"\" has been mapped successfully." << std::endl);
-	}
-	else {
-		Log(L"[-] \"" << Val(std::filesystem::path(driver_path).filename().wstring())
-			<< L"\" was mapped, but DriverEntry returned "
-			<< Val(Hex(static_cast<unsigned long>(driver_status)))
-			<< L" (" << Val(StatusName(driver_status)) << L")." << std::endl);
-		Log(L"[-] The image is left resident, but the driver reported failure and may not be usable." << std::endl);
-	}
-
-	if (!provider_clean) {
-		//Unmissable on purpose: this is the state the whole tool exists to avoid
-		//leaving behind, and it is the one condition where the machine is no safer
-		//than before the run started - in fact it is less safe, because the run
-		//also removed the provider's traces from PiDDB, the hash cache and
-		//MmUnloadedDrivers while leaving the driver itself loaded.
-		LogBlank();
-		Log(L"[!!] The provider driver was NOT unloaded and is still resident in kernel memory." << std::endl);
-		LogBlank();
-		Log(L"      This machine is left exposed. Until the provider unloads, it can be" << std::endl);
-		Log(L"      reached by anything holding that driver, and its service key has" << std::endl);
-		Log(L"      already been deleted, so the service manager cannot be used to stop it." << std::endl);
-		LogBlank();
-		Log(L"      Rebooting is the only reliable way to clear it." << std::endl);
-		LogBlank();
-	}
+	//The verdict + provider-clean report runs in ReportRunResult, a helper
+	//frame of its own rather than wmain's. The 0xC0000096 it was split out for
+	//is STATUS_PRIVILEGED_INSTRUCTION, not a /GS stack overrun.
+	ReportRunResult(driver_ok, provider_clean, driver_path, driver_status);
 
 	PauseBeforeExit();
 

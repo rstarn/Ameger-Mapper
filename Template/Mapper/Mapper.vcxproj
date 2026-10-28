@@ -44,16 +44,33 @@
       <Optimization>MaxSpeed</Optimization>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <SDLCheck>true</SDLCheck>
+      <!-- SDLCheck stays off, as it was before stack protection was restored.
+       It enabled /sdl, which forced /GS on and overrode the old per-file /GS-;
+       /GS is now requested directly by BufferSecurityCheck below. -->
+      <SDLCheck>false</SDLCheck>
+      <!-- Stack protection is ON. /GS and /EHa are expressed as the properties
+       that emit them, so each flag reaches cl exactly once. Written as raw
+       AdditionalOptions text they left the defaults (/GS, /EHsc) on the command
+       line as well, and cl warned D9025 ("overriding ...") on every translation
+       unit. /GS- was originally added for a 0xC0000096 crash that turned out to
+       be STATUS_PRIVILEGED_INSTRUCTION (a ring 3 RDMSR), not a stack buffer
+       overrun, so there is nothing left to work around. -->
+      <BufferSecurityCheck>true</BufferSecurityCheck>
       <ConformanceMode>true</ConformanceMode>
       <TreatWarningAsError>false</TreatWarningAsError>
       <LanguageStandard>stdcpp17</LanguageStandard>
+      <ExceptionHandling>Async</ExceptionHandling>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <!-- The Hypervisor client header, pulled in for the hide flag (see App\Main.cpp).
        Referenced in place rather than copied so the VMCall ABI cannot drift
        between the two projects. -->
       <AdditionalIncludeDirectories>$(SolutionDir)..\..\..\Hypervisor\Client\Library;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>/D "PDB_OFFSETS" %(AdditionalOptions)</AdditionalOptions>
+      <!-- /EHc has no MSBuild property. The previous "/EHsc ... /EHa" pairing kept
+       the "extern C never throws" half of /EHsc, and ExceptionHandling=Async on
+       its own drops it: the tail calls through extern "C" imports turn into
+       call/ret and the shipped .text changes. Restated here so the code stays
+       byte for byte what it was before this cleanup. -->
+      <AdditionalOptions>/D "PDB_OFFSETS" /EHc %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
@@ -72,7 +89,19 @@ copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Comm
   </ItemDefinitionGroup>
   <ItemGroup>
     <!-- App -->
-    <ClCompile Include="..\..\App\Main.cpp" />
+    <!-- Main.cpp inlines Hypervisor.h; CallVM wraps the vmmcall in a C++ handler.
+      The vmmcall trap (#VMEXIT with no handler) is a hardware exception, so the
+      handler is a C++ catch(...) rather than SEH __except, which needs /EHa so
+      that catch(...) catches hardware exceptions; /EHa is added here and globally.
+     This TU carries stack protection like the rest of the project. The /GS- it
+     used to have dated from a 0xC0000096 crash read as a stack buffer overrun.
+     0xC0000096 is STATUS_PRIVILEGED_INSTRUCTION, not a stack overrun: the real
+     cause was a ring-3 RDMSR in wmain, since removed, so /GS- was never what
+     fixed it. Stated per-file as properties, not raw flags. -->
+    <ClCompile Include="..\..\App\Main.cpp">
+      <BufferSecurityCheck>true</BufferSecurityCheck>
+      <ExceptionHandling>Async</ExceptionHandling>
+    </ClCompile>
     <ClCompile Include="..\..\App\Probing\Probe.cpp" />
     <!-- Mapper -->
     <ClCompile Include="..\..\Mapper\Mapper.cpp" />
