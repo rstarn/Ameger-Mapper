@@ -732,6 +732,24 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 
 		Log(L"[+] DriverEntry returned: " << Val(Hex(status)) << std::endl);
 
+		/*
+		 * DriverEntry reported a failure (e.g. 0xC035003C when the hypervisor is
+		 * already resident). Unwind: destroy the driver object here, and hand the
+		 * mapped image to the post-loop failure path (which resets
+		 * kernel_image_base to realBase and frees it for the active allocation
+		 * mode). Leaving both resident is the pool leak this fix removes.
+		 */
+		if (status != 0) {
+			Log(L"[-] DriverEntry returned " << Val(Hex(status))
+				<< L"; unwinding the mapped image and driver object" << std::endl);
+			if (driver_object) {
+				Driver::DestroyDriverObjectForEntry(driver_object);
+				driver_object = 0;
+			}
+			kernel_image_base = realBase;
+			break;
+		}
+
 		if (!hook_restored)
 			Log(L"[!] ntoskrnl.NtAddAtom was not restored; the image is kept because the "
 				"driver may still reference it. See the earlier CRITICAL line." << std::endl);
