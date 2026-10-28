@@ -823,7 +823,9 @@ int wmain(const int argc, wchar_t** argv) {
 			//asks for: this driver will not keep executing in guest mode.
 			free = true;
 			forceFree = true;
+			LogBlank();
 			Log(L"[+] Free memory after driver execution enabled" << std::endl);
+			LogBlank();
 			Log(L"[!] The image is only safe to free for a driver that will not run in guest mode again." << std::endl);
 
 			//Never hide it: --hide is for a running hypervisor, and blanking an

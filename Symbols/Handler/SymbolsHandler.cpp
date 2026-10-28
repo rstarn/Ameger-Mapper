@@ -199,7 +199,9 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 
 	//Trace the exact path being read so a failed run shows where the offsets
 	//file was looked for instead of failing silently.
+	LogBlank();
 	Log(L"[*] Attempting to load Offsets.ini from: " << Val(requestedPath) << std::endl);
+	LogBlank();
 
 	std::wstring path = requestedPath;
 
@@ -337,6 +339,12 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	size_t fieldCount = 0;
 
 	while (std::getline(tss, line)) {
+		// The offsets file uses CRLF line endings; std::getline splits on '\n'
+		// and leaves a trailing '\r' on CRLF lines, which made section headers
+		// fail the "ends with ]" check and got skipped. Strip it first.
+		if (!line.empty() && line.back() == L'\r') {
+			line.pop_back();
+		}
 		if (line.empty() || line[0] == L';' || line[0] == L'#') {
 			continue;
 		}
@@ -496,6 +504,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	//Only printed when the updater actually produced the file; with
 	//--dontUpdateOffsets nothing was written by this run.
 	bool wrote_printed = false;
+	LogBlank();
 	for (const auto& entry : symbolEntries) {
 		if (usingUpdater && !wrote_printed && entry.name == wroteBefore)
 			Log(L"[+] Wrote | " << Val(path) << std::endl), wrote_printed = true;

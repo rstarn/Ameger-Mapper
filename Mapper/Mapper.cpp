@@ -740,6 +740,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		//out everything they need, because the image becomes invalid as soon as
 		//DriverEntry returns.
 		if (free) {
+			LogBlank();
 			Log(L"[+] Freeing memory" << std::endl);
 			bool free_status = false;
 
