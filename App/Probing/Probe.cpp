@@ -9,7 +9,6 @@
 #include "../../Utilities/Console.hpp"
 #include "../../Provider/Driver.hpp"
 #include "../../Symbols/Handler/SymbolsHandler.hpp"
-#include "../../../../Injector/Ameger/Bridge.h"
 #include "Probe.h"
 
 //IsElevated uses advapi32: CheckTokenMembership and the SID helpers live there.

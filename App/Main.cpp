@@ -1354,7 +1354,6 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 
 	//The map + span + --hide work the Y path needs runs in RunMapAndHide, a
-	//The map + span + --hide work the Y path needs runs in RunMapAndHide, a
 	//helper frame of its own rather than wmain's. The 0xC0000096 it was split
 	//out for is STATUS_PRIVILEGED_INSTRUCTION, not a /GS stack overrun.
 	NTSTATUS driver_status = STATUS_SUCCESS;

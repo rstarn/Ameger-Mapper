@@ -514,7 +514,6 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	}
 	if (usingUpdater && !wrote_printed) {
 		Log(L"[+] Wrote | " << Val(path) << std::endl);
-		wrote_printed = true;
 	}
 	LogBlank();
 

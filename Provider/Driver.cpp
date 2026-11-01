@@ -1383,7 +1383,6 @@ bool Driver::WriteMemory(uint64_t address, void* buffer, uint64_t size) {
 */
 static bool g_pteSelfMapReady = false;
 static bool g_pteSelfMapProbed = false;
-static bool ProbePteSelfMapBase();
 
 /*
  * Internal types whose layout is not in the public PDBs (_PiDDBCacheEntry,

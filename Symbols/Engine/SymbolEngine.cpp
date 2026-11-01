@@ -28,7 +28,6 @@
 #include <filesystem>
 #include <iostream>
 #include <iomanip>
-#include <cstdio>
 #include <dbghelp.h>
 
 namespace
