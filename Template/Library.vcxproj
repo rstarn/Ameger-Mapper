@@ -37,6 +37,7 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalOptions>/D "PDB_OFFSETS" %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>..\Mapper;..\PE;..\Provider;..\Symbols\Handler;..\Utilities;..\Service;D:\Ameger\Injector\Ameger;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Lib>
