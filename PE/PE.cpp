@@ -413,6 +413,16 @@ bool PE::VerifyNoAbsoluteReferences(void* image_base, size_t image_size) {
  * Section names are logged but do NOT count toward the threshold.
  *
  * out_log receives the matched indicators (internal log, not console output).
+ *
+ * No automated verification path remains for this function. The classifier
+ * self-test was removed at commit 139e7de by decision of the operator, on the
+ * grounds that production-ready means zero test code in the tree. It covered
+ * the >=2-class threshold, the multi-word override, the .rdata exclusion, and
+ * the section-edge boundary handling. What is lost is any runtime check that
+ * those behaviours still hold: a change here now has to be validated against
+ * synthetic PEs built by hand, or by re-creating the harness. That harness
+ * lived in App/ClassifierSelfTest.cpp and Template/TestClassifier/, both
+ * removed in that commit.
  */
 bool PE::IsHypervisorImage(const std::vector<uint8_t>& image, const PIMAGE_NT_HEADERS64 nt_headers, std::wstring* out_log, int* out_class_count) {
 	if (image.empty() || !nt_headers) {
