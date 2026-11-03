@@ -740,6 +740,7 @@ void help() {
 	LogBlank();
 	LogRaw(L"[+] Developer Flags:" << std::endl);
 	LogRaw(L"      --developer               Enable developer-only diagnostics (--probe-context)" << std::endl);
+	LogRaw(L"      --force-ask               With --developer: ask the question even when stdin is not a console" << std::endl);
 	LogBlank();
 }
 
@@ -882,7 +883,7 @@ bool RunMapAndHide(std::vector<BYTE>& raw_image, const std::wstring& driver_path
  *
  *   --hide given     -> hide = true, copyHeader = true
  *   --free given     -> free = true, forceFree only if it survived the gate
- *   stdin available  -> ask "Is the driver a Hypervisor? [Y/N]"
+ *   console on stdin -> ask "Is the driver a Hypervisor? [Y/N]"
  *   neither          -> refuse to guess: return false and name the flags
  *
  * The --free branch needs --force-free because a command-line flag has nobody
@@ -891,10 +892,11 @@ bool RunMapAndHide(std::vector<BYTE>& raw_image, const std::wstring& driver_path
  * and does not require --force-free on top. That answer still passes through
  * the callback gate, which can refuse the release.
  *
- * A process with no stdin at all aborts rather than defaulting to keep-resident
- * or to hide: a default is a decision the operator did not make, and either one
- * is wrong half the time. Empty stdin is a different case - the question is
- * asked, the read returns EOF, and the image is kept resident with a warning.
+ * A run with no console on stdin aborts and names --hide and --free. This is the
+ * headless-no-flags case and there is no safe default: keep-resident leaves an
+ * unhidden image, and hide fails when no hypervisor is present. --developer
+ * --force-ask bypasses the console check for testing only; it is not a
+ * production flag and is refused without --developer.
  *
  * Lived inline in wmain. The 0xC0000096 it was hoisted out of is
  * STATUS_PRIVILEGED_INSTRUCTION (a ring 3 RDMSR), not a /GS stack overrun, so
@@ -908,7 +910,7 @@ bool RunMapAndHide(std::vector<BYTE>& raw_image, const std::wstring& driver_path
 //was split out for is STATUS_PRIVILEGED_INSTRUCTION, not a stack overrun.
 __declspec(noinline)
 bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree, bool& indPagesMode,
-                       bool forceFreeAllowed) {
+                       bool forceFreeAllowed, bool forceAsk) {
 	//Scatter the allocation across independent pages whenever this build
 	//allows it: a discontiguous physical run is harder to fingerprint than a
 	//contiguous blob. On a build where MmAllocateIndependentPagesEx changed
@@ -958,15 +960,15 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 	}
 
 	// Neither flag: the operator has to answer the question, and answering it
-	// needs a stdin to read the answer from. A console is the usual source; a
-	// redirected handle is accepted too, so the question can be scripted and
-	// tested. Only a process with no stdin at all - a service, or a host that
-	// launches with an invalid handle - is refused.
+	// needs a console to ask on. A redirected stdin is not a console, so the
+	// question is unreachable from a script unless --developer --force-ask was
+	// given; that pair exists to make this branch testable, nothing else.
 	HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
-	const bool stdin_available = (input != INVALID_HANDLE_VALUE && input != nullptr);
+	DWORD mode = 0;
+	const bool console_attached = (input != INVALID_HANDLE_VALUE && input != nullptr && GetConsoleMode(input, &mode));
 
-	if (!stdin_available) {
-		Log(L"[-] Neither --hide nor --free was given, and there is no stdin to ask on." << std::endl);
+	if (!console_attached && !forceAsk) {
+		Log(L"[-] Neither --hide nor --free was given, and there is no console to ask on." << std::endl);
 		Log(L"[-] The driver type cannot be decided without one of them." << std::endl);
 		Log(L"[-] Re-run with --hide (hypervisor driver) or --free (non-hypervisor driver)." << std::endl);
 		return false;
@@ -1189,11 +1191,23 @@ int wmain(const int argc, wchar_t** argv) {
 	bool hide = paramExists(argc, argv, L"hide") > 0;
 	bool requireHide = paramExists(argc, argv, L"require-hide") > 0;
 	bool silent = paramExists(argc, argv, L"silent") > 0;
+	bool developer = paramExists(argc, argv, L"developer") > 0;
+	bool forceAsk = paramExists(argc, argv, L"force-ask") > 0;
 
 	// --silent only silences the callback-gate refusal explanation now that the
 	// classifier is gone. It is not inferred from a missing console: a headless
 	// run needs that explanation more than an interactive one does.
 	g_silent = silent;
+
+	// --force-ask is a testing switch for the operator question: a piped stdin
+	// is not a console, so without it the question cannot be exercised from a
+	// script. It is refused on its own so it can never be mistaken for a
+	// production flag.
+	if (forceAsk && !developer) {
+		Log(L"[-] --force-ask requires --developer" << std::endl);
+		PauseBeforeExit();
+		return -1;
+	}
 
 	// Validate flag combinations
 	if (requireHide && !hide) {
@@ -1295,7 +1309,7 @@ int wmain(const int argc, wchar_t** argv) {
 	static const wchar_t* knownFlags[] = {
 		L"free", L"force-free", L"indPages", L"PassAllocationPtr", L"copy-header",
 		L"hide", L"no-forensics", L"dontUpdateOffsets", L"offsetsPath", L"help", L"probe-context",
-		L"require-hide", L"silent", L"developer"
+		L"require-hide", L"silent", L"developer", L"force-ask"
 	};
 	for (int i = 1; i < argc; i++) {
 		const wchar_t* arg = argv[i];
@@ -1519,7 +1533,7 @@ int wmain(const int argc, wchar_t** argv) {
 	//The stealth-mode decision runs in a helper frame of its own rather than in
 	//wmain's. The 0xC0000096 it was split out for is
 	//STATUS_PRIVILEGED_INSTRUCTION, not a /GS stack overrun.
-	if (!ChooseStealthMode(hide, copyHeader, free, forceFree, indPagesMode, forceFreeAllowed)) {
+	if (!ChooseStealthMode(hide, copyHeader, free, forceFree, indPagesMode, forceFreeAllowed, forceAsk)) {
 		PauseBeforeExit();
 		return -1;
 	}
