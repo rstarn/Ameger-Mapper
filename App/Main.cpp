@@ -1275,7 +1275,7 @@ bool ShouldProceedWithMap(const HypervisorProbeResult& probe, bool hide, bool fo
 	}
 
 	Log(L"[-] Cannot map a second hypervisor: one is already active." << std::endl);
-	Log(L"[-] Unmap the active hypervisor first, or pass --force-hide-overwrite if you understand the risk." << std::endl);
+	Log(L"[-] Unmap the active hypervisor first, or pass --developer --force-hide-overwrite if you understand the risk." << std::endl);
 	return false;
 }
 
@@ -1333,6 +1333,16 @@ int wmain(const int argc, wchar_t** argv) {
 	// production flag.
 	if (forceAsk && !developer) {
 		Log(L"[-] --force-ask requires --developer" << std::endl);
+		PauseBeforeExit();
+		return -1;
+	}
+
+	// --force-hide-overwrite maps a hypervisor over a running one, which
+	// bugchecks on most systems. It is listed under Developer Flags for the same
+	// reason --force-ask is, so it carries the same gate: a production run
+	// cannot reach it by adding one flag.
+	if (forceHideOverwrite && !developer) {
+		Log(L"[-] --force-hide-overwrite requires --developer" << std::endl);
 		PauseBeforeExit();
 		return -1;
 	}
