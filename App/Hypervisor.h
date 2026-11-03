@@ -16,6 +16,10 @@
 
 namespace Hypervisor
 {
+    // Compile-time flag: whether the hypervisor's NPT hide routine supports discontiguous physical pages.
+    // Set to false for conservative contiguous allocation.
+    inline constexpr bool kHypervisorSupportsDiscontiguousNpt = false;
+
     namespace Shared
     {
         constexpr ULONG64 MAGIC = 0xfeed3;
