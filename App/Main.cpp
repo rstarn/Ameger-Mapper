@@ -504,6 +504,9 @@ namespace
 	 * execute in guest mode again.
 	 */
 	int PromptIsHypervisor() {
+		//Separates the probe output above from the question, so the prompt reads
+		//as a question rather than as the last line of the evidence.
+		LogBlank();
 		LogRaw(L"Is the driver a Hypervisor? [Y/N]: ");
 
 		for (;;) {
