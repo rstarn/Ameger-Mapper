@@ -103,6 +103,9 @@ copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Comm
       <ExceptionHandling>Async</ExceptionHandling>
     </ClCompile>
     <ClCompile Include="..\..\App\Probing\Probe.cpp" />
+    <!-- Classifier self-test. Its own TU so TestClassifier.vcxproj can link it
+         without this project's wmain and requireAdministrator manifest. -->
+    <ClCompile Include="..\..\App\ClassifierSelfTest.cpp" />
     <!-- Mapper -->
     <ClCompile Include="..\..\Mapper\Mapper.cpp" />
     <!-- PE -->
