@@ -26,7 +26,6 @@
 #include <iomanip>
 #include <cstring>
 #include <intrin.h>
-#include <fstream>
 #include <ctime>
 
 //bcrypt backs the SHA-256 in the driver summary and wintrust the Authenticode
@@ -734,8 +733,8 @@ void help() {
 	LogRaw(L"[+] Stealth and Safety Flags:" << std::endl);
 	LogRaw(L"      --hide                    Hide image in NPT (hypervisors)" << std::endl);
 	LogRaw(L"      --require-hide            Abort if --hide requested but no hypervisor present" << std::endl);
-	LogRaw(L"      --free                    Release the image after DriverEntry (non-hypervisors)" << std::endl);
-	LogRaw(L"      --force-free              Confirm --free explicitly; both are gated on the driver not registering callbacks" << std::endl);
+	LogRaw(L"      --free                    Request image release after DriverEntry; ignored unless --force-free is also given" << std::endl);
+	LogRaw(L"      --force-free              Acknowledge that releasing is safe (the driver does not touch its image after DriverEntry)" << std::endl);
 	LogRaw(L"      --copy-header             Keep PE header in mapped image" << std::endl);
 	LogRaw(L"      --silent                  Suppress the callback-gate refusal explanation" << std::endl);
 	LogBlank();
@@ -883,12 +882,19 @@ bool RunMapAndHide(std::vector<BYTE>& raw_image, const std::wstring& driver_path
  *
  *   --hide given     -> hide = true, copyHeader = true
  *   --free given     -> free = true, forceFree only if it survived the gate
- *   console attached -> ask "Is the driver a Hypervisor? [Y/N]"
+ *   stdin available  -> ask "Is the driver a Hypervisor? [Y/N]"
  *   neither          -> refuse to guess: return false and name the flags
  *
- * The no-console, no-flag case aborts rather than defaulting to keep-resident
- * or to hide. A default is a decision the operator did not make, and either
- * one is wrong half the time.
+ * The --free branch needs --force-free because a command-line flag has nobody
+ * behind it to confirm intent. The question is different: the operator is being
+ * asked directly, so answering "non-hypervisor" is itself the acknowledgement
+ * and does not require --force-free on top. That answer still passes through
+ * the callback gate, which can refuse the release.
+ *
+ * A process with no stdin at all aborts rather than defaulting to keep-resident
+ * or to hide: a default is a decision the operator did not make, and either one
+ * is wrong half the time. Empty stdin is a different case - the question is
+ * asked, the read returns EOF, and the image is kept resident with a warning.
  *
  * Lived inline in wmain. The 0xC0000096 it was hoisted out of is
  * STATUS_PRIVILEGED_INSTRUCTION (a ring 3 RDMSR), not a /GS stack overrun, so
@@ -952,13 +958,15 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 	}
 
 	// Neither flag: the operator has to answer the question, and answering it
-	// needs a console to ask on.
+	// needs a stdin to read the answer from. A console is the usual source; a
+	// redirected handle is accepted too, so the question can be scripted and
+	// tested. Only a process with no stdin at all - a service, or a host that
+	// launches with an invalid handle - is refused.
 	HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
-	DWORD mode = 0;
-	const bool console_attached = (input != INVALID_HANDLE_VALUE && input != nullptr && GetConsoleMode(input, &mode));
+	const bool stdin_available = (input != INVALID_HANDLE_VALUE && input != nullptr);
 
-	if (!console_attached) {
-		Log(L"[-] Neither --hide nor --free was given, and there is no console to ask on." << std::endl);
+	if (!stdin_available) {
+		Log(L"[-] Neither --hide nor --free was given, and there is no stdin to ask on." << std::endl);
 		Log(L"[-] The driver type cannot be decided without one of them." << std::endl);
 		Log(L"[-] Re-run with --hide (hypervisor driver) or --free (non-hypervisor driver)." << std::endl);
 		return false;
@@ -1202,14 +1210,17 @@ int wmain(const int argc, wchar_t** argv) {
 	 * callback, a device object - still executes code out of that allocation,
 	 * and freeing it under the running thread is an immediate bugcheck.
 	 *
-	 * The callback gate below is what separates the two cases: it refuses the
-	 * release for an image that imports callback-registering routines.
-	 * --force-free is the operator's explicit acknowledgement that the driver
-	 * will not touch its image again; it does not bypass the gate.
+	 * The mapper cannot tell the two apart, so --free is ignored unless the
+	 * caller acknowledges it with --force-free. The callback gate that runs
+	 * after the image is read is a second, independent check: even with the
+	 * acknowledgement, an image that imports callback-registering routines is
+	 * refused.
 	 */
 	if (free && !forceFree) {
-		Log(L"[!] --free: the image will be released after DriverEntry returns." << std::endl);
-		Log(L"[!] That is only safe for a driver that never touches its image again; --force-free says so explicitly." << std::endl);
+		Log(L"[-] --free ignored: the image would be released while the driver may still be running" << std::endl);
+		Log(L"[-] Add --force-free if you are certain the driver does not touch its image after DriverEntry." << std::endl);
+		free = false;
+		forceFree = false;
 	}
 
 	/*
@@ -1492,9 +1503,9 @@ int wmain(const int argc, wchar_t** argv) {
 	// Safety gate runs immediately after the image is read and before stealth
 	// mode selection: it decides whether the image may be freed at all.
 	//
-	// The condition covers --free as well as --force-free. Now that --free alone
-	// reaches MapDriver, gating only on forceFree would let a driver that
-	// registers callbacks be freed with this check never running.
+	// The --free/--force-free acknowledgment above has already run, so free and
+	// forceFree are equal here. Both are still tested so the check keeps working
+	// if the order of the two ever changes.
 	bool forceFreeAllowed = CheckCallbackSafetyGate(raw_image);
 	if ((free || forceFree) && !forceFreeAllowed) {
 		if (!g_silent) {

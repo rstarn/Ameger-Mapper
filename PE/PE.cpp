@@ -336,6 +336,15 @@ bool PE::GetImports(void* image_base, size_t image_size, vec_imports& imports) {
 }
 
 /*
+ * An automatic hypervisor classifier used to live in this file. It was removed
+ * because it called real hypervisors "Indeterminate" and then asked the operator
+ * anyway, so it decided nothing the question would not have decided.
+ * The operator's answer to "Is the driver a Hypervisor? [Y/N]" is now the sole
+ * decision point. If a classifier is ever reintroduced here, verify it against a
+ * real SVM-capable driver, not synthetic PE images alone.
+ */
+
+/*
  * Prove an image carries no absolute address into itself. See PE.hpp for why
  * this exists and why only section data is scanned.
  *
