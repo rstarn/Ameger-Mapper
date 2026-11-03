@@ -741,6 +741,7 @@ void help() {
 	LogRaw(L"[+] Developer Flags:" << std::endl);
 	LogRaw(L"      --developer               Enable developer-only diagnostics (--probe-context)" << std::endl);
 	LogRaw(L"      --force-ask               With --developer: ask the question even when stdin is not a console" << std::endl);
+	LogRaw(L"      --force-hide-overwrite    Map a hypervisor over an active one (will bugcheck on most systems)" << std::endl);
 	LogBlank();
 }
 
@@ -1152,6 +1153,132 @@ void ReportRunResult(bool driver_ok, bool provider_clean, const std::wstring& dr
 	}
 }
 
+/*
+ * What the two pre-map probes saw. Pure data: this is reported, never acted on
+ * by itself, because "a hypervisor is active" and "this driver is a hypervisor"
+ * are independent facts and only the pair decides whether a map can proceed.
+ */
+struct HypervisorProbeResult {
+	bool active = false;                   // the vmmcall returned COMM_CHECK
+	bool svm_supported = false;            // CPUID says this CPU implements SVM
+	bool cpuid_hypervisor_present = false; // CPUID.1:ECX[31]
+	uint32_t raw_return = 0;               // the vmmcall's return, for the log line
+};
+
+/*
+ * Ask CPUID and the vmmcall whether a hypervisor is running, and report it.
+ *
+ * CPUID.1:ECX[31] says some hypervisor is present but cannot say which one -
+ * VBS, Hyper-V and Credential Guard all set it on machines this mapper runs on
+ * perfectly well. The vmmcall is the test for this mapper's hypervisor: CallVM
+ * catches the #UD internally and answers 0xAABB when nothing intercepts the
+ * instruction, COMM_CHECK when the hypervisor is there. 0xAABB is a sentinel
+ * for "nothing ran", not a result, so it is never printed as one.
+ *
+ * This function decides nothing. It used to abort the run on a match, which
+ * made mapping an ordinary driver impossible while any hypervisor was loaded.
+ */
+HypervisorProbeResult RunHypervisorProbe() {
+	HypervisorProbeResult result;
+
+	int registers[4] = { 0 };
+	__cpuid(registers, 1);
+	result.cpuid_hypervisor_present = (static_cast<unsigned int>(registers[2]) & (1u << 31)) != 0;
+
+	__cpuid(registers, static_cast<int>(0x80000000u));
+	if (static_cast<unsigned int>(registers[0]) >= 0x8000000Au) {
+		__cpuid(registers, static_cast<int>(0x80000001u));
+		result.svm_supported = (static_cast<unsigned int>(registers[2]) & (1u << 2)) != 0;
+	}
+
+	//The colour carries the verdict, so the line does not have to say it in
+	//words: a resident hypervisor is informational - VBS, Hyper-V and
+	//Credential Guard all set the bit - and a CPU without SVM cannot run the
+	//SVM path at all.
+	const wchar_t* const hypervisor_color = result.cpuid_hypervisor_present ? Console::kYellow : Console::kGreen;
+	const wchar_t* const svm_color = result.svm_supported ? Console::kGreen : Console::kRed;
+
+	Log(L"[!] CPUID: Hypervisor Present = " << Tint(hypervisor_color, static_cast<int>(result.cpuid_hypervisor_present))
+		<< L", SVM Supported = " << Tint(svm_color, static_cast<int>(result.svm_supported)) << std::endl);
+	if (result.cpuid_hypervisor_present)
+		Log(L"[!] A hypervisor is already resident; the vmmcall probe below reports whether it answers for this mapper" << std::endl);
+
+	//Separates the CPUID verdict from the vmmcall probe below, so the two read
+	//as the two separate tests they are rather than as one block.
+	LogBlank();
+
+	//CallVM issues the vmmcall and catches the #UD internally: trapped says
+	//whether the instruction faulted (nothing intercepted it) or completed.
+	//A nested __try is illegal here (C2712) because the caller holds locals
+	//that need unwinding, so we rely on CallVM's own handler.
+	bool trapped = false;
+	const ULONG64 probe_result = Hypervisor::CallVM(
+		Hypervisor::Shared::MAGIC, Hypervisor::Shared::CommandId::CheckPresence, 0, 0, &trapped);
+
+	result.raw_return = static_cast<uint32_t>(probe_result);
+	result.active = !trapped && probe_result == Hypervisor::Shared::COMM_CHECK;
+
+	if (trapped)
+		Log(L"[!] VMMCALL trapped (no hypervisor intercepted it)" << std::endl);
+	else
+		Log(L"[+] VMMCALL executed without fault" << std::endl);
+
+	if (trapped) {
+		//Nothing returned: the vmmcall faulted before any hypervisor saw it,
+		//and 0xAABB is only CallVM's sentinel for that. Printing it would
+		//present a sentinel as a probe result and colour it red, which reads
+		//as a failure when a bare metal machine is the normal case.
+		Log(L"[!] " << Tint(Console::kYellow, L"Probe skipped: nothing returned (expected COMM_CHECK="
+			+ Hex(Hypervisor::Shared::COMM_CHECK) + L")") << std::endl);
+	}
+	else {
+		const wchar_t* const probe_color = result.active ? Console::kGreen : Console::kRed;
+		const std::wstring expectation = L"COMM_CHECK=" + Hex(Hypervisor::Shared::COMM_CHECK)
+			+ (result.active ? L", match" : L", no match");
+
+		Log((result.active ? L"[+] Probe returned " : L"[!] Probe returned ")
+			<< Tint(probe_color, Hex(probe_result))
+			<< L" (" << Tint(probe_color, expectation) << L")" << std::endl);
+	}
+
+	return result;
+}
+
+/*
+ * Returns true if the map should proceed, false if it must be aborted.
+ * Logs the reason on abort. Reads probe (whether a hypervisor is active) and
+ * hide (whether the operator declared this driver is a hypervisor).
+ *
+ * Only the pair is a conflict. An active hypervisor is no reason to refuse an
+ * ordinary driver, and a hypervisor image is only refused when one is already
+ * running, because two of them on one machine fight over VMX/SVM ownership.
+ */
+bool ShouldProceedWithMap(const HypervisorProbeResult& probe, bool hide, bool forceHideOverwrite) {
+	if (!hide) {
+		if (probe.active) {
+			Log(L"[!] A hypervisor is already active. This driver is a normal driver (--free or answer N); "
+				L"the probe result is informational and mapping will proceed." << std::endl);
+		}
+		if (forceHideOverwrite) {
+			Log(L"[-] --force-hide-overwrite ignored: this driver is being mapped as a normal driver." << std::endl);
+		}
+		return true;
+	}
+
+	// hide is set: the operator declared this driver a hypervisor.
+	if (!probe.active)
+		return true;
+
+	if (forceHideOverwrite) {
+		Log(L"[!] --force-hide-overwrite: mapping a hypervisor over an active one. This WILL bugcheck on most systems." << std::endl);
+		return true;
+	}
+
+	Log(L"[-] Cannot map a second hypervisor: one is already active." << std::endl);
+	Log(L"[-] Unmap the active hypervisor first, or pass --force-hide-overwrite if you understand the risk." << std::endl);
+	return false;
+}
+
 int wmain(const int argc, wchar_t** argv) {
 	//Installed first so an access violation anywhere below still unloads the
 	//provider rather than leaving it loaded in a half configured state.
@@ -1193,6 +1320,7 @@ int wmain(const int argc, wchar_t** argv) {
 	bool silent = paramExists(argc, argv, L"silent") > 0;
 	bool developer = paramExists(argc, argv, L"developer") > 0;
 	bool forceAsk = paramExists(argc, argv, L"force-ask") > 0;
+	bool forceHideOverwrite = paramExists(argc, argv, L"force-hide-overwrite") > 0;
 
 	// --silent only silences the callback-gate refusal explanation now that the
 	// classifier is gone. It is not inferred from a missing console: a headless
@@ -1309,7 +1437,7 @@ int wmain(const int argc, wchar_t** argv) {
 	static const wchar_t* knownFlags[] = {
 		L"free", L"force-free", L"indPages", L"PassAllocationPtr", L"copy-header",
 		L"hide", L"no-forensics", L"dontUpdateOffsets", L"offsetsPath", L"help", L"probe-context",
-		L"require-hide", L"silent", L"developer", L"force-ask"
+		L"require-hide", L"silent", L"developer", L"force-ask", L"force-hide-overwrite"
 	};
 	for (int i = 1; i < argc; i++) {
 		const wchar_t* arg = argv[i];
@@ -1378,100 +1506,6 @@ int wmain(const int argc, wchar_t** argv) {
 	 * These are the bytes that were summarised, and they are the bytes that get
 	 * mapped: nothing re-reads the path in between.
 	 */
-	//
-	// Primary idempotency check: ask CPUID whether a hypervisor is already
-	// present (CPUID.1:ECX[31]) and whether this CPU implements AMD SVM
-	//(CPUID.80000001h:ECX[2]). This used to read IA32_EFER (MSR 0xC0000080)
-	//and test SVME directly, but RDMSR is ring 0 only: executing it here
-	//raised #GP -> 0xC0000096 (STATUS_PRIVILEGED_INSTRUCTION) and the process
-	//died before it had read a driver path. CPUID is ring 3 legal and answers
-	//the same question less precisely, so it only warns: VBS, Hyper-V and
-	//Credential Guard all set the hypervisor-present bit on machines where
-	//this mapper runs perfectly well.
-	//
-	{
-		int registers[4] = { 0 };
-
-		__cpuid(registers, 1);
-		const bool hypervisor_present = (static_cast<unsigned int>(registers[2]) & (1u << 31)) != 0;
-
-		bool svm_supported = false;
-		__cpuid(registers, static_cast<int>(0x80000000u));
-		if (static_cast<unsigned int>(registers[0]) >= 0x8000000Au) {
-			__cpuid(registers, static_cast<int>(0x80000001u));
-			svm_supported = (static_cast<unsigned int>(registers[2]) & (1u << 2)) != 0;
-		}
-
-		//The colour carries the verdict, so the line does not have to say it in
-		//words: a resident hypervisor is informational - VBS, Hyper-V and
-		//Credential Guard all set the bit on machines this mapper runs on - and
-		//a CPU without SVM cannot run the SVM path at all.
-		const wchar_t* const hypervisor_color = hypervisor_present ? Console::kYellow : Console::kGreen;
-		const wchar_t* const svm_color = svm_supported ? Console::kGreen : Console::kRed;
-
-		Log(L"[!] CPUID: Hypervisor Present = " << Tint(hypervisor_color, static_cast<int>(hypervisor_present))
-			<< L", SVM Supported = " << Tint(svm_color, static_cast<int>(svm_supported)) << std::endl);
-		if (hypervisor_present)
-			Log(L"[!] A hypervisor is already resident; the vmmcall probe below decides whether it is this one" << std::endl);
-
-		//Separates the CPUID verdict from the vmmcall probe below, so the two
-		//read as the two separate tests they are rather than as one block.
-		LogBlank();
-	}
-
-	//
-	// Secondary idempotency check: vmmcall probe. This is the authoritative
-	// test for *this* hypervisor - CPUID above cannot tell it apart from VBS
-	// or Hyper-V, and a resident one of those is no reason to refuse to map.
-	// CallVM catches the #UD internally and answers 0xAABB when nothing
-	// intercepts the vmmcall, 0xdead when the hypervisor is present. That
-	// 0xAABB is a sentinel for "nothing ran", not a result, so it is never
-	// printed as one below.
-	//
-	{
-		//CallVM issues the vmmcall and catches the #UD internally: trapped says
-		//whether the instruction faulted (nothing intercepted it) or completed.
-		//A nested __try is illegal here (C2712) because main() holds locals
-		//that need unwinding, so we rely on CallVM's own handler.
-		bool trapped = false;
-		const ULONG64 probeResult = Hypervisor::CallVM(
-			Hypervisor::Shared::MAGIC, Hypervisor::Shared::CommandId::CheckPresence, 0, 0, &trapped);
-
-		if (trapped)
-			Log(L"[!] VMMCALL trapped (no hypervisor intercepted it)" << std::endl);
-		else
-			Log(L"[+] VMMCALL executed without fault" << std::endl);
-
-		//Both values come from where they are decided: the return value from
-		//the call, the expectation from the shared header. The verdict is the
-		//comparison between them, never a claim written into the format.
-		const bool probe_matched = probeResult == Hypervisor::Shared::COMM_CHECK;
-
-		if (trapped) {
-			//Nothing returned: the vmmcall faulted before any hypervisor saw
-			//it, and 0xAABB is only CallVM's sentinel for that. Printing it
-			//would present a sentinel as a probe result and colour it red,
-			//which reads as a failure when a bare metal machine is the normal
-			//case. Amber, and no value at all.
-			Log(L"[!] " << Tint(Console::kYellow, L"Probe skipped: nothing returned (expected COMM_CHECK="
-				+ Hex(Hypervisor::Shared::COMM_CHECK) + L")") << std::endl);
-		}
-		else {
-			const wchar_t* const probe_color = probe_matched ? Console::kGreen : Console::kRed;
-			const std::wstring expectation = L"COMM_CHECK=" + Hex(Hypervisor::Shared::COMM_CHECK)
-				+ (probe_matched ? L", match" : L", no match");
-
-			Log((probe_matched ? L"[+] Probe returned " : L"[!] Probe returned ")
-				<< Tint(probe_color, Hex(probeResult))
-				<< L" (" << Tint(probe_color, expectation) << L")" << std::endl);
-		}
-
-		if (probe_matched) {
-			Log(L"[!] Probe matched COMM_CHECK; treating as active; skipping map" << std::endl);
-			PauseBeforeExit();
-			return -1;
-		}
-	}
 
 	std::vector<BYTE> raw_image;
 	std::wstring driver_path;
@@ -1530,10 +1564,24 @@ int wmain(const int argc, wchar_t** argv) {
 		forceFree = false;
 	}
 
+	// The probe runs after the image is read and before the mode is chosen. It
+	// reports whether a hypervisor is already active; that fact only becomes a
+	// decision once the operator's intent for this driver is known, so the
+	// verdict is taken by ShouldProceedWithMap below, not here.
+	const HypervisorProbeResult probe = RunHypervisorProbe();
+
 	//The stealth-mode decision runs in a helper frame of its own rather than in
 	//wmain's. The 0xC0000096 it was split out for is
 	//STATUS_PRIVILEGED_INSTRUCTION, not a /GS stack overrun.
 	if (!ChooseStealthMode(hide, copyHeader, free, forceFree, indPagesMode, forceFreeAllowed, forceAsk)) {
+		PauseBeforeExit();
+		return -1;
+	}
+
+	// An active hypervisor blocks a second hypervisor and nothing else. This is
+	// the decision the probe used to take on its own, which made mapping an
+	// ordinary driver impossible while any hypervisor was loaded.
+	if (!ShouldProceedWithMap(probe, hide, forceHideOverwrite)) {
 		PauseBeforeExit();
 		return -1;
 	}
