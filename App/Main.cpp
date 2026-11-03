@@ -27,7 +27,6 @@
 #include <cstring>
 #include <intrin.h>
 #include <fstream>
-#include <codecvt>
 #include <ctime>
 
 //bcrypt backs the SHA-256 in the driver summary and wintrust the Authenticode
@@ -518,41 +517,64 @@ namespace
 		if (g_classificationReportPath.empty())
 			return;
 
-		std::wofstream report(g_classificationReportPath, std::ios::out | std::ios::trunc);
+		/*
+		 * Assembled as one wide string, converted once, written as bytes.
+		 *
+		 * This used to stream through std::wofstream with a std::codecvt_utf8
+		 * facet. <codecvt> is deprecated in C++17 and removed in C++26, and it
+		 * was the only user in this file. WideCharToMultiByte does the same job
+		 * without a facet: UTF-8, no BOM, which is what the facet wrote too -
+		 * the old "Write UTF-8 BOM" comment described a header that was never
+		 * emitted.
+		 */
+		std::wostringstream text;
+		text << L"Classification Report\n";
+		text << L"====================\n\n";
+		text << L"Timestamp:     " << g_classificationReport.timestamp << L"\n";
+		text << L"Input File:    " << g_classificationReport.input_file << L"\n\n";
+		text << L"Detection Result: " << g_classificationReport.detect_result << L" (";
+		switch (g_classificationReport.detect_result) {
+		case 1:  text << L"hypervisor"; break;
+		case 0:  text << L"non-hypervisor"; break;
+		case -1: text << L"indeterminate"; break;
+		default: text << L"unknown"; break;
+		}
+		text << L")\n\n";
+
+		if (!g_classificationReport.evidence_log.empty()) {
+			text << L"Evidence:\n";
+			text << g_classificationReport.evidence_log;
+			text << L"\n";
+		}
+
+		text << L"Applied Settings:\n";
+		text << L"  hide:        " << (g_classificationReport.hide ? L"true" : L"false") << L"\n";
+		text << L"  free:        " << (g_classificationReport.free ? L"true" : L"false") << L"\n";
+		text << L"  forceFree:   " << (g_classificationReport.forceFree ? L"true" : L"false") << L"\n";
+		text << L"  copyHeader:  " << (g_classificationReport.copyHeader ? L"true" : L"false") << L"\n";
+		text << L"  indPagesMode:" << (g_classificationReport.indPagesMode ? L"true" : L"false") << L"\n";
+
+		const std::wstring wide = text.str();
+		const int wide_length = static_cast<int>(wide.size());
+
+		const int utf8_length = ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_length,
+		                                              nullptr, 0, nullptr, nullptr);
+		if (utf8_length <= 0) {
+			Log(L"[-] Failed to convert the classification report to UTF-8" << std::endl);
+			return;
+		}
+
+		std::string utf8(static_cast<size_t>(utf8_length), '\0');
+		::WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_length,
+		                      utf8.data(), utf8_length, nullptr, nullptr);
+
+		std::ofstream report(g_classificationReportPath, std::ios::out | std::ios::trunc | std::ios::binary);
 		if (!report.is_open()) {
 			Log(L"[-] Failed to write classification report to " << Val(g_classificationReportPath) << std::endl);
 			return;
 		}
 
-		// Write UTF-8 BOM
-		report.imbue(std::locale(report.getloc(), new std::codecvt_utf8<wchar_t>));
-
-		report << L"Classification Report\n";
-		report << L"====================\n\n";
-		report << L"Timestamp:     " << g_classificationReport.timestamp << L"\n";
-		report << L"Input File:    " << g_classificationReport.input_file << L"\n\n";
-		report << L"Detection Result: " << g_classificationReport.detect_result << L" (";
-		switch (g_classificationReport.detect_result) {
-		case 1:  report << L"hypervisor"; break;
-		case 0:  report << L"non-hypervisor"; break;
-		case -1: report << L"indeterminate"; break;
-		default: report << L"unknown"; break;
-		}
-		report << L")\n\n";
-
-		if (!g_classificationReport.evidence_log.empty()) {
-			report << L"Evidence:\n";
-			report << g_classificationReport.evidence_log;
-			report << L"\n";
-		}
-
-		report << L"Applied Settings:\n";
-		report << L"  hide:        " << (g_classificationReport.hide ? L"true" : L"false") << L"\n";
-		report << L"  free:        " << (g_classificationReport.free ? L"true" : L"false") << L"\n";
-		report << L"  forceFree:   " << (g_classificationReport.forceFree ? L"true" : L"false") << L"\n";
-		report << L"  copyHeader:  " << (g_classificationReport.copyHeader ? L"true" : L"false") << L"\n";
-		report << L"  indPagesMode:" << (g_classificationReport.indPagesMode ? L"true" : L"false") << L"\n";
-
+		report.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
 		report.close();
 	}
 
