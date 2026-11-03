@@ -391,10 +391,7 @@ namespace
 	 */
 	std::wstring PromptForDriverPath(std::vector<BYTE>* out_image) {
 		for (;;) {
-			//Separates the diagnostic block above from the prompt, so the
-			//prompt reads as the question it is rather than as one more line
-			//of the probe output.
-			LogBlank();
+			//Prompt immediately without extra spacing.
 			LogRaw(L"Driver path: ");
 
 			std::wstring line;
@@ -504,9 +501,7 @@ namespace
 	 * execute in guest mode again.
 	 */
 	int PromptIsHypervisor() {
-		//Separates the probe output above from the question, so the prompt reads
-		//as a question rather than as the last line of the evidence.
-		LogBlank();
+		//Prompt immediately after probe output without extra spacing.
 		LogRaw(L"Is the driver a Hypervisor? [Y/N]: ");
 
 		for (;;) {
@@ -1243,6 +1238,9 @@ HypervisorProbeResult RunHypervisorProbe() {
 			<< Tint(probe_color, Hex(probe_result))
 			<< L" (" << Tint(probe_color, expectation) << L")" << std::endl);
 	}
+
+	//Adds spacing after probe result before the hypervisor question prompt.
+	LogBlank();
 
 	return result;
 }
