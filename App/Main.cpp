@@ -178,34 +178,14 @@ namespace
 	}
 
 	/*
-	 * Global silent mode flag.
+	 * Global quiet flag, set by --silent.
 	 *
-	 * Set when no console is attached or when --silent is passed. In silent
-	 * mode, suppress the classification summary and the prompt. Only emit
-	 * warnings that indicate safety-critical degradation.
+	 * Its only remaining scope is the callback-gate refusal explanation - the
+	 * message that says why an image will not be freed. It does not silence the
+	 * operator question, the abort messages, or the hide warnings, because those
+	 * are the output the operator acts on.
 	 */
-	bool g_silentAutomatic = false;
-
-	/*
-	 * Classification report path. When non-empty, write a UTF-8 file on exit
-	 * containing classification evidence and decisions.
-	 */
-	std::wstring g_classificationReportPath;
-
-	/*
-	 * Classification report data, accumulated during the run.
-	 */
-	struct ClassificationReport {
-		std::wstring timestamp;
-		std::wstring input_file;
-		std::wstring evidence_log;
-		int detect_result = -1;
-		bool hide = false;
-		bool free = false;
-		bool forceFree = false;
-		bool copyHeader = false;
-		bool indPagesMode = false;
-	} g_classificationReport;
+	bool g_silent = false;
 
 	//Lowercase hex SHA-256 of a byte buffer, via CNG. Returns "unavailable"
 	//rather than failing the run when the provider cannot be opened, which only
@@ -494,7 +474,7 @@ namespace
 
 					for (const char* dangerous : dangerous_imports) {
 						if (func.name == dangerous) {
-							if (!g_silentAutomatic) {
+							if (!g_silent) {
 								Log(L"[!] Driver imports " << Val(Utilities::ToWide(func.name))
 									<< L"; refusing to free its image" << std::endl);
 								Log(L"[!] This function registers callbacks or creates devices, so the driver keeps running after DriverEntry." << std::endl);
@@ -509,138 +489,6 @@ namespace
 		return true;
 	}
 
-	/*
-	 * Write the classification report to the specified path.
-	 * Called on normal exit or via the teardown path.
-	 */
-	void WriteClassificationReport() {
-		if (g_classificationReportPath.empty())
-			return;
-
-		/*
-		 * Assembled as one wide string, converted once, written as bytes.
-		 *
-		 * This used to stream through std::wofstream with a std::codecvt_utf8
-		 * facet. <codecvt> is deprecated in C++17 and removed in C++26, and it
-		 * was the only user in this file. WideCharToMultiByte does the same job
-		 * without a facet: UTF-8, no BOM, which is what the facet wrote too -
-		 * the old "Write UTF-8 BOM" comment described a header that was never
-		 * emitted.
-		 */
-		std::wostringstream text;
-		text << L"Classification Report\n";
-		text << L"====================\n\n";
-		text << L"Timestamp:     " << g_classificationReport.timestamp << L"\n";
-		text << L"Input File:    " << g_classificationReport.input_file << L"\n\n";
-		text << L"Detection Result: " << g_classificationReport.detect_result << L" (";
-		switch (g_classificationReport.detect_result) {
-		case 1:  text << L"hypervisor"; break;
-		case 0:  text << L"non-hypervisor"; break;
-		case -1: text << L"indeterminate"; break;
-		default: text << L"unknown"; break;
-		}
-		text << L")\n\n";
-
-		if (!g_classificationReport.evidence_log.empty()) {
-			text << L"Evidence:\n";
-			text << g_classificationReport.evidence_log;
-			text << L"\n";
-		}
-
-		text << L"Applied Settings:\n";
-		text << L"  hide:        " << (g_classificationReport.hide ? L"true" : L"false") << L"\n";
-		text << L"  free:        " << (g_classificationReport.free ? L"true" : L"false") << L"\n";
-		text << L"  forceFree:   " << (g_classificationReport.forceFree ? L"true" : L"false") << L"\n";
-		text << L"  copyHeader:  " << (g_classificationReport.copyHeader ? L"true" : L"false") << L"\n";
-		text << L"  indPagesMode:" << (g_classificationReport.indPagesMode ? L"true" : L"false") << L"\n";
-
-		const std::wstring wide = text.str();
-		const int wide_length = static_cast<int>(wide.size());
-
-		const int utf8_length = ::WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_length,
-		                                              nullptr, 0, nullptr, nullptr);
-		if (utf8_length <= 0) {
-			Log(L"[-] Failed to convert the classification report to UTF-8" << std::endl);
-			return;
-		}
-
-		std::string utf8(static_cast<size_t>(utf8_length), '\0');
-		::WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_length,
-		                      utf8.data(), utf8_length, nullptr, nullptr);
-
-		std::ofstream report(g_classificationReportPath, std::ios::out | std::ios::trunc | std::ios::binary);
-		if (!report.is_open()) {
-			Log(L"[-] Failed to write classification report to " << Val(g_classificationReportPath) << std::endl);
-			return;
-		}
-
-		report.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
-		report.close();
-	}
-
-	/*
-	 * Classify a driver image as hypervisor, non-hypervisor, or indeterminate.
-	 *
-	 * Returns:
-	 *   1  - hypervisor (hide it in NPT)
-	 *   0  - non-hypervisor (can be freed if callback-safe)
-	 *  -1  - indeterminate (keep resident, safe default)
-	 *
-	 * Logs the classification evidence when not in silent mode.
-	 * Also saves evidence to g_classificationReport for --classification-report.
-	 */
-	int DetectDriverType(const std::vector<uint8_t>& image) {
-		const PIMAGE_NT_HEADERS64 nt_headers = PE::GetNtHeaders(
-			const_cast<uint8_t*>(image.data()), image.size());
-
-		if (!nt_headers) {
-			g_classificationReport.detect_result = -1;
-			g_classificationReport.evidence_log += L"Failed to parse NT headers\n";
-			return -1;
-		}
-
-		std::wstring log;
-		int class_count = 0;
-		const bool is_hypervisor = PE::IsHypervisorImage(image, nt_headers, &log, &class_count);
-
-		// Append evidence to report (unconditional)
-		g_classificationReport.evidence_log += log;
-
-		if (is_hypervisor) {
-			g_classificationReport.detect_result = 1;
-			if (!g_silentAutomatic) {
-				LogBlank();
-				Log(L"[+] Automatic classification: Hypervisor driver detected" << std::endl);
-				if (!log.empty()) {
-					Log(L"[+] Evidence:" << std::endl);
-					LogRaw(log);
-				}
-			}
-			return 1;
-		}
-
-		if (class_count == 0) {
-			g_classificationReport.detect_result = 0;
-			if (!g_silentAutomatic) {
-				LogBlank();
-				Log(L"[+] Automatic classification: Non-hypervisor driver (no hypervisor indicators found)" << std::endl);
-			}
-			return 0;
-		}
-
-		/*
-		 * The one-class case, and the only case left: two classes set
-		 * is_hypervisor and returned above, and zero returned above that. The
-		 * test that used to sit here and the return after it were both
-		 * unreachable, so this is the tail of the function now.
-		 */
-		g_classificationReport.detect_result = -1;
-		if (!g_silentAutomatic) {
-			LogBlank();
-			Log(L"[!] Automatic classification: Indeterminate (insufficient evidence)" << std::endl);
-		}
-		return -1;
-	}
 
 	/*
 	 * Ask whether the driver being mapped is a hypervisor, and return the
@@ -869,8 +717,7 @@ static bool IsOptionValue(const int argc, wchar_t** argv, int i) {
 	if (i < 1)
 		return false;
 	return paramExists(argc, argv, L"offsetsPath") == i - 1
-		|| paramExists(argc, argv, L"probe-context") == i - 1
-		|| paramExists(argc, argv, L"classification-report") == i - 1;
+		|| paramExists(argc, argv, L"probe-context") == i - 1;
 }
 
 
@@ -878,23 +725,19 @@ static bool IsOptionValue(const int argc, wchar_t** argv, int i) {
 void help() {
 	LogBlank();
 	LogRaw(L"[+] Usage: Mapper.exe [--free [--force-free]][--indPages][--PassAllocationPtr][--copy-header][--hide [--require-hide]]" << std::endl);
-	LogRaw(L"         [--no-forensics][--silent][--assume-hypervisor|--assume-driver]" << std::endl);
-	LogRaw(L"         [--classification-report <path>][--dontUpdateOffsets [--offsetsPath \"FilePath\"]] [driver.sys]" << std::endl);
+	LogRaw(L"         [--no-forensics][--silent][--dontUpdateOffsets [--offsetsPath \"FilePath\"]] [driver.sys]" << std::endl);
 	LogBlank();
-	LogRaw(L"[+] Run with no driver path to be prompted for one interactively." << std::endl);
-	LogBlank();
-	LogRaw(L"[+] Automatic Classification Flags:" << std::endl);
-	LogRaw(L"      --assume-hypervisor       Force hypervisor mode (--hide, keep header)" << std::endl);
-	LogRaw(L"      --assume-driver           Force non-hypervisor mode (keep resident)" << std::endl);
-	LogRaw(L"      --silent                  Suppress automatic classification output" << std::endl);
-	LogRaw(L"      --classification-report   Write classification evidence and decisions to file" << std::endl);
+	LogRaw(L"[+] With neither --hide nor --free, Mapper asks:" << std::endl);
+	LogRaw(L"      Is the driver a Hypervisor? [Y/N]" << std::endl);
+	LogRaw(L"      The CPUID and VMMCALL probe output above the question is what to answer from." << std::endl);
 	LogBlank();
 	LogRaw(L"[+] Stealth and Safety Flags:" << std::endl);
 	LogRaw(L"      --hide                    Hide image in NPT (hypervisors)" << std::endl);
 	LogRaw(L"      --require-hide            Abort if --hide requested but no hypervisor present" << std::endl);
-	LogRaw(L"      --free                    Request image release after DriverEntry" << std::endl);
-	LogRaw(L"      --force-free              Confirm image release (bypasses safety prompt)" << std::endl);
+	LogRaw(L"      --free                    Release the image after DriverEntry (non-hypervisors)" << std::endl);
+	LogRaw(L"      --force-free              Confirm --free explicitly; both are gated on the driver not registering callbacks" << std::endl);
 	LogRaw(L"      --copy-header             Keep PE header in mapped image" << std::endl);
+	LogRaw(L"      --silent                  Suppress the callback-gate refusal explanation" << std::endl);
 	LogBlank();
 	LogRaw(L"[+] Developer Flags:" << std::endl);
 	LogRaw(L"      --developer               Enable developer-only diagnostics (--probe-context)" << std::endl);
@@ -1030,107 +873,103 @@ bool RunMapAndHide(std::vector<BYTE>& raw_image, const std::wstring& driver_path
 	return true;
 }
 
+
 /*
- * Decide the stealth mode using automatic classification or operator input.
+ * Decide the stealth mode.
  *
- * When the command line already specified --hide, --free, or --force-free,
- * those explicit flags take precedence and classification is skipped.
+ * The operator question is the only decision point. There is no classifier:
+ * the CPUID and VMMCALL-trap probe output printed above the question is the
+ * evidence the operator answers from, and the answer decides the mode.
  *
- * Otherwise, the driver image is automatically classified as hypervisor,
- * non-hypervisor, or indeterminate. The decision table:
+ *   --hide given     -> hide = true, copyHeader = true
+ *   --free given     -> free = true, forceFree only if it survived the gate
+ *   console attached -> ask "Is the driver a Hypervisor? [Y/N]"
+ *   neither          -> refuse to guess: return false and name the flags
  *
- *   Hypervisor (1)     -> hide = true, copyHeader = true, free = false
- *                         Enable indPages only if build < 26100
- *   Non-hypervisor (0) -> hide = false, free = false by default
- *                         Only set forceFree if --force-free was explicit
- *                         Enable indPages if build allows
- *   Indeterminate (-1) -> Prompt if console attached; otherwise keep resident
+ * The no-console, no-flag case aborts rather than defaulting to keep-resident
+ * or to hide. A default is a decision the operator did not make, and either
+ * one is wrong half the time.
  *
  * Lived inline in wmain. The 0xC0000096 it was hoisted out of is
  * STATUS_PRIVILEGED_INSTRUCTION (a ring 3 RDMSR), not a /GS stack overrun, so
  * the split is not what fixed that crash; it is kept because it keeps wmain's
  * frame smaller.
+ *
+ * Returns false when the mode could not be decided; the caller aborts before
+ * MapDriver.
  */
 //noinline: keep this helper's frame separate from wmain's. The 0xC0000096 it
 //was split out for is STATUS_PRIVILEGED_INSTRUCTION, not a stack overrun.
 __declspec(noinline)
-void ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree, bool& indPagesMode,
-                        const std::vector<uint8_t>& image, bool assumeHypervisor, bool assumeDriver, bool forceFreeAllowed) {
-	// If explicit flags were given, honor them and skip classification
-	if (hide || free || forceFree)
-		return;
-
-	// If explicit assumption flags were given, use them
-	if (assumeHypervisor || assumeDriver) {
-		if (assumeHypervisor) {
-			if (!g_silentAutomatic) {
-				LogBlank();
-				Log(L"[+] --assume-hypervisor: treating as hypervisor driver" << std::endl);
-			}
-			hide = true;
-			copyHeader = true;
-			// Allocation shape follows the NPT hide routine's range support, not the driver.
-			indPagesMode = Hypervisor::kHypervisorSupportsDiscontiguousNpt ? IndPagesAvailable() : false;
-			if (!g_silentAutomatic) {
-				// Not a ternary inside Log(): Log is a macro, so `Log(c ? a : b)`
-				// expands to `Console::Line() << c ? a : b` and tests the stream.
-				if (indPagesMode)
-					Log(L"[+] Hypervisor: scattered allocation enabled (NPT hide supports discontiguous ranges)");
-				else
-					Log(L"[+] Hypervisor: contiguous allocation (NPT hide requires contiguous physical pages)");
-				Log(L"[+] NPT hide enabled: the mapped driver's image will be hidden in the nested page table, except its executable span" << std::endl);
-				LogBlank();
-			}
-			return;
-		}
-		else { // assumeDriver
-			if (!g_silentAutomatic) {
-				LogBlank();
-				Log(L"[+] --assume-driver: treating as non-hypervisor driver" << std::endl);
-				Log(L"[+] Image will be kept resident (use --force-free explicitly to override)" << std::endl);
-			}
-			// Non-hypervisor stays resident by default
-			hide = false;
-			free = false;
-			if (IndPagesAvailable() && !g_silentAutomatic) {
-				Log(L"[+] Scattered independent-page allocation enabled" << std::endl);
-				indPagesMode = true;
-			}
-			if (!g_silentAutomatic)
-				LogBlank();
-			return;
-		}
-	}
-
+bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree, bool& indPagesMode,
+                       bool forceFreeAllowed) {
 	//Scatter the allocation across independent pages whenever this build
-	//allows it: a discontiguous physical run is harder to fingerprint than
-	//a contiguous blob. This is auto-applied, not requested, so on a build
-	//where MmAllocateIndependentPagesEx changed (26100+) it falls back to
-	//contiguous with a note instead of aborting.
+	//allows it: a discontiguous physical run is harder to fingerprint than a
+	//contiguous blob. On a build where MmAllocateIndependentPagesEx changed
+	//(26100+) it falls back to contiguous with a note instead of aborting.
 	auto enableIndPages = []() {
 		if (IndPagesAvailable()) {
-			if (!g_silentAutomatic)
+			if (!g_silent)
 				Log(L"[+] Scattered independent-page allocation enabled" << std::endl);
 			return true;
 		}
-		if (!g_silentAutomatic)
+		if (!g_silent)
 			Log(L"[!] Scattered independent pages unavailable on this build; using contiguous allocation" << std::endl);
 		return false;
 	};
 
-	// Run the automatic classifier
-	const int classification = DetectDriverType(image);
+	// --hide was given, so the operator already decided. The allocation shape
+	// follows the NPT hide routine's range support, not the driver.
+	if (hide) {
+		copyHeader = true;
+		indPagesMode = Hypervisor::kHypervisorSupportsDiscontiguousNpt ? IndPagesAvailable() : false;
+		if (!g_silent) {
+			LogBlank();
+			Log(L"[+] NPT hide enabled: the mapped driver's image will be hidden in the nested page table, except its executable span" << std::endl);
+			if (indPagesMode)
+				Log(L"[+] Hypervisor: scattered allocation enabled (NPT hide supports discontiguous ranges)");
+			else
+				Log(L"[+] Hypervisor: contiguous allocation (NPT hide requires contiguous physical pages)");
+			LogBlank();
+		}
+		return true;
+	}
 
-	switch (classification) {
-	case 1: // Hypervisor detected
+	// --free was given, so the operator already decided. forceFree survives only
+	// if --force-free was also given and the callback gate let it through;
+	// wmain has already applied both before this runs.
+	if (free) {
+		forceFree = forceFree && forceFreeAllowed;
+		if (enableIndPages())
+			indPagesMode = true;
+		if (!g_silent) {
+			LogBlank();
+			Log(L"[+] Free memory after driver execution enabled" << std::endl);
+			Log(L"[!] The image is only safe to free for a driver that will not run in guest mode again." << std::endl);
+			LogBlank();
+		}
+		return true;
+	}
+
+	// Neither flag: the operator has to answer the question, and answering it
+	// needs a console to ask on.
+	HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+	DWORD mode = 0;
+	const bool console_attached = (input != INVALID_HANDLE_VALUE && input != nullptr && GetConsoleMode(input, &mode));
+
+	if (!console_attached) {
+		Log(L"[-] Neither --hide nor --free was given, and there is no console to ask on." << std::endl);
+		Log(L"[-] The driver type cannot be decided without one of them." << std::endl);
+		Log(L"[-] Re-run with --hide (hypervisor driver) or --free (non-hypervisor driver)." << std::endl);
+		return false;
+	}
+
+	switch (PromptIsHypervisor()) {
+	case 1: // Operator says hypervisor
 		hide = true;
 		copyHeader = true;
-		free = false;
-		forceFree = false;
-		// Allocation shape follows the NPT hide routine's range support, not the driver.
 		indPagesMode = Hypervisor::kHypervisorSupportsDiscontiguousNpt ? IndPagesAvailable() : false;
-
-		if (!g_silentAutomatic) {
+		if (!g_silent) {
 			LogBlank();
 			Log(L"[+] NPT hide enabled: the mapped driver's image will be hidden in the nested page table, except its executable span" << std::endl);
 			if (indPagesMode)
@@ -1140,106 +979,35 @@ void ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 			LogBlank();
 		}
 		break;
-
-	case 0: // Non-hypervisor detected
-		hide = false;
-		free = false;
-		forceFree = false;
-
-		if (!g_silentAutomatic) {
-			LogBlank();
-			Log(L"[+] Non-hypervisor driver: image will be kept resident" << std::endl);
-			Log(L"[+] Use --force-free explicitly to release the image after DriverEntry (unsafe for drivers with callbacks)" << std::endl);
-		}
-
-		// For non-hypervisors, enable independent pages if available
-		if (enableIndPages())
-			indPagesMode = true;
-
-		if (!g_silentAutomatic)
-			LogBlank();
-		break;
-
-	default: // Indeterminate (-1)
-		// Check if console is attached
-		HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
-		DWORD mode = 0;
-		const bool console_attached = (input != INVALID_HANDLE_VALUE && input != nullptr && GetConsoleMode(input, &mode));
-
-		if (console_attached) {
-			// Console attached: ask the operator
-			if (!g_silentAutomatic) {
+	case 0: // Operator says non-hypervisor
+		// The same gate the --free path uses: with callbacks or a device object
+		// present, free stays false and the message below is true.
+		free = forceFreeAllowed;
+		if (forceFreeAllowed) {
+			forceFree = true;
+			if (!g_silent) {
 				LogBlank();
-				Log(L"[!] Automatic classification inconclusive; asking operator" << std::endl);
-			}
-
-			switch (PromptIsHypervisor()) {
-			case 1: // Operator says hypervisor
-				hide = true;
-				copyHeader = true;
-				// Allocation shape follows the NPT hide routine's range support, not the driver.
-				indPagesMode = Hypervisor::kHypervisorSupportsDiscontiguousNpt ? IndPagesAvailable() : false;
-				if (!g_silentAutomatic) {
-					LogBlank();
-					Log(L"[+] NPT hide enabled: the mapped driver's image will be hidden in the nested page table, except its executable span" << std::endl);
-					if (indPagesMode)
-						Log(L"[+] Hypervisor: scattered allocation enabled (NPT hide supports discontiguous ranges)");
-					else
-						Log(L"[+] Hypervisor: contiguous allocation (NPT hide requires contiguous physical pages)");
-					LogBlank();
-				}
-				break;
-			case 0: // Operator says non-hypervisor
-				// The same gate the top-level --free path uses: with callbacks or a
-				// device object present, free stays false and the log below is true.
-				free = forceFreeAllowed;
-				if (forceFreeAllowed) {
-					forceFree = true;
-					if (!g_silentAutomatic) {
-						LogBlank();
-						Log(L"[+] Free memory after driver execution enabled" << std::endl);
-						LogBlank();
-						Log(L"[!] The image is only safe to free for a driver that will not run in guest mode again." << std::endl);
-					}
-				} else {
-					forceFree = false;
-					if (!g_silentAutomatic) {
-						LogBlank();
-						Log(L"[-] Driver registers callbacks or creates devices; refusing to free its image" << std::endl);
-						Log(L"[-] Image will be kept resident (safe default)." << std::endl);
-					}
-				}
-				if (enableIndPages())
-					indPagesMode = true;
-				break;
-			default: // Operator input ended
-				if (!g_silentAutomatic)
-					Log(L"[!] No operator input: the image is kept resident (safe default)" << std::endl);
-				break;
+				Log(L"[+] Free memory after driver execution enabled" << std::endl);
+				Log(L"[!] The image is only safe to free for a driver that will not run in guest mode again." << std::endl);
 			}
 		}
 		else {
-			// No console: keep resident, log warning
-			if (!g_silentAutomatic) {
-				LogBlank();
-				Log(L"[!] WARNING: Automatic classification inconclusive and no console attached" << std::endl);
-				Log(L"[!] Image will be kept resident (safe default for unknown driver type)" << std::endl);
-				Log(L"[!] Use --assume-hypervisor or --assume-driver to override, or --hide/--force-free for explicit control" << std::endl);
-				LogBlank();
-			}
-			hide = false;
-			free = false;
 			forceFree = false;
+			if (!g_silent) {
+				LogBlank();
+				Log(L"[-] Driver registers callbacks or creates devices; refusing to free its image" << std::endl);
+				Log(L"[-] Image will be kept resident (safe default)." << std::endl);
+			}
 		}
+		if (enableIndPages())
+			indPagesMode = true;
+		break;
+	default: // Operator input ended
+		Log(L"[!] No operator input: the image is kept resident (safe default)" << std::endl);
 		break;
 	}
 
-	// Save final settings to classification report
-	g_classificationReport.hide = hide;
-	g_classificationReport.free = free;
-	g_classificationReport.forceFree = forceFree;
-	g_classificationReport.copyHeader = copyHeader;
-	g_classificationReport.indPagesMode = indPagesMode;
+	return true;
 }
 
 /*
@@ -1374,24 +1142,7 @@ void ReportRunResult(bool driver_ok, bool provider_clean, const std::wstring& dr
 	}
 }
 
-/*
- * RunClassifierSelfTest lives in ClassifierSelfTest.cpp so TestClassifier.exe
- * can link it without wmain and without the requireAdministrator manifest.
- */
-
-
 int wmain(const int argc, wchar_t** argv) {
-	/*
-	 * The report is flushed on every exit path, not only the success one. The
-	 * early returns below - --require-hide, elevation, symbols, provider load,
-	 * a failed map - each used to leave no report behind, which made a failed
-	 * run indistinguishable from a run that was never classified.
-	 *
-	 * WriteClassificationReport() is a no-op while no path was given, so
-	 * constructing this before the flags are parsed is safe.
-	 */
-	struct ClassificationReportFlusher { ~ClassificationReportFlusher() { WriteClassificationReport(); } } g_report_flusher;
-
 	//Installed first so an access violation anywhere below still unloads the
 	//provider rather than leaving it loaded in a half configured state.
 	SetUnhandledExceptionFilter(SimplestCrashHandler);
@@ -1429,47 +1180,14 @@ int wmain(const int argc, wchar_t** argv) {
 	bool copyHeader = paramExists(argc, argv, L"copy-header") > 0;
 	bool hide = paramExists(argc, argv, L"hide") > 0;
 	bool requireHide = paramExists(argc, argv, L"require-hide") > 0;
-	bool assumeHypervisor = paramExists(argc, argv, L"assume-hypervisor") > 0;
-	bool assumeDriver = paramExists(argc, argv, L"assume-driver") > 0;
 	bool silent = paramExists(argc, argv, L"silent") > 0;
 
-	// Parse --classification-report flag
-	int classificationReportIdx = paramExists(argc, argv, L"classification-report");
-	if (classificationReportIdx > 0) {
-		if (classificationReportIdx + 1 >= argc) {
-			Log(L"[-] --classification-report requires a file path argument" << std::endl);
-			help();
-			PauseBeforeExit();
-			return -1;
-		}
-		g_classificationReportPath = argv[classificationReportIdx + 1];
-		Log(L"[+] Classification report will be written to: " << Val(g_classificationReportPath) << std::endl);
-	}
-
-	// Capture timestamp for classification report
-	{
-		std::time_t now = std::time(nullptr);
-		wchar_t buf[100];
-		std::tm tm_buf;
-		localtime_s(&tm_buf, &now);
-		std::wcsftime(buf, sizeof(buf) / sizeof(wchar_t), L"%Y-%m-%d %H:%M:%S", &tm_buf);
-		g_classificationReport.timestamp = buf;
-	}
-
-	// Set global silent mode flag
-	HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
-	DWORD mode = 0;
-	const bool console_attached = (input != INVALID_HANDLE_VALUE && input != nullptr && GetConsoleMode(input, &mode));
-	g_silentAutomatic = silent || !console_attached;
+	// --silent only silences the callback-gate refusal explanation now that the
+	// classifier is gone. It is not inferred from a missing console: a headless
+	// run needs that explanation more than an interactive one does.
+	g_silent = silent;
 
 	// Validate flag combinations
-	if (assumeHypervisor && assumeDriver) {
-		Log(L"[-] Cannot specify both --assume-hypervisor and --assume-driver" << std::endl);
-		help();
-		PauseBeforeExit();
-		return -1;
-	}
-
 	if (requireHide && !hide) {
 		Log(L"[-] --require-hide requires --hide to be specified" << std::endl);
 		help();
@@ -1484,22 +1202,14 @@ int wmain(const int argc, wchar_t** argv) {
 	 * callback, a device object - still executes code out of that allocation,
 	 * and freeing it under the running thread is an immediate bugcheck.
 	 *
-	 * The mapper cannot tell the two apart, so --free is ignored unless the
-	 * caller confirms with --force-free. Ignoring it keeps the image, which is
-	 * the default behaviour and the safe one.
+	 * The callback gate below is what separates the two cases: it refuses the
+	 * release for an image that imports callback-registering routines.
+	 * --force-free is the operator's explicit acknowledgement that the driver
+	 * will not touch its image again; it does not bypass the gate.
 	 */
-	if (free) {
-		if (!forceFree) {
-			Log(L"[!] --free ignored: the image would be released while the driver may still be running." << std::endl);
-			Log(L"[!] Freeing the image under a driver that keeps running after DriverEntry returns is an instant bugcheck." << std::endl);
-			Log(L"[!] The image is kept, which is the default. Add --force-free only for a driver that never touches its image again." << std::endl);
-			free = false;
-		}
-		else {
-			Log(L"[!] WARNING: --free is unsafe for drivers that keep running after DriverEntry returns." << std::endl);
-			Log(L"[!] Freeing as requested because --force-free was given." << std::endl);
-			Log(L"[+] Free memory after driver execution enabled" << std::endl);
-		}
+	if (free && !forceFree) {
+		Log(L"[!] --free: the image will be released after DriverEntry returns." << std::endl);
+		Log(L"[!] That is only safe for a driver that never touches its image again; --force-free says so explicitly." << std::endl);
 	}
 
 	/*
@@ -1574,8 +1284,7 @@ int wmain(const int argc, wchar_t** argv) {
 	static const wchar_t* knownFlags[] = {
 		L"free", L"force-free", L"indPages", L"PassAllocationPtr", L"copy-header",
 		L"hide", L"no-forensics", L"dontUpdateOffsets", L"offsetsPath", L"help", L"probe-context",
-		L"require-hide", L"assume-hypervisor", L"assume-driver", L"silent", L"classification-report",
-		L"developer"
+		L"require-hide", L"silent", L"developer"
 	};
 	for (int i = 1; i < argc; i++) {
 		const wchar_t* arg = argv[i];
@@ -1780,14 +1489,15 @@ int wmain(const int argc, wchar_t** argv) {
 		return -1;
 	}
 
-	// Save input file path to classification report
-	g_classificationReport.input_file = driver_path;
-
 	// Safety gate runs immediately after the image is read and before stealth
-	// mode selection: it decides whether forceFree is allowed.
+	// mode selection: it decides whether the image may be freed at all.
+	//
+	// The condition covers --free as well as --force-free. Now that --free alone
+	// reaches MapDriver, gating only on forceFree would let a driver that
+	// registers callbacks be freed with this check never running.
 	bool forceFreeAllowed = CheckCallbackSafetyGate(raw_image);
-	if (forceFree && !forceFreeAllowed) {
-		if (!g_silentAutomatic) {
+	if ((free || forceFree) && !forceFreeAllowed) {
+		if (!g_silent) {
 			Log(L"[-] Driver registers callbacks or creates devices; refusing to free its image." << std::endl);
 			Log(L"[-] Image will be kept resident (safe default)." << std::endl);
 		}
@@ -1798,7 +1508,10 @@ int wmain(const int argc, wchar_t** argv) {
 	//The stealth-mode decision runs in a helper frame of its own rather than in
 	//wmain's. The 0xC0000096 it was split out for is
 	//STATUS_PRIVILEGED_INSTRUCTION, not a /GS stack overrun.
-	ChooseStealthMode(hide, copyHeader, free, forceFree, indPagesMode, raw_image, assumeHypervisor, assumeDriver, forceFreeAllowed);
+	if (!ChooseStealthMode(hide, copyHeader, free, forceFree, indPagesMode, forceFreeAllowed)) {
+		PauseBeforeExit();
+		return -1;
+	}
 
 	// If --require-hide was specified, check hypervisor presence before mapping
 	if (requireHide && hide) {
@@ -1878,8 +1591,6 @@ int wmain(const int argc, wchar_t** argv) {
 	//frame of its own rather than wmain's. The 0xC0000096 it was split out for
 	//is STATUS_PRIVILEGED_INSTRUCTION, not a /GS stack overrun.
 	ReportRunResult(driver_ok, provider_clean, driver_path, driver_status);
-
-	//The classification report is written by g_report_flusher on scope exit.
 
 	PauseBeforeExit();
 

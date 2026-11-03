@@ -116,21 +116,4 @@ namespace PE
 	 * Called only when GetRelocs returned an empty vector.
 	 */
 	bool VerifyNoAbsoluteReferences(void* image_base, size_t image_size);
-
-	/*
-	 * Classify a driver image as hypervisor, non-hypervisor, or indeterminate.
-	 *
-	 * Scans the raw image for hypervisor indicators:
-	 *   - VMX/SVM instruction opcodes (VMXON, VMLAUNCH, VMRESUME, VMMCALL, VMRUN)
-	 *   - Section names containing vmx/svm/hv/vmm
-	 *   - Imported symbols matching Hv*, Vp*, Vid* from ntoskrnl
-	 *   - ASCII/UTF-16 strings containing hypervisor keywords
-	 *
-	 * Returns true when at least two independent indicator classes match.
-	 * out_log receives the matched indicators for logging (caller decides when
-	 * to print them).
-	 *
-	 * Called before mapping to determine stealth mode automatically.
-	 */
-	bool IsHypervisorImage(const std::vector<uint8_t>& image, const PIMAGE_NT_HEADERS64 nt_headers, std::wstring* out_log = nullptr, int* out_class_count = nullptr);
 }
