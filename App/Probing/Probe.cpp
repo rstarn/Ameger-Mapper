@@ -33,7 +33,7 @@ namespace
  * the process itself - and the failure that produces is the least legible one in
  * the project: SE_LOAD_DRIVER_PRIVILEGE cannot be acquired, Service.cpp reports
  * "make sure you are running as administrator" after the provider has already
- * been written to %TEMP%, and nothing has been mapped.
+ * been written to the scratch directory, and nothing has been mapped.
  */
 bool IsElevated() {
 	SID_IDENTIFIER_AUTHORITY nt_authority = SECURITY_NT_AUTHORITY;

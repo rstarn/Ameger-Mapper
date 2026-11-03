@@ -40,9 +40,10 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <!-- No UACExecutionLevel here on purpose. This binary exists so the
-           classifier can be exercised without an elevated shell; adding the
-           mapper's requireAdministrator manifest would defeat it. -->
+      <!-- No elevation level is declared for this project on purpose. This
+           binary exists so the classifier can be exercised without an elevated
+           shell; inheriting the mapper's requireAdministrator manifest would
+           defeat it. Absent a declaration the linker emits asInvoker. -->
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>

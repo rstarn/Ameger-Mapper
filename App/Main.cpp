@@ -45,7 +45,6 @@
 #include "../Provider/Driver.hpp"
 #include "../Symbols/Handler/SymbolsHandler.hpp"
 #include "Probing/Probe.h"
-#include "ClassifierSelfTest.hpp"
 
 //Hypervisor client header (Hypervisor.h): --hide issues the nested-page-table hide
 //commands from the very process that did the mapping, so the resident base
@@ -897,6 +896,9 @@ void help() {
 	LogRaw(L"      --force-free              Confirm image release (bypasses safety prompt)" << std::endl);
 	LogRaw(L"      --copy-header             Keep PE header in mapped image" << std::endl);
 	LogBlank();
+	LogRaw(L"[+] Developer Flags:" << std::endl);
+	LogRaw(L"      --developer               Enable developer-only diagnostics (--probe-context)" << std::endl);
+	LogBlank();
 }
 
 /*
@@ -1398,11 +1400,6 @@ int wmain(const int argc, wchar_t** argv) {
 	//below render as intended.
 	Console::EnableAnsiColors();
 
-	//Self-test for classifier - runs before everything else and exits
-	if (paramExists(argc, argv, L"self-test-classifier") > 0) {
-		return RunClassifierSelfTest();
-	}
-
 	//Explicit help request. Handled before the flags so it never starts a run.
 	if (paramExists(argc, argv, L"help") > 0) {
 		help();
@@ -1411,10 +1408,19 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 
 	//The --probe-context switch runs the param2 propagation probe and returns
-	//immediately, without entering the normal map flow.
+	//immediately, without entering the normal map flow. It is a developer
+	//diagnostic - it issues a vmmcall and reports the raw ABI result - so it is
+	//refused unless --developer was also given, which keeps a production run
+	//from reaching it by accident.
 	int probeContextIdx = paramExists(argc, argv, L"probe-context");
-	if (probeContextIdx > 0)
+	if (probeContextIdx > 0) {
+		if (paramExists(argc, argv, L"developer") <= 0) {
+			Log(L"[-] --probe-context is a developer diagnostic; pass --developer to run it" << std::endl);
+			PauseBeforeExit();
+			return -1;
+		}
 		return RunProbeContext(argc, argv, probeContextIdx);
+	}
 
 	bool free = paramExists(argc, argv, L"free") > 0;
 	bool forceFree = paramExists(argc, argv, L"force-free") > 0;
@@ -1569,7 +1575,7 @@ int wmain(const int argc, wchar_t** argv) {
 		L"free", L"force-free", L"indPages", L"PassAllocationPtr", L"copy-header",
 		L"hide", L"no-forensics", L"dontUpdateOffsets", L"offsetsPath", L"help", L"probe-context",
 		L"require-hide", L"assume-hypervisor", L"assume-driver", L"silent", L"classification-report",
-		L"self-test-classifier"
+		L"developer"
 	};
 	for (int i = 1; i < argc; i++) {
 		const wchar_t* arg = argv[i];
