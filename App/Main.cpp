@@ -606,18 +606,18 @@ namespace
 			return 0;
 		}
 
-		if (class_count == 1) {
-			g_classificationReport.detect_result = -1;
-			if (!g_silentAutomatic) {
-				LogBlank();
-				Log(L"[!] Automatic classification: Indeterminate (insufficient evidence)" << std::endl);
-			}
-			return -1;
+		/*
+		 * The one-class case, and the only case left: two classes set
+		 * is_hypervisor and returned above, and zero returned above that. The
+		 * test that used to sit here and the return after it were both
+		 * unreachable, so this is the tail of the function now.
+		 */
+		g_classificationReport.detect_result = -1;
+		if (!g_silentAutomatic) {
+			LogBlank();
+			Log(L"[!] Automatic classification: Indeterminate (insufficient evidence)" << std::endl);
 		}
-
-		// class_count >= 2
-		g_classificationReport.detect_result = 1;
-		return 1;
+		return -1;
 	}
 
 	/*
