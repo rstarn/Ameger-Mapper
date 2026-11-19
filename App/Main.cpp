@@ -122,6 +122,52 @@ namespace
 		return version.dwBuildNumber;
 	}
 
+	/*
+	 * Is Hypervisor-Enforced Code Integrity (Windows Security's "Memory
+	 * integrity") enforcing kernel code integrity right now?
+	 *
+	 * NtQuerySystemInformation(SystemCodeIntegrityInformation) is the supported
+	 * way to ask. The options word describes the running state, not just the
+	 * configured one:
+	 *   0x0400 HVCI/KMCI enabled
+	 *   0x0800 HVCI/KMCI audit mode (logs, does not block)
+	 *   0x1000 HVCI/KMCI strict mode
+	 *   0x2000 HVCI IUM enabled
+	 *
+	 * This matters because the mapper's kernel function call primitive patches
+	 * nt!NtAddAtom. Under HVCI the hypervisor marks every kernel code page
+	 * read-only in the second-level address translation, so the write faults
+	 * inside the provider no matter what the guest page tables say: bugcheck
+	 * 0x3B with the fault in the vulnerable provider, not in the mapped driver.
+	 * There is no guest-side bypass - HVCI has to be off.
+	 */
+	constexpr ULONG kCodeIntegrityHvciKmciEnabled = 0x0400;
+	constexpr ULONG kCodeIntegrityHvciKmciAuditMode = 0x0800;
+	constexpr ULONG kCodeIntegrityHvciKmciStrictMode = 0x1000;
+	constexpr ULONG kCodeIntegrityHvciIumEnabled = 0x2000;
+
+	struct CodeIntegrityInformation {
+		ULONG Length;
+		ULONG CodeIntegrityOptions;
+	};
+
+	bool HvciIsEnforced() {
+		CodeIntegrityInformation info = {};
+		info.Length = sizeof(info);
+		ULONG returned = 0;
+		const NTSTATUS status = NtQuerySystemInformation(
+			static_cast<SYSTEM_INFORMATION_CLASS>(103), &info, sizeof(info), &returned);
+		if (!NT_SUCCESS(status))
+			return false;
+
+		//Audit mode alone does not block writes, so it is not part of the test.
+		const ULONG enforcing = kCodeIntegrityHvciKmciEnabled |
+			kCodeIntegrityHvciKmciStrictMode |
+			kCodeIntegrityHvciIumEnabled;
+		UNREFERENCED_PARAMETER(kCodeIntegrityHvciKmciAuditMode);
+		return (info.CodeIntegrityOptions & enforcing) != 0;
+	}
+
 	//Trim ASCII whitespace from both ends of a string.
 	std::wstring TrimWhitespace(const std::wstring& text) {
 		static const wchar_t* whitespace = L" \t\r\n\f\v";
@@ -428,60 +474,109 @@ namespace
 	}
 
 	/*
-	 * Inspect a driver image for callback/device registration imports.
+	 * 17p: Definitive gate. Parse the target driver's PE import table
+	 * directly and check every imported function name against the dangerous
+	 * list. Fail-closed on any parse error.
 	 *
-	 * Before forceFree is allowed, check whether the driver imports any routines
-	 * that register callbacks or create devices. A driver that does so keeps
-	 * running after DriverEntry returns, so freeing its image is unsafe.
-	 *
-	 * Returns true when the image is safe to free (no dangerous imports found),
-	 * false otherwise.
+	 * Returns true ONLY when the PE parses cleanly AND no dangerous imports
+	 * found. Any ambiguity => false (do not free).
 	 */
 	bool CheckCallbackSafetyGate(const std::vector<uint8_t>& image) {
-		PE::vec_imports imports;
-		if (!PE::GetImports(const_cast<uint8_t*>(image.data()), image.size(), imports))
-			return true; // No imports to check; assume safe
-
-		const char* dangerous_imports[] = {
-			"IoCreateDevice",
-			"IoRegisterDriverReinitialization",
-			"IoRegisterBootDriverReinitialization",
+		static const char* dangerous[] = {
 			"PsSetCreateProcessNotifyRoutine",
 			"PsSetCreateProcessNotifyRoutineEx",
 			"PsSetCreateThreadNotifyRoutine",
 			"PsSetLoadImageNotifyRoutine",
+			"ObRegisterCallbacks",
 			"CmRegisterCallback",
 			"CmRegisterCallbackEx",
-			"ObRegisterCallbacks"
+			"IoCreateDevice",
+			"IoRegisterDriverReinitialization",
+			"IoRegisterBootDriverReinitialization",
+			nullptr
 		};
 
-		for (const auto& import : imports) {
-			// Check if module is ntoskrnl (case insensitive)
-			std::string module_lower = import.module_name;
-			for (char& c : module_lower) {
-				if (c >= 'A' && c <= 'Z')
-					c = static_cast<char>(c - 'A' + 'a');
+		if (image.size() < sizeof(IMAGE_DOS_HEADER)) return false;
+		auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image.data());
+		if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
+		if (dos->e_lfanew < 0 ||
+			(size_t)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64) > image.size())
+			return false;
+
+		auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(
+			image.data() + dos->e_lfanew);
+		if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
+
+		const auto& dir = nt->OptionalHeader
+			.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+		if (dir.VirtualAddress == 0 || dir.Size == 0) {
+			// No imports at all — highly suspicious for a kernel driver.
+			return false;
+		}
+
+		// Convert RVA to file offset via section table
+		auto rva_to_off = [&](DWORD rva) -> size_t {
+			auto* sec = IMAGE_FIRST_SECTION(nt);
+			for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+				if (rva >= sec[i].VirtualAddress &&
+					rva < sec[i].VirtualAddress + sec[i].SizeOfRawData) {
+					return sec[i].PointerToRawData +
+						(rva - sec[i].VirtualAddress);
+				}
 			}
+			return SIZE_MAX;
+		};
 
-			if (module_lower.find("ntoskrnl") != std::string::npos) {
-				for (const auto& func : import.function_datas) {
-					if (func.name.empty())
-						continue;
+		size_t impOff = rva_to_off(dir.VirtualAddress);
+		if (impOff == SIZE_MAX) return false;
+		if (impOff + sizeof(IMAGE_IMPORT_DESCRIPTOR) > image.size())
+			return false;
 
-					for (const char* dangerous : dangerous_imports) {
-						if (func.name == dangerous) {
-							if (!g_silent) {
-								Log(L"[!] Driver imports " << Val(Utilities::ToWide(func.name))
-									<< L"; refusing to free its image" << std::endl);
-								Log(L"[!] This function registers callbacks or creates devices, so the driver keeps running after DriverEntry." << std::endl);
-							}
-							return false;
-						}
+		auto* imp = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(
+			image.data() + impOff);
+
+		// Walk each import descriptor
+		for (; imp->Name != 0; imp++) {
+			if ((const uint8_t*)imp + sizeof(*imp) > image.data() + image.size())
+				return false;
+			size_t off = rva_to_off(imp->Name);
+			if (off == SIZE_MAX || off >= image.size()) return false;
+
+			// Walk the ILT (OriginalFirstThunk or FirstThunk)
+			DWORD thunkRva = imp->OriginalFirstThunk
+				? imp->OriginalFirstThunk
+				: imp->FirstThunk;
+			size_t thunkOff = rva_to_off(thunkRva);
+			if (thunkOff == SIZE_MAX) return false;
+
+			auto* thunk = reinterpret_cast<const IMAGE_THUNK_DATA64*>(
+				image.data() + thunkOff);
+			for (; thunk->u1.AddressOfData != 0; thunk++) {
+				if ((const uint8_t*)thunk + sizeof(*thunk) >
+					image.data() + image.size())
+					return false;
+				// Skip ordinal imports
+				if (thunk->u1.Ordinal & IMAGE_ORDINAL_FLAG64) continue;
+				size_t nameOff = rva_to_off(
+					(DWORD)thunk->u1.AddressOfData);
+				if (nameOff == SIZE_MAX) return false;
+				if (nameOff + sizeof(IMAGE_IMPORT_BY_NAME) > image.size())
+					return false;
+				auto* ibn = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(
+					image.data() + nameOff);
+				const char* name = (const char*)ibn->Name;
+				// Bounds-check the name against the end of the image
+				if ((const uint8_t*)name >= image.data() + image.size())
+					return false;
+				for (int k = 0; dangerous[k]; k++) {
+					if (strcmp(name, dangerous[k]) == 0) {
+						// Detected a callback/timer import — refuse to free
+						return false;
 					}
 				}
 			}
 		}
-
+		// No dangerous imports found — safe to free
 		return true;
 	}
 
@@ -909,7 +1004,7 @@ bool RunMapAndHide(std::vector<BYTE>& raw_image, const std::wstring& driver_path
 //was split out for is STATUS_PRIVILEGED_INSTRUCTION, not a stack overrun.
 __declspec(noinline)
 bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree, bool& indPagesMode,
-                       bool forceFreeAllowed, bool forceAsk) {
+                       bool forceFreeAllowed, bool forceAsk, const std::vector<uint8_t>& image) {
 	//Scatter the allocation across independent pages whenever this build
 	//allows it: a discontiguous physical run is harder to fingerprint than a
 	//contiguous blob. On a build where MmAllocateIndependentPagesEx changed
@@ -943,9 +1038,22 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 	}
 
 	// --free was given, so the operator already decided. forceFree survives only
-	// if --force-free was also given and the callback gate let it through;
-	// wmain has already applied both before this runs.
+	// if --force-free was also given and the callback gate let it through.
+	// Layer 1: NEVER enable free when the gate refuses callback/timer APIs.
 	if (free) {
+		if (!forceFreeAllowed) {
+			free = false;
+			forceFree = false;
+			if (enableIndPages())
+				indPagesMode = true;
+			if (!g_silent) {
+				LogBlank();
+				Log(L"[!] Driver imports callback/timer APIs; refusing to free its image" << std::endl);
+				Log(L"[!] The image will remain resident regardless of --free/--force-free." << std::endl);
+				LogBlank();
+			}
+			return true;
+		}
 		forceFree = forceFree && forceFreeAllowed;
 		if (enableIndPages())
 			indPagesMode = true;
@@ -988,28 +1096,42 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 			LogBlank();
 		}
 		break;
-	case 0: // Operator says non-hypervisor
-		// The same gate the --free path uses: with callbacks or a device object
-		// present, free stays false and the message below is true.
-		free = forceFreeAllowed;
-		if (forceFreeAllowed) {
-			forceFree = true;
-			if (!g_silent) {
-				LogBlank();
-				Log(L"[+] Free memory after driver execution enabled" << std::endl);
-				Log(L"[!] The image is only safe to free for a driver that will not run in guest mode again." << std::endl);
-			}
-		}
-		else {
+	case 0: // Operator says non-hypervisor (prompt answer N)
+		// 17p: Do NOT trust the prompt answer. Consult the callback/timer gate
+		// BEFORE allowing free, and never set free=true when the gate refuses.
+		if (!forceFreeAllowed) {
+			free = false;
 			forceFree = false;
 			if (!g_silent) {
 				LogBlank();
-				Log(L"[-] Driver registers callbacks or creates devices; refusing to free its image" << std::endl);
-				Log(L"[-] Image will be kept resident (safe default)." << std::endl);
+				Log(L"[!] Driver imports callback/timer APIs; refusing to free its image" << std::endl);
+				Log(L"[!] The image will remain resident regardless of prompt answer." << std::endl);
+			}
+		} else {
+			// 17p belt-and-suspenders: re-parse PE imports (fail-closed) in case
+			// forceFreeAllowed was stale or a prior gate path false-positived.
+			if (!CheckCallbackSafetyGate(image)) {
+				free = false;
+				forceFree = false;
+				if (!g_silent) {
+					LogBlank();
+					Log(L"[!] gate re-check refused free — refusing to free its image" << std::endl);
+					Log(L"[!] The image will remain resident regardless of prompt answer." << std::endl);
+				}
+			} else {
+				free = true;   // only if gate allows
+				forceFree = true;
+				if (!g_silent) {
+					LogBlank();
+					Log(L"[+] Free memory after driver execution enabled" << std::endl);
+					Log(L"[!] The image is only safe to free for a driver that will not run in guest mode again." << std::endl);
+				}
 			}
 		}
 		if (enableIndPages())
 			indPagesMode = true;
+		/* 17p belt-and-suspenders: gate refusal is absolute. */
+		if (!forceFreeAllowed || !CheckCallbackSafetyGate(image)) { free = false; forceFree = false; }
 		break;
 	default: // Operator input ended
 		Log(L"[!] No operator input: the image is kept resident (safe default)" << std::endl);
@@ -1377,6 +1499,27 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 
 	/*
+	 * HVCI gate. The mapper installs its kernel call primitive by writing a
+	 * 12-byte jump over nt!NtAddAtom. HVCI enforces W^X on kernel code pages in
+	 * the hypervisor's second-level page tables, so that write faults before
+	 * any driver mapping starts - bugcheck 0x3B inside the provider, with the
+	 * mapped driver never even reached. Detect it here, before the driver file
+	 * is read and before the provider is loaded, and refuse with the one fix
+	 * that exists: turn Memory Integrity off.
+	 */
+	if (HvciIsEnforced()) {
+		Log(L"[-] Hypervisor-Enforced Code Integrity (Memory Integrity) is enabled." << std::endl);
+		Log(L"[-] The hypervisor write-protects kernel code pages, so the mapper cannot install its" << std::endl);
+		Log(L"[-] kernel call primitive; attempting it bugchecks the machine (0x3B) inside the provider." << std::endl);
+		Log(L"[-] Turn it off and reboot: Windows Security > Device security > Core isolation details" << std::endl);
+		Log(L"[-] > Memory integrity > Off." << std::endl);
+		Log(L"[-] Registry equivalent: HKLM\\SYSTEM\\CurrentControlSet\\Control\\DeviceGuard\\Scenarios\\" << std::endl);
+		Log(L"[-] HypervisorEnforcedCodeIntegrity\\Enabled = 0 (REG_DWORD), then restart." << std::endl);
+		PauseBeforeExit();
+		return -1;
+	}
+
+	/*
 	 * MmAllocateIndependentPagesEx changed signature in 24H2 (build 26100).
 	 * Driver.cpp still calls it with the pre-24H2 shape (size, -1, 0, 0),
 	 * which is correct only for earlier builds. The signature cannot be
@@ -1559,17 +1702,22 @@ int wmain(const int argc, wchar_t** argv) {
 		return -1;
 	}
 
-	// Safety gate runs immediately after the image is read and before stealth
-	// mode selection: it decides whether the image may be freed at all.
-	//
-	// The --free/--force-free acknowledgment above has already run, so free and
-	// forceFree are equal here. Both are still tested so the check keeps working
-	// if the order of the two ever changes.
-	bool forceFreeAllowed = CheckCallbackSafetyGate(raw_image);
-	if ((free || forceFree) && !forceFreeAllowed) {
-		if (!g_silent) {
-			Log(L"[-] Driver registers callbacks or creates devices; refusing to free its image." << std::endl);
-			Log(L"[-] Image will be kept resident (safe default)." << std::endl);
+	// LAYER 1 (Phase 7 BSOD fix): callback/timer safety gate is consulted
+	// UNCONDITIONALLY and overrides every free path. Drivers that register
+	// callbacks (PsSetCreateProcess/ThreadNotifyRoutine, ObRegisterCallbacks)
+	// or create persistent kernel objects keep running after DriverEntry; if
+	// the mapper frees the image while KTIMER/KDPC are armed, the per-CPU
+	// timer queue is corrupted → 0x0A IRQL_NOT_LESS_OR_EQUAL at
+	// KiInsertTimerTable (Microsoft: "call KeCancelTimer before the KTIMER
+	// object or DPC routine disappears from memory").
+	bool callbackGateAllowed = CheckCallbackSafetyGate(raw_image);
+	bool forceFreeAllowed = callbackGateAllowed; /* compatibility with ChooseStealthMode */
+	if (!callbackGateAllowed) {
+		if (free || forceFree) {
+			if (!g_silent) {
+				Log(L"[!] Driver imports callback/timer APIs; refusing to free its image." << std::endl);
+				Log(L"[!] The image will remain resident regardless of --free/--force-free." << std::endl);
+			}
 		}
 		free = false;
 		forceFree = false;
@@ -1584,9 +1732,16 @@ int wmain(const int argc, wchar_t** argv) {
 	//The stealth-mode decision runs in a helper frame of its own rather than in
 	//wmain's. The 0xC0000096 it was split out for is
 	//STATUS_PRIVILEGED_INSTRUCTION, not a /GS stack overrun.
-	if (!ChooseStealthMode(hide, copyHeader, free, forceFree, indPagesMode, forceFreeAllowed, forceAsk)) {
+	if (!ChooseStealthMode(hide, copyHeader, free, forceFree, indPagesMode, forceFreeAllowed, forceAsk, raw_image)) {
 		PauseBeforeExit();
 		return -1;
+	}
+
+	/* 17l: hard-block — NO path may free a callback-driver image. ChooseStealthMode
+	   receives forceFreeAllowed; this is a final backstop against any bypass. */
+	if (!callbackGateAllowed) {
+		free = false;
+		forceFree = false;
 	}
 
 	// An active hypervisor blocks a second hypervisor and nothing else. This is
