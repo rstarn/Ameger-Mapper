@@ -223,6 +223,13 @@ namespace Driver
 	//Kernel helpers reached through the call hook below.
 	bool ExAcquireResourceExclusiveLite(PVOID Resource, BOOLEAN wait);
 	bool ExReleaseResourceLite(PVOID Resource);
+	/* Acquire an ERESOURCE exclusively via bounded, non-blocking hook calls.
+	 * Each try returns immediately so the NtAddAtom stub is live only for a few
+	 * instructions; the sleeps happen with the hook fully restored. This keeps
+	 * a contended kernel lock from holding the code patch open for an unbounded
+	 * wait. Returns false if the lock was not taken within the retry budget;
+	 * callers must only release when this returns true. */
+	bool AcquireResourceExclusiveBounded(PVOID Resource, uint32_t maxAttempts = 250u, uint32_t sleepMs = 2u);
 	BOOLEAN RtlDeleteElementGenericTableAvl(PVOID Table, PVOID Buffer);
 	PVOID RtlLookupElementGenericTableAvl(Nt::PRTL_AVL_TABLE Table, PVOID Buffer);
 	Nt::PiDDBCacheEntry* LookupEntry(Nt::PRTL_AVL_TABLE PiDDBCacheTable, ULONG timestamp, const wchar_t* name);

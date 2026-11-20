@@ -3136,6 +3136,26 @@ bool Driver::ExAcquireResourceExclusiveLite(PVOID Resource, BOOLEAN wait) {
 	return (CallKernelFunction(&out, kernel_ExAcquireResourceExclusiveLite, Resource, wait) && out);
 }
 
+//Acquire an ERESOURCE exclusively without leaving the NtAddAtom hook installed
+//across a blocking kernel wait. Each try uses wait=FALSE and therefore returns
+//immediately; the interval between tries is spent in user-mode Sleep with the
+//hook already restored. A contended lock can no longer keep kernel code patched
+//for an unbounded time (the H1 residual), while the result is identical: on
+//return true the resource is held, on false it was never acquired.
+bool Driver::AcquireResourceExclusiveBounded(PVOID Resource, uint32_t maxAttempts, uint32_t sleepMs) {
+	if (!Resource)
+		return false;
+	for (uint32_t attempt = 0u; attempt < maxAttempts; ++attempt) {
+		if (ExAcquireResourceExclusiveLite(Resource, FALSE))
+			return true; // acquired; caller now owns the resource
+		if (attempt + 1u < maxAttempts)
+			Sleep(sleepMs); // hook restored during the wait
+	}
+	Log(L"[-] AcquireResourceExclusiveBounded: lock still contended after "
+		<< maxAttempts << L" attempts" << std::endl);
+	return false;
+}
+
 //Release a lock taken by ExAcquireResourceExclusiveLite.
 bool Driver::ExReleaseResourceLite(PVOID Resource) {
 	if (!Resource)
@@ -3249,7 +3269,7 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 	PVOID PiDDBLock = (PVOID)(Driver::ntoskrnlAddr + PiDDBLockOffset);
 	Nt::PRTL_AVL_TABLE PiDDBCacheTable = (Nt::PRTL_AVL_TABLE)(Driver::ntoskrnlAddr + PiDDBCacheTableOffset);
 
-	if (!ExAcquireResourceExclusiveLite(PiDDBLock, true)) {
+	if (!AcquireResourceExclusiveBounded(PiDDBLock)) {
 		Log(L"[-] Can't lock PiDDBCacheTable" << std::endl);
 		return false;
 	}
@@ -3452,7 +3472,7 @@ bool Driver::ClearKernelHashBucketList() {
 	LogBlank();
 	Log(L"[+] g_KernelHashBucketList = " << Val(reinterpret_cast<void*>(g_KernelHashBucketList)) << std::endl);
 
-	if (!ExAcquireResourceExclusiveLite(g_HashCacheLock, true)) {
+	if (!AcquireResourceExclusiveBounded(g_HashCacheLock)) {
 		Log(L"[-] Can't lock g_HashCacheLock" << std::endl);
 		return false;
 	}
