@@ -11,6 +11,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <stdint.h>
+#include <vector>
 
 #include "../Utilities/Console.hpp"
 

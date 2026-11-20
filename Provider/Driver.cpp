@@ -17,6 +17,7 @@
 #include "Driver.hpp"
 
 #include <Windows.h>
+#include <atomic>
 #include <string>
 #include <fstream>
 #include <filesystem>
@@ -1941,11 +1942,39 @@ bool Driver::WriteToReadOnlyMemory(uint64_t address, void* buffer, uint32_t size
 	 * which is the exact failure this function exists to avoid.
 	 */
 	const size_t scratch_size = (size_t)page_count * 0x1000;
-	auto* scratch = static_cast<uint8_t*>(VirtualAlloc(nullptr, scratch_size,
-	                                                   MEM_RESERVE | MEM_COMMIT,
-	                                                   PAGE_READWRITE));
-	if (scratch == nullptr) {
-		Log(L"[-] WriteToReadOnlyMemory: VirtualAlloc failed (error " << GetLastError() << L")" << std::endl);
+
+	/*
+	 * Use a distinct scratch VA for every call. A restored alias PTE leaves a
+	 * stale TLB entry mapping the old scratch VA onto the kernel target page;
+	 * VirtualAlloc happily returns that same VA on the next call, and any write
+	 * through it lands in kernel code (this caused a 0x109). Rotating through a
+	 * pool of permanently reserved regions guarantees a freshly aliased VA is
+	 * never one with a lingering stale translation. Each slot is 16 pages; the
+	 * pool is sized generously and the index wraps only after thousands of
+	 * calls, by which time any stale TLB entry is long evicted.
+	 */
+	constexpr uint32_t kScratchSlots = 512;
+	constexpr size_t kScratchSlotBytes = 16u * 0x1000;
+	static uint8_t* scratch_pool = nullptr;
+	static std::atomic<uint32_t> scratch_counter{ 0 };
+	if (scratch_pool == nullptr) {
+		uint8_t* pool = static_cast<uint8_t*>(VirtualAlloc(
+			nullptr, kScratchSlots * kScratchSlotBytes,
+			MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+		if (pool == nullptr) {
+			Log(L"[-] WriteToReadOnlyMemory: scratch pool allocation failed" << std::endl);
+			return false;
+		}
+		scratch_pool = pool;
+	}
+	const uint32_t slot = scratch_counter.fetch_add(1) % kScratchSlots;
+	uint8_t* const scratch = scratch_pool + (size_t)slot * kScratchSlotBytes;
+
+	/* A prior call using this slot left it PAGE_NOACCESS. Restore RW before use;
+	 * no alias is installed at this point, so this write cannot touch kernel. */
+	DWORD prior_protect = 0;
+	if (!VirtualProtect(scratch, kScratchSlotBytes, PAGE_READWRITE, &prior_protect)) {
+		Log(L"[-] WriteToReadOnlyMemory: failed to unlock scratch slot" << std::endl);
 		return false;
 	}
 
@@ -1962,16 +1991,26 @@ bool Driver::WriteToReadOnlyMemory(uint64_t address, void* buffer, uint32_t size
 		}
 	};
 
-	//Fault every scratch page in before dropping its translation, so the
-	//protection change below is a real RW -> no-access transition on all of
-	//them and not a no-op.
-	for (uint32_t i = 0; i < page_count; ++i)
-		scratch[(size_t)i * 0x1000] = 0;
+	/*
+	 * Fault every scratch page in before dropping its translation, so the
+	 * protection change is a real RW -> no-access transition. This used to
+	 * WRITE zero at each page's offset 0. That write is the root cause of a
+	 * 0x109 CRITICAL_STRUCTURE_CORRUPTION: once a scratch VA has been aliased
+	 * to a kernel page and the PTE restored, the TLB can still hold the stale
+	 * alias; the next call reuses the same VirtualAlloc VA and this fault-in
+	 * write lands at offset 0 of the kernel page (one byte, e.g. 0x85 -> 0x00),
+	 * which PatchGuard later detects. A READ faults the page in just as well
+	 * and cannot corrupt the aliased target regardless of TLB state.
+	 * MEM_COMMIT pages are zero-initialized by the OS, so no write is needed.
+	 */
+	for (uint32_t i = 0; i < page_count; ++i) {
+		volatile uint8_t fault_in = scratch[(size_t)i * 0x1000];
+		(void)fault_in;
+	}
 
 	DWORD old_protect = 0;
 	if (!VirtualProtect(scratch, scratch_size, PAGE_NOACCESS, &old_protect)) {
 		Log(L"[-] WriteToReadOnlyMemory: VirtualProtect failed (error " << GetLastError() << L")" << std::endl);
-		VirtualFree(scratch, 0, MEM_RELEASE);
 		return false;
 	}
 
@@ -2088,7 +2127,9 @@ bool Driver::WriteToReadOnlyMemory(uint64_t address, void* buffer, uint32_t size
 	}
 
 	restore_scratch_entries();
-	VirtualFree(scratch, 0, MEM_RELEASE);
+	/* The scratch region belongs to the permanent rotating pool; it is never
+	 * freed here. Freeing and reallocating the same VA is what allowed a stale
+	 * alias translation to be reused. */
 	if (!ok)
 		Log(L"[-] WriteToReadOnlyMemory: failed for " << Val(reinterpret_cast<void*>(address)) << std::endl);
 
@@ -3302,8 +3343,8 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 		 * not left half-unlinked while the AVL node still exists. Restore the
 		 * neighbours' pointers back to pFoundEntry; best-effort, but it keeps
 		 * kernel PiDDB state consistent when the AVL delete fails. */
-		WriteMemory(prev_flink_addr, &pFoundEntry, sizeof(pFoundEntry));
-		WriteMemory(next_blink_addr, &pFoundEntry, sizeof(pFoundEntry));
+		WriteMemory(prev_flink_addr, &pFoundEntry, sizeof(_LIST_ENTRY*));
+		WriteMemory(next_blink_addr, &pFoundEntry, sizeof(_LIST_ENTRY*));
 		Log(L"[-] Can't delete from PiDDBCacheTable (list links rolled back)" << std::endl);
 		ExReleaseResourceLite(PiDDBLock);
 		return false;
