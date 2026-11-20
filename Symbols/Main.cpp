@@ -27,14 +27,18 @@
 
 namespace
 {
+
 	//Duplicated from Utilities on purpose: SymbolTool links neither that
 	//project nor anything that depends on it, and pulling one more translation
 	//unit in for a single function is not worth the build coupling.
+
 	std::wstring GetCurrentAppFolder() {
 		wchar_t buffer[1024] = { 0 };
 		const DWORD length = GetModuleFileNameW(NULL, buffer, static_cast<UINT>(std::size(buffer)));
+
 		/* nSize on return means the path was truncated and is not null-terminated;
 		 * only a shorter result is safe to wrap in std::wstring. */
+
 		if (length == 0u || length >= std::size(buffer))
 			return L"";
 		std::wstring::size_type pos = std::wstring(buffer).find_last_of(L"\\/");
@@ -45,6 +49,7 @@ namespace
 
 	//A symbol resolved from a module's PDB, held until the whole report can be
 	//printed in one fixed order instead of in resolution order.
+
 	struct ResolvedSymbol {
 		std::wstring name;
 		uint64_t offset = 0;
@@ -57,6 +62,7 @@ namespace
 	//Resolved is separate from offset because a field can legitimately resolve
 	//to offset 0, and treating that as a miss silently dropped
 	//_DRIVER_EXTENSION.DriverObject from the generated file.
+
 	struct ResolvedField {
 		std::wstring structName;
 		std::wstring fieldName;
@@ -70,10 +76,13 @@ namespace
 
 //Modules to resolve. ci.dll only matters when Defender is present, so its
 //entries end up in an empty [ci.dll.fields] section when it is not.
+
 int wmain()
 {
+
 	//ANSI escape processing has to be enabled before any colour sequence is
 	//written, otherwise the escape bytes print literally.
+
 	Console::EnableAnsiColors();
 
 	std::vector<std::wstring> targetBinaries = {
@@ -82,6 +91,7 @@ int wmain()
 	};
 
 	//Symbols that must resolve: the mapper cannot run without them.
+
 	std::vector<SymbolRequest> symbolsToRetrieve{
 		{ L"ntoskrnl.exe", L"MmAllocateIndependentPagesEx" },
 		{ L"ntoskrnl.exe", L"MmFreeIndependentPages" },
@@ -89,9 +99,11 @@ int wmain()
 		{ L"ntoskrnl.exe", L"PiDDBCacheTable" },
 		{ L"ntoskrnl.exe", L"MmSetPageProtection" },
 		{
+
 		// Base of the page table self-map window. Resolved rather than hardcoded because the
 		// value is build dependent, and a wrong constant is an unmapped address.
 		// Symbols\Handler\SymbolsHandler.cpp reads it, Driver.cpp uses it.
+
 		L"ntoskrnl.exe", L"MmPteBase" },
 		{ L"ci.dll", L"g_KernelHashBucketList" },
 		{ L"ci.dll", L"g_HashCacheLock" },
@@ -104,6 +116,7 @@ int wmain()
 	//in the PDB type stream. They cannot be resolved here by design, so they are
 	//omitted from the report; the mapper derives their offsets at runtime by
 	//content matching.
+
 	std::vector<FieldRequest> fieldsToRetrieve{
 		{ L"ntoskrnl.exe", L"_FILE_OBJECT",               L"DeviceObject" },
 		{ L"ntoskrnl.exe", L"_DEVICE_OBJECT",             L"DriverObject" },
@@ -126,6 +139,7 @@ int wmain()
 		 * first member is DriverObject, the back-pointer - so nothing is
 		 * requested for Size and nothing is written there.
 		 */
+
 		{ L"ntoskrnl.exe", L"_DRIVER_OBJECT",             L"Size",           true },
 		{ L"ntoskrnl.exe", L"_DRIVER_OBJECT",             L"DriverStart",    true },
 		{ L"ntoskrnl.exe", L"_DRIVER_OBJECT",             L"DriverSize",     true },
@@ -142,8 +156,10 @@ int wmain()
 	};
 
 	const std::wstring wdFilterPath = L"C:\\Windows\\System32\\drivers\\wd\\WdFilter.sys";
+
 	//WdFilter only exists when Defender is installed, and the mapper treats
 	//its absence as "nothing to clean up" rather than as an error.
+
 	if (std::filesystem::exists(wdFilterPath)) {
 		targetBinaries.push_back(wdFilterPath);
 		symbolsToRetrieve.push_back({ L"WdFilter.sys", L"MpBmDocOpenRules" });
@@ -156,14 +172,17 @@ int wmain()
 	 * what lets Build\Executors\Create.bat wipe the release on every rebuild
 	 * without discarding the cache - see the stage notes there.
 	 */
+
 	SymbolEngine engine(std::filesystem::path(GetCurrentAppFolder()).parent_path().wstring() + L"\\Symbols");
 
 	std::wostringstream content;
+
 	//Optional fields are allowed to fail: the mapper validates those objects
 	//at runtime instead of trusting a compiled-in offset.
 
 	//Results are collected while resolving and printed afterwards in a fixed
 	//order, so the report is not grouped by the PDB each value came from.
+
 	std::vector<ResolvedSymbol> resolvedSymbols;
 	std::vector<ResolvedField> resolvedFields;
 	std::vector<std::wstring> loadingPaths;
@@ -174,9 +193,11 @@ int wmain()
 		const auto pdbPath = engine.GetPDB(binary);
 		if (pdbPath.empty()) {
 			if (isWdFilter) {
+
 				//WdFilter's PDB is not always published, and the mapper treats a
 				//missing WdFilter cleanup as "nothing to remove", so skip it
 				//rather than failing the whole run over an optional module.
+
 				Log(L"[INFO] No symbols available for " << Val(binary) << L", skipping" << std::endl);
 				continue;
 			}
@@ -203,10 +224,12 @@ int wmain()
 		}
 
 		const auto fieldResults = engine.GetStructFieldOffsets(pdbPath, fields);
+
 		//GetStructFieldOffsets returns one result per requested field, or an
 		//empty vector when the PDB could not be loaded. The loop below indexes
 		//it by fields.size(), so the two have to agree or the read runs off the
 		//end of the vector.
+
 		if (fieldResults.size() != fields.size()) {
 			Log(L"[-] Could not resolve the structure fields of " << Val(binary) << std::endl);
 			return -1;
@@ -220,6 +243,7 @@ int wmain()
 
 		content << L"[" << name << L".fields]\r\n";
 		for (size_t i = 0; i < fields.size(); i++) {
+
 			/*
 			 * Publish anything that resolved, including one at offset 0.
 			 *
@@ -233,6 +257,7 @@ int wmain()
 			 * A genuine miss has an empty matchedName and is still skipped, so
 			 * the file never carries an entry that means nothing.
 			 */
+
 			if (!fieldResults[i].Resolved()) {
 				continue;
 			}
@@ -243,6 +268,7 @@ int wmain()
 
 		//Held for the report pass below rather than printed here, so the
 		//console output follows the fixed order and not this loop's.
+
 		loadingPaths.push_back(pdbPath);
 		for (size_t i = 0; i < symbols.size(); i++)
 			resolvedSymbols.push_back({ symbols[i], offsets[i] });
@@ -272,6 +298,7 @@ int wmain()
 	 * reported, so a newly requested field can never silently disappear from
 	 * the report by being absent here.
 	 */
+
 	const std::vector<std::wstring> symbolReportOrder{
 		L"MmAllocateIndependentPagesEx",
 		L"MmFreeIndependentPages",
@@ -300,6 +327,7 @@ int wmain()
 	//Rank by position in the fixed order. An entry the list does not name - a
 	//conditional WdFilter symbol - ranks last and keeps its resolution order,
 	//so nothing is silently dropped from the report.
+
 	auto symbolRank = [&symbolReportOrder](const std::wstring& name) {
 		for (size_t i = 0; i < symbolReportOrder.size(); i++)
 			if (symbolReportOrder[i] == name)
@@ -323,18 +351,22 @@ int wmain()
 		});
 
 	//Group A: symbols.
+
 	for (const auto& symbol : resolvedSymbols) {
 		Log(L"[+] Symbol " << Val(symbol.name) << L" Offset: " << Val(Hex(symbol.offset)) << std::endl);
 	}
 	LogBlank();
 
 	//Group B: structure fields.
+
 	for (const auto& field : resolvedFields) {
 		if (field.Resolved()) {
+
 			//Field | Offset = 0x.., so the name and the value are separated by a
 			//delimiter that is not part of either and that stays readable when the
 			//name is long. The alternate-spelling note goes before the delimiter,
 			//because it qualifies the name rather than the value.
+
 			if (!field.matchedName.empty() && field.matchedName != field.structName)
 				Log(L"[+] Field " << Val(field.structName) << L"." << Val(field.fieldName)
 					<< L" (as " << Val(field.matchedName) << L") | Offset = " << Val(Hex(field.offset)) << std::endl);
@@ -343,20 +375,24 @@ int wmain()
 					<< L" | Offset = " << Val(Hex(field.offset)) << std::endl);
 		}
 		else if (!field.optional) {
+
 			//An optional field is expected to miss: it is not in the public PDB
 			//type stream, so the mapper derives its offset at runtime instead.
+
 			Log(L"[-] Field " << Val(field.structName) << L"." << Val(field.fieldName) << L" unresolved" << std::endl);
 		}
 	}
 	LogBlank();
 
 	//Group C: the PDBs the offsets were resolved from.
+
 	for (const auto& pdbPath : loadingPaths) {
 		Log(L"[+] Loading Symbols From " << Val(pdbPath) << std::endl);
 	}
 	LogBlank();
 
 	//Written next to Mapper.exe, which is also where the mapper looks for it.
+
 	const auto outputPath = GetCurrentAppFolder() + L"\\Offsets.ini";
 
 	//Empirically, std::wofstream on this toolchain writes ASCII (1 byte/char),
@@ -364,9 +400,12 @@ int wmain()
 	//and an explicit BOM write via write() fails. So build the UTF-16LE bytes
 	//manually and write them with CreateFileW/WriteFile. The values are already
 	//0x-prefixed hex, so nothing is truncated.
+
 	std::vector<BYTE> fileBytes;
+
 	//UTF-16LE BOM so the wide reader detects the encoding and parses the
 	//section headers and "name=value" lines correctly.
+
 	fileBytes.push_back(0xFF);
 	fileBytes.push_back(0xFE);
 	for (wchar_t c : content.str()) {
@@ -395,6 +434,7 @@ int wmain()
 	//How many "name=value" lines the file will carry: every resolved symbol plus
 	//every resolved structure field (a missed optional field is skipped, matching
 	//what is actually written).
+
 	DWORD entryCount = 0;
 	for (size_t i = 0; i < resolvedSymbols.size(); i++)
 		++entryCount;
@@ -403,6 +443,7 @@ int wmain()
 			++entryCount;
 
 	//Prove the file landed with the right number of entries.
+
 	Log(L"[+] Offsets.ini carries " << Val(entryCount) << L" entries." << std::endl);
 
 	return 0;

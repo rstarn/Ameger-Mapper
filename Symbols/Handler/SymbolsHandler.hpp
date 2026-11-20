@@ -30,6 +30,7 @@
  *
  * Singleton because it is read from all over the mapper during Load().
  */
+
 class SymbolsHandler
 {
 
@@ -64,10 +65,12 @@ public:
 	 * load is supposed to mean for a file whose whole purpose is to describe this
 	 * build.
 	 */
+
 	bool ReloadFile(const std::wstring& path, const std::wstring& updater);
 
 	//Offset of a symbol, 0 when it is not present. A real offset is never 0,
 	//so 0 doubles as "not found" here.
+
 	unsigned long long GetOffset(const std::wstring& name);
 
 	//Offset of a structure field, stored as "<Struct>.<Field>".
@@ -79,13 +82,16 @@ public:
 	//caller could not tell "this field is at the start of the struct" from
 	//"this field is not in the PDB". Callers compare against the sentinel
 	//itself, so the two are now distinguishable.
+
 	unsigned long long GetFieldOffset(const std::wstring& structAndField);
 
 	//Returned by GetFieldOffset when no offset could be resolved. Deliberately
 	//outside the range of any real member offset.
+
 	static constexpr unsigned long long kFieldUnresolved = ~0ULL;
 
 private:
+
 	/*
 	 * Every entry, keyed by name.
 	 *
@@ -94,5 +100,6 @@ private:
 	 * WdFilter discovery in particular looks a field up once per candidate
 	 * offset, so a linear scan turned a bounded search into a quadratic one.
 	 */
+
 	std::unordered_map<std::wstring, unsigned long long> symbols{};
 };

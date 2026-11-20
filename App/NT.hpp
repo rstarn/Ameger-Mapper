@@ -22,17 +22,22 @@
 
 namespace Nt
 {
+
 	//SYSTEM_INFORMATION_CLASS values used here, spelled out because the enum is
 	//not part of the documented SDK surface.
+
 	constexpr auto SystemModuleInformation = 11;
 	constexpr auto SystemExtendedHandleInformation = 64;
 
 	//Resolved through the export table rather than declared and linked, but
 	//ntdll exports them, so a direct declaration is enough.
+
 	extern "C" NTSTATUS NtLoadDriver(PUNICODE_STRING DriverServiceName);
 	extern "C" NTSTATUS NtUnloadDriver(PUNICODE_STRING DriverServiceName);
 	extern "C" NTSTATUS RtlAdjustPrivilege(ULONG Privilege, BOOLEAN Enable, BOOLEAN Client, BOOLEAN* WasEnabled);
+
 	//ntdll export; fills the same RTL_OSVERSIONINFOW that GetVersionExW uses.
+
 	extern "C" NTSTATUS RtlGetVersion(PRTL_OSVERSIONINFOW version_information);
 
 	/*
@@ -41,6 +46,7 @@ namespace Nt
 	 * of the base name inside it, so the file name is
 	 * FullPathName + OffsetToFileName.
 	 */
+
 	typedef struct _RTL_PROCESS_MODULE_INFORMATION
 	{
 		HANDLE Section;
@@ -52,16 +58,19 @@ namespace Nt
 		USHORT InitOrderIndex;
 		USHORT LoadCount;
 		USHORT OffsetToFileName;
+
 		//Must be 256: this is the size the kernel uses, and it fixes the array
 		//stride at sizeof(_RTL_PROCESS_MODULE_INFORMATION) = 296 on x64. A
 		//different value (e.g. 260) pads the struct to 304 and every entry after
 		//the first is read misaligned, so module lookups beyond the first module
 		//walk into garbage pointers.
+
 		UCHAR FullPathName[256];
 	} RTL_PROCESS_MODULE_INFORMATION, *PRTL_PROCESS_MODULE_INFORMATION;
 
 	//Header of the module list returned by SystemModuleInformation, followed by
 	//NumberOfModules entries. Declared as a flexible array member.
+
 	typedef struct _RTL_PROCESS_MODULES
 	{
 		ULONG NumberOfModules;
@@ -76,6 +85,7 @@ namespace Nt
 	 * an object whose location is guaranteed to be the one we opened, so it
 	 * removes the need to guess any kernel address to find the device object.
 	 */
+
 	typedef struct _SYSTEM_HANDLE
 	{
 		PVOID Object;
@@ -98,6 +108,7 @@ namespace Nt
 	//POOL_TYPE as the kernel defines it. Only NonPagedPool is used: the mapped
 	//image must be executable and must not be paged out.
 	//The _Nx values are separate pool types on modern Windows, not aliases.
+
 	typedef enum class _POOL_TYPE {
 		NonPagedPool,
 		NonPagedPoolExecute = NonPagedPool,
@@ -122,6 +133,7 @@ namespace Nt
 	 * confirmed by matching the expected string content first; see
 	 * FindUnicodeStringFieldByContent in Driver.cpp.
 	 */
+
 	typedef struct _HashBucketEntry
 	{
 		struct _HashBucketEntry* Next;
@@ -130,6 +142,7 @@ namespace Nt
 	} HashBucketEntry, * PHashBucketEntry;
 
 	//Self balancing tree node, the root element of an RTL_AVL_TABLE.
+
 	typedef struct _RTL_BALANCED_LINKS {
 		struct _RTL_BALANCED_LINKS* Parent;
 		struct _RTL_BALANCED_LINKS* LeftChild;
@@ -146,6 +159,7 @@ namespace Nt
 	 * RtlDeleteElementGenericTableAvl only updates the count when it can, and
 	 * the kernel uses it as a signal that the table was tampered with.
 	 */
+
 	typedef struct _RTL_AVL_TABLE {
 		RTL_BALANCED_LINKS BalancedRoot;
 		PVOID OrderedPointer;
@@ -181,15 +195,18 @@ namespace Nt
 	 * offsets are therefore re-derived at run time by content before anything is
 	 * written - see Driver::LookupEntry and FindUnicodeStringFieldByContent.
 	 */
+
 	typedef struct _PiDDBCacheEntry
 	{
 		LIST_ENTRY		List;
 		UNICODE_STRING	DriverName;
 		ULONG			TimeDateStamp;
 		NTSTATUS		LoadStatus;
+
 		//Not referenced by name anywhere. Present only so the structure keeps the
 		//size the kernel gives this entry, which is what a pointer step over the
 		//array depends on. Renaming it would be wrong; reading it would be noise.
+
 		char			_0x0028[16]; // shim engine data, or uninitialized memory for custom drivers
 	} PiDDBCacheEntry;
 }

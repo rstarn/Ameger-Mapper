@@ -8,15 +8,18 @@
 //Kept in step with SYMBOL_DLL_FOLDER in Symbols\Handler\SymbolsHandler.hpp, which
 //is the mapper side of the same layout; the two programs do not share a header,
 //so both spell it out here.
+
 inline constexpr const wchar_t* kSymbolDllFolder = L"DLLs";
 
 //One symbol to look up in a module's PDB.
+
 struct SymbolRequest {
 	std::wstring binaryName;
 	std::wstring symbolName;
 };
 
 //A structure field: module, structure name, field name.
+
 struct FieldRequest {
 	std::wstring binaryName;
 	std::wstring structName;
@@ -26,6 +29,7 @@ struct FieldRequest {
 	//is therefore derived at runtime by content matching. An unresolved
 	//optional field is an expected outcome, so the caller does not report it as
 	//a failure.
+
 	bool optional = false;
 };
 
@@ -41,11 +45,13 @@ struct FieldRequest {
  * throwing, so a partially downloaded or missing PDB degrades to "that offset
  * could not be resolved" rather than taking the tool down.
  */
+
 class SymbolEngine {
 public:
 
 	//cachePath is the flat folder the PDBs are stored in: one <name>.pdb per
 	//binary, directly in that folder.
+
 	explicit SymbolEngine(const std::wstring& cachePath);
 
 	~SymbolEngine();
@@ -53,11 +59,13 @@ public:
 	//Reuse the flat <cachePath>\<name>.pdb for a binary, or download it there
 	//when it is missing or belongs to a different build, and return its path.
 	//Empty when no PDB is available for it.
+
 	std::wstring GetPDB(const std::wstring& binaryPath);
 
 	//Resolve symbol addresses, returned as offsets from the module base.
 	//Returns an empty vector if any symbol fails, so a partial result is never
 	//mistaken for a complete one.
+
 	std::vector<uint64_t> GetOffset(const std::wstring& pdbPath, const std::vector<std::wstring>& symbolName);
 
 //One resolved structure field. offset is 0 when the field could not be
@@ -70,11 +78,13 @@ public:
 	//0, so a caller that skipped zero-valued fields would drop it and the mapper
 	//would silently fall back to a compiled default while the file claimed the
 	//field was simply absent.
+
 	struct FieldResult {
 		uint64_t offset = 0;
 		std::wstring matchedName{};
 
 		//True when the type was located, whether or not the field sits at 0.
+
 		bool Resolved() const { return !matchedName.empty(); }
 	};
 
@@ -82,6 +92,7 @@ public:
 	//Returns one result per entry, offset 0 when the field could not be
 	//resolved. Reporting is left to the caller, which knows the request's
 	//optional flag.
+
 	std::vector<FieldResult> GetStructFieldOffsets(const std::wstring& pdbPath, const std::vector<FieldRequest>& fields);
 
 private:

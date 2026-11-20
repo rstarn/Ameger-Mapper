@@ -26,6 +26,7 @@
 * The guards that used to suggest otherwise have been removed rather than left
 * to mislead the next reader.
 */
+
 struct DriverOffsets {
 	uint32_t FileObject_DeviceObject = 0x8;
 	uint32_t DeviceObject_DriverObject = 0x8;
@@ -36,6 +37,7 @@ struct DriverOffsets {
 	//_PiDDBCacheEntry and HashBucketEntry are not UDTs in the public PDBs, so
 	//these stay at their compiled defaults and are additionally derived at
 	//runtime by content matching in the callers.
+
 	uint32_t PiDDBCacheEntry_ListBlink = 0x8;
 	uint32_t PiDDBCacheEntry_ListFlink = 0x0;
 	uint32_t HashBucketEntry_DriverName = 0x8;
@@ -49,6 +51,7 @@ struct DriverOffsets {
 	 * field that was asked for. Used to reject a bad resolution loudly rather
 	 * than quietly keep the compiled default.
 	 */
+
 	static constexpr uint64_t kMaxFieldOffset = 0x1000;
 
 	bool ResolvedFromSymbols = false;
@@ -56,10 +59,12 @@ struct DriverOffsets {
 	//Count of the public UDT fields above that were replaced with this build's
 	//own offset. Reported alongside ResolvedFromSymbols so a partial resolution
 	//is visible rather than hidden behind a single boolean.
+
 	uint32_t ResolvedFieldCount = 0;
 
 	//Total number of fields that have a public UDT to resolve against. The
 	//internal types further down deliberately have none, so they are not counted.
+
 	static constexpr uint32_t kResolvableFieldCount = 5;
 
 	/*
@@ -75,6 +80,7 @@ struct DriverOffsets {
 	 * the only field the constructor touches, because it is the one
 	 * IoCreateDevice dereferences.
 	 */
+
 	uint32_t DriverObject_Size = 0x02;
 	uint32_t DriverObject_DriverStart = 0x18;
 	uint32_t DriverObject_DriverSize = 0x20;
@@ -84,18 +90,21 @@ struct DriverOffsets {
 	uint32_t DriverExtension_DriverObject = 0x00;
 
 	//How many of the seven fields above were replaced with this build's own.
+
 	uint32_t DriverObjectResolvedCount = 0;
 	static constexpr uint32_t kDriverObjectResolvableFieldCount = 7;
 
 	void LoadFromSymbols() {
 		const auto lookup = [](const wchar_t* name, uint32_t& target) {
 			const auto value = SymbolsHandler::GetInstance()->GetFieldOffset(name);
+
 			//A field that resolves to something past this bound cannot be a
 			//member offset of any of the types involved, so it is treated as a
 			//resolution failure rather than silently written over the compiled
 			//default. Previously such a value was dropped without a line of log
 			//and the run continued on the default, which is the one failure mode
 			//this file exists to prevent.
+
 			if (value == SymbolsHandler::kFieldUnresolved || value >= kMaxFieldOffset) {
 				if (value != SymbolsHandler::kFieldUnresolved)
 					Log(L"[!] Field " << Val(name) << L" resolved to " << Val(Hex(value))
@@ -114,10 +123,12 @@ struct DriverOffsets {
 		resolved += lookup(L"_RTL_AVL_TABLE.DeleteCount", AvlTable_DeleteCount) ? 1u : 0u;
 
 		ResolvedFieldCount = resolved;
+
 		//All or nothing, matching how every other resolver in this project
 		//treats a partial answer. A single resolved field used to set this flag
 		//and the caller then reported "offsets resolved from symbols for this
 		//build" while four fields were still compiled-in guesses.
+
 		ResolvedFromSymbols = (resolved == kResolvableFieldCount);
 
 		/*
@@ -126,6 +137,7 @@ struct DriverOffsets {
 		 * degrades the DRIVER_OBJECT the mapper builds; it does not invalidate
 		 * the offsets the kernel structure walks use.
 		 */
+
 		uint32_t object_fields = 0;
 		object_fields += lookup(L"_DRIVER_OBJECT.Size", DriverObject_Size) ? 1u : 0u;
 		object_fields += lookup(L"_DRIVER_OBJECT.DriverStart", DriverObject_DriverStart) ? 1u : 0u;
@@ -147,6 +159,7 @@ namespace Driver
 
 	//Load the provider, resolve offsets, verify the PTE self-map and run the
 	//cleanup walks. Tears everything down again on any failure.
+
 	NTSTATUS Load();
 	NTSTATUS Unload();
 	NTSTATUS AcquireDebugPrivilege();
@@ -160,9 +173,11 @@ namespace Driver
 
 	//Write to a page that is currently read-only, by temporarily making it
 	//writable through the PTE self-map. See the implementation in Driver.cpp.
+
 	bool WriteToReadOnlyMemory(uint64_t address, void* buffer, uint32_t size);
 
 	//The provider's memcpy. ReadMemory and WriteMemory are both this.
+
 	bool MemCopy(uint64_t destination, uint64_t source, uint64_t size);
 
 	uint64_t AllocatePool(Nt::POOL_TYPE pool_type, uint64_t size);
@@ -170,6 +185,7 @@ namespace Driver
 
 	//Page aligned, physically contiguous allocation for the image. Needed
 	//because a pool block's first and last page are shared with pool metadata.
+
 	uint64_t AllocateContiguous(uint64_t size);
 	bool MmFreeContiguousMemory(uint64_t address);
 
@@ -197,10 +213,12 @@ namespace Driver
 	 * and must outlive DriverEntry, because a driver keeps a reference to it
 	 * for as long as it is loaded.
 	 */
+
 	uint64_t CreateDriverObjectForEntry(uint64_t driver_start, uint64_t driver_size, uint64_t driver_section);
 
 	//Releases both blocks CreateDriverObjectForEntry took. Only valid before
 	//DriverEntry has been entered - see MapDriver for the lifetime rule.
+
 	bool DestroyDriverObjectForEntry(uint64_t driver_object);
 
 	uint64_t MmAllocateIndependentPagesEx(uint32_t size);
@@ -209,6 +227,7 @@ namespace Driver
 
 	//Resolve an export by name in a loaded kernel module, 0 when not found or
 	//when any validation of the export directory fails.
+
 	uint64_t GetKernelModuleExport(uint64_t kernel_module_base, const std::string& function_name);
 
 	/*
@@ -218,17 +237,21 @@ namespace Driver
 	 * Uses the function-address table directly and does not need the name or
 	 * ordinal tables, so it works for modules that export nothing by name.
 	 */
+
 	uint64_t GetKernelModuleExportOrdinal(uint64_t kernel_module_base, uint16_t ordinal);
 
 	//Kernel helpers reached through the call hook below.
+
 	bool ExAcquireResourceExclusiveLite(PVOID Resource, BOOLEAN wait);
 	bool ExReleaseResourceLite(PVOID Resource);
+
 	/* Acquire an ERESOURCE exclusively via bounded, non-blocking hook calls.
 	 * Each try returns immediately so the NtAddAtom stub is live only for a few
 	 * instructions; the sleeps happen with the hook fully restored. This keeps
 	 * a contended kernel lock from holding the code patch open for an unbounded
 	 * wait. Returns false if the lock was not taken within the retry budget;
 	 * callers must only release when this returns true. */
+
 	bool AcquireResourceExclusiveBounded(PVOID Resource, uint32_t maxAttempts = 250u, uint32_t sleepMs = 2u);
 	BOOLEAN RtlDeleteElementGenericTableAvl(PVOID Table, PVOID Buffer);
 	PVOID RtlLookupElementGenericTableAvl(Nt::PRTL_AVL_TABLE Table, PVOID Buffer);
@@ -237,6 +260,7 @@ namespace Driver
 	//Trace removal. Each one is a no-op when its structure cannot be found and
 	//returns false without writing when anything fails validation.
 	//Skipped entirely when g_skipForensicCleanup is set.
+
 	bool ClearPiDDBCacheTable();
 	bool ClearKernelHashBucketList();
 	bool ClearMmUnloadedDrivers();
@@ -257,6 +281,7 @@ namespace Driver
 	 * CallKernelFunction at once - see CallKernelFunction's own note for why that
 	 * is not something a flag could fix anyway.
 	 */
+
 	inline bool g_restore_succeeded = false;
 
 	inline bool& RestoreSucceeded() {
@@ -270,6 +295,7 @@ namespace Driver
 	 * top of it. Namespace-scope inline gives one flag across all template
 	 * instantiations (each signature otherwise has its own static cache).
 	 */
+
 	inline bool g_kernelCallPoisoned = false;
 
 	/*
@@ -280,6 +306,7 @@ namespace Driver
 	 * jump on top of ours, neither of which is recoverable. Call once from
 	 * Load(), before any kernel write; abort the whole run on failure.
 	 */
+
 	inline bool VerifyNtAddAtomNotHooked() {
 		const uint64_t address = GetKernelModuleExport(ntoskrnlAddr, "NtAddAtom");
 		if (!address) {
@@ -298,6 +325,7 @@ namespace Driver
 		 * legitimate NtAddAtom prologue begins with a raw REX.W+B8 immediate
 		 * load, so checking it plus either the jmp tail or a kernel-range
 		 * immediate catches full and partially written stubs alike. */
+
 		uint64_t embedded = 0;
 		memcpy(&embedded, bytes + 2, sizeof(embedded));
 		const bool movRaxImm = bytes[0] == 0x48 && bytes[1] == 0xb8;
@@ -359,20 +387,24 @@ namespace Driver
 	 * LastCallHookRestored() reports the restore separately; a caller that owns
 	 * state the target may have adopted has to check it.
 	 */
+
 	template<typename T, typename ...A>
 	bool CallKernelFunction(T* out_result, uint64_t kernel_function_address, const A ...arguments) {
 		constexpr auto call_void = std::is_same_v<T, void>;
 
 		//Only up to 4 arguments can be forwarded through the syscall jump.
+
 		static_assert(sizeof...(A) <= 4, "CallKernelFunction: too many arguments");
 
 		//Every return below leaves this false, so the caller's flag is only ever
 		//set once the restore has actually been confirmed.
+
 		RestoreSucceeded() = false;
 
 		//A previously failed restore may have left ntoskrnl patched. Refuse to
 		//install a second stub over unknown bytes - that is the path to a
 		//permanent hook and a bugcheck. Fail closed for the rest of the run.
+
 		if (g_kernelCallPoisoned) {
 			return false;
 		}
@@ -402,8 +434,10 @@ namespace Driver
 
 		uint8_t kernel_injected_jmp[] = { 0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xe0 };
 		uint8_t original_kernel_function[sizeof(kernel_injected_jmp)];
+
 		//memcpy instead of a cast: writing through *(uint64_t*)&array[2] is an
 		//unaligned access and undefined behaviour.
+
 		memcpy(&kernel_injected_jmp[2], &kernel_function_address, sizeof(kernel_function_address));
 
 		//Cached once resolved: the export is the same for the whole run, and
@@ -420,6 +454,7 @@ namespace Driver
 		//once rather than sharing a single lookup. That is a redundant export
 		//walk per signature on first use, which is not worth a template-level
 		//cache with its own lifetime rules in exchange for.
+
 		static uint64_t kernel_NtAddAtom = 0;
 		if (!kernel_NtAddAtom) {
 			kernel_NtAddAtom = GetKernelModuleExport(Driver::ntoskrnlAddr, "NtAddAtom");
@@ -447,6 +482,7 @@ namespace Driver
 		//the endbr64 that CET enabled builds start functions with. Rejects
 		//int3 padding and anything all zeroes, which is what free memory looks
 		//like when the address is wrong.
+
 		auto looks_like_function_prologue = [](const uint8_t* bytes) -> bool {
 			uint8_t nonzero = 0;
 			for (int i = 0; i < 12; ++i) {
@@ -484,11 +520,13 @@ namespace Driver
 		 * kernel having executed anything; everything below must be treated as
 		 * cleanup of state that may already have been modified.
 		 */
+
 		if constexpr (!call_void) {
 			using FunctionFn = T(__stdcall*)(A...);
 			const auto Function = reinterpret_cast<FunctionFn>(NtAddAtom);
 
 			*out_result = Function(arguments...);
+
 		}
 		else {
 			using FunctionFn = void(__stdcall*)(A...);
@@ -520,6 +558,7 @@ namespace Driver
 		 * ntoskrnl is clean. Up to three attempts, matching the prior retry
 		 * count, now with verification on every attempt.
 		 */
+
 		bool restored = false;
 		uint8_t verify[sizeof(kernel_injected_jmp)] = {};
 		for (unsigned attempt = 0u; attempt < 3u && !restored; ++attempt) {
@@ -534,9 +573,11 @@ namespace Driver
 		}
 
 		if (!restored) {
+
 			//ntoskrnl may still be patched. Poison all further calls, say so
 			//plainly, and keep the process from exiting believing the hook is
 			//gone: NtAddAtom would jump into the last target until a reboot.
+
 			g_kernelCallPoisoned = true;
 			Log(L"[!!] CRITICAL: ntoskrnl.NtAddAtom could not be verified restored "
 				"after three attempts. No further kernel calls will be made. Do not "

@@ -3,6 +3,7 @@
 
 // PdFwKrnl.sys - AMD USB-C Power Delivery Firmware Update Utility driver (CVE-2023-20598)
 // KDU provider 44, SHA1 A24840E32071E0F64E1DFF8CA540604896811587, 30144 bytes
+
 namespace Resource
 {
 	static const uint8_t driver[] = {

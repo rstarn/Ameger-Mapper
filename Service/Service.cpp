@@ -17,6 +17,7 @@
 #include "../App/NT.hpp"
 
 //The kernel expects \??\<full path> as an NT object path.
+
 NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::wstring& serviceName) {
 	const static DWORD ServiceTypeKernel = SERVICE_KERNEL_DRIVER;
 	const std::wstring servicesPath = L"SYSTEM\\CurrentControlSet\\Services\\" + serviceName;
@@ -39,6 +40,7 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 	 * ever loaded anything. The cleanup deletes only what was created here, and
 	 * otherwise leaves the pre-existing key alone.
 	 */
+
 	const bool key_existed = RegQueryValueExW(dservice, L"ImagePath", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS ||
 		RegQueryValueExW(dservice, L"Type", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS ||
 		RegQueryValueExW(dservice, L"Start", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
@@ -112,6 +114,7 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 	};
 
 	//REG_EXPAND_SZ includes the terminating null in the stored length.
+
 	status = RegSetKeyValueW(dservice, NULL, L"ImagePath", REG_EXPAND_SZ, nPath.c_str(), (DWORD)(nPath.size() + 1) * sizeof(wchar_t));
 	if (status != ERROR_SUCCESS) {
 		RegCloseKey(dservice);
@@ -132,8 +135,10 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 
 	ULONG SE_LOAD_DRIVER_PRIVILEGE = 10UL;
 	BOOLEAN SeLoadDriverWasEnabled = FALSE;
+
 	//NtLoadDriver needs this privilege, which a normal administrator token has
 	//but does not have enabled by default.
+
 	NTSTATUS ntStatus = Nt::RtlAdjustPrivilege(SE_LOAD_DRIVER_PRIVILEGE, TRUE, FALSE, &SeLoadDriverWasEnabled);
 	if (!NT_SUCCESS(ntStatus)) {
 		restore_or_delete_service_key();
@@ -159,13 +164,16 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 	}
 
 	if (!NT_SUCCESS(ntStatus)) {
+
 		//A pre-existing key is restored to its original values; a key this run
 		//created is deleted. The helper reopens its own key handle because
 		//RegCloseKey(dservice) already ran, so the original handle is closed
 		//by the time NtLoadDriver has returned.
+
 		restore_or_delete_service_key();
 	}
 	else {
+
 		/*
 		 * Put the privilege back the way it was found.
 		 *
@@ -179,6 +187,7 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 		 * it raised is not a thing to leave in place by accident, so the earlier
 		 * state is still restored here.
 		 */
+
 		if (!SeLoadDriverWasEnabled) {
 			BOOLEAN restored = FALSE;
 			Nt::RtlAdjustPrivilege(SE_LOAD_DRIVER_PRIVILEGE, FALSE, FALSE, &restored);
@@ -218,6 +227,7 @@ NTSTATUS Service::StopAndRemove(const std::wstring& serviceName) {
 	 * restore the prior state so the teardown does not leave it raised for the
 	 * rest of the process, matching RegisterAndStart's least-privilege handling.
 	 */
+
 	const ULONG kSeLoadDriverPrivilege = 10UL;
 	BOOLEAN SeLoadDriverWasEnabled = FALSE;
 	const NTSTATUS priv_status = Nt::RtlAdjustPrivilege(kSeLoadDriverPrivilege, TRUE, FALSE, &SeLoadDriverWasEnabled);
@@ -233,6 +243,7 @@ NTSTATUS Service::StopAndRemove(const std::wstring& serviceName) {
 	 * runs: the registry key is still deleted whether or not the unload
 	 * succeeded, and nothing should be left raised either way.
 	 */
+
 	if (NT_SUCCESS(priv_status) && !SeLoadDriverWasEnabled) {
 		BOOLEAN restored = FALSE;
 		Nt::RtlAdjustPrivilege(kSeLoadDriverPrivilege, FALSE, FALSE, &restored);

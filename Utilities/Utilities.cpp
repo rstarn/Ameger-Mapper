@@ -16,6 +16,7 @@
 
 namespace
 {
+
 	/*
 	 * Upper bound on a file this project will read into memory.
 	 *
@@ -25,12 +26,14 @@ namespace
 	 * memory, so the check exists to turn "this is not a driver" into a refused
 	 * read rather than into an allocation failure.
 	 */
+
 	constexpr uint64_t kMaxReadFileSize = 256ull * 1024ull * 1024ull;
 }
 
 //Widens an ASCII identifier. A per byte copy is correct for the narrow ASCII
 //module and export names used here and is cheaper than a codepage conversion,
 //which would need a locale.
+
 std::wstring Utilities::ToWide(const std::string& text) {
 	return std::wstring(text.begin(), text.end());
 }
@@ -65,6 +68,7 @@ bool Utilities::ReadFileToMemory(const std::wstring& file_path, std::vector<BYTE
 	 * unhandled bad_alloc that takes the process down with it, at a point where
 	 * the only sensible response would have been "that is not a driver".
 	 */
+
 	file_ifstream.seekg(0, std::ios::end);
 	const std::streamoff length = file_ifstream.tellg();
 	if (length < 0 || static_cast<uint64_t>(length) > kMaxReadFileSize) {
@@ -104,6 +108,7 @@ uint64_t Utilities::GetKernelModuleAddress(const std::string& module_name) {
 	//null buffer to have the kernel report how much it needs, then again with
 	//a buffer of that size. The loop handles the race where the module list
 	//grows between the two calls.
+
 	NTSTATUS status = NtQuerySystemInformation(static_cast<SYSTEM_INFORMATION_CLASS>(Nt::SystemModuleInformation), buffer, buffer_size, &buffer_size);
 
 	while (status == STATUS_INFO_LENGTH_MISMATCH) {
@@ -143,6 +148,7 @@ uint64_t Utilities::GetKernelModuleAddress(const std::string& module_name) {
 	 * at entirely the wrong thing. Scanned once rather than per lookup, because
 	 * the answer is the same for every entry.
 	 */
+
 	bool any_address = false;
 	for (auto i = 0u; i < modules->NumberOfModules; ++i) {
 		if (modules->Modules[i].ImageBase != 0) {
@@ -173,11 +179,13 @@ uint64_t Utilities::GetKernelModuleAddress(const std::string& module_name) {
 		 * last, and past the end of the buffer for the last. The comparison below
 		 * only needs the tail, so the tail is copied and that is all.
 		 */
+
 		const size_t path_length = strnlen_s(
 			reinterpret_cast<const char*>(current.FullPathName), sizeof(current.FullPathName));
 
 		//OffsetToFileName is an offset into that field; a value past the end
 		//means the layout is not the one assumed, so nothing is matched.
+
 		if (current.OffsetToFileName >= path_length)
 			continue;
 

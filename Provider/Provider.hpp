@@ -26,14 +26,18 @@
 
 namespace Provider
 {
+
 	//Device path opened with CreateFileW. "\\.\PdFwKrnl" resolves to the
 	//kernel device \Device\PdFwKrnl.
+
 	constexpr const wchar_t* kDeviceName = L"\\\\.\\PdFwKrnl";
 
 	//Human readable name, used only in log output.
+
 	constexpr const wchar_t* kShortName = L"AMD PdFwKrnl";
 
 	//The IOCTL that performs the unchecked copy.
+
 	constexpr ULONG32 kCopyIoctl = 0x80002014;
 
 	// Upper bound on a single provider copy, enforced in user mode.
@@ -42,6 +46,7 @@ namespace Provider
 	// bound the caller can enforce. Sized so that the largest single
 	// legitimately-needed copy (one page-table install for the PTE
 	// self-map) fits comfortably inside.
+
 	constexpr ULONG32 kMaxCopySize = 0x10000000; // 256 MB
 
 	/*
@@ -70,6 +75,7 @@ namespace Provider
 	//and issues the IOCTL, and every other memory helper in the project is
 	//built on top of it.
 	//Returns false when length is zero or would not fit the DWORD Size field.
+
 	inline bool FillCopyRequest(CopyRequest& request, uint64_t destination, uint64_t source, uint64_t length)
 	{
 		if (length == 0 || length > 0xFFFFFFFFULL)

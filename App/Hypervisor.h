@@ -17,8 +17,10 @@
 
 namespace Hypervisor
 {
+
     // Compile-time flag: whether the hypervisor's NPT hide routine supports discontiguous physical pages.
     // Set to false for conservative contiguous allocation.
+
     inline constexpr bool kHypervisorSupportsDiscontiguousNpt = false;
 
     namespace Shared
@@ -85,6 +87,7 @@ namespace Hypervisor
      * order to say which of the two happened instead of assuming the trap.
      * Optional so every existing four argument caller is unchanged.
      */
+
     inline ULONG64 CallVM(ULONG64 arg1 = 0, ULONG64 arg2 = 0, ULONG64 arg3 = 0, ULONG64 arg4 = 0, bool* trapped = nullptr)
     {
         if (trapped)
@@ -92,8 +95,10 @@ namespace Hypervisor
 
         if (!Data::Shellcode)
         {
+
             // vmmcall
             // ret
+
             const BYTE code[] = { 0x0F, 0x01, 0xD9, 0xC3 };
 
             Data::Shellcode = VirtualAlloc(nullptr, sizeof(code), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -122,11 +127,14 @@ namespace Hypervisor
         }
         catch (...)
         {
+
             //Nothing intercepted the vmmcall, so it raised #UD. The caller
             //reports the trap; printing here as well would duplicate it in a
             //line that carries no colour and no indent.
+
             if (trapped)
                 *trapped = true;
+
             output = 0xAABB;
         }
 
@@ -155,6 +163,7 @@ namespace Hypervisor
     // driver you want hidden has run DriverEntry, and run FlushAllProcessors()
     // once afterwards.
     //
+
     inline bool HideMemory(ULONG64 base, SIZE_T size)
     {
         const ULONG64 output = CallVM(Shared::MAGIC, Shared::CommandId::ProtectRange, base, static_cast<ULONG64>(size));
@@ -175,6 +184,7 @@ namespace Hypervisor
     // textBase is the resident VA of the executable span and textSize its
     // length; passing 0/0 hides the whole image (the legacy behaviour).
     //
+
     inline bool Protect(ULONG64 textBase = 0, SIZE_T textSize = 0)
     {
         const ULONG64 output = CallVM(Shared::MAGIC, Shared::CommandId::ProtectSelf, textBase, static_cast<ULONG64>(textSize));
@@ -193,6 +203,7 @@ namespace Hypervisor
      * Single-threaded on purpose: the shellcode in Data::Shellcode is global
      * state, and a pinned sweep covers every CPU without racing on it.
      */
+
     inline bool FlushAllProcessors()
     {
         const HANDLE thread = GetCurrentThread();
@@ -206,6 +217,7 @@ namespace Hypervisor
          * fewer than 64 logical processors and group numbering is not a simple
          * division of a global index, which could pin a nonexistent CPU or skip
          * real ones. RelationGroup reports each group's GroupMask directly. */
+
         DWORD bytes = 0;
         GetLogicalProcessorInformationEx(RelationGroup, nullptr, &bytes);
         if (bytes == 0)
@@ -222,8 +234,10 @@ namespace Hypervisor
                  reinterpret_cast<BYTE*>(cursor) + cursor->Size)) {
             if (cursor->Relationship != RelationGroup || cursor->Group.ActiveGroupCount == 0)
                 continue;
+
             // GROUP_RELATIONSHIP holds ActiveGroupCount PROCESSOR_GROUP_INFO
             // entries in GroupInfo; each carries its group number and active mask.
+
             for (WORD g = 0; g < cursor->Group.ActiveGroupCount; ++g) {
                 const PROCESSOR_GROUP_INFO& groupInfo = cursor->Group.GroupInfo[g];
                 const WORD group = g; // GROUP_INFO entries are ordered by group number
@@ -304,6 +318,7 @@ namespace Hypervisor
 
     inline bool CopyProcessMemory(UINT32 sourceProcessId, ULONG64 sourceAddress, UINT32 targetProcessId, ULONG64 targetAddress, SIZE_T bytes)
     {
+
         //
         // The protocol caps one VMMCALL at Shared::MAX_RW_SIZE (the kernel
         // stages the transfer in a fixed buffer), so larger requests are
@@ -311,6 +326,7 @@ namespace Hypervisor
         // end-to-end by the driver like a standalone copy, so a chunk that
         // fails aborts the remainder and reports failure for the request.
         //
+
         ULONG64 source = sourceAddress;
         ULONG64 target = targetAddress;
         SIZE_T remaining = bytes;
@@ -355,6 +371,7 @@ namespace Hypervisor
      * (present PTEs at every level).  A non-resident chunk fails the
      * request; the caller sees false rather than a silent partial copy.
      */
+
     inline bool WriteMemory(ULONG64 buffer, ULONG64 destination, SIZE_T size)
     {
         return CopyProcessMemory(Data::CurrentProcessId, buffer, Data::TargetProcessId, destination, size);

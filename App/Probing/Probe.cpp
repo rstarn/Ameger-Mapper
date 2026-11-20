@@ -18,8 +18,10 @@ static_assert(sizeof(AMEGER_KERNEL_CONTEXT) == 96, "AMEGER_KERNEL_CONTEXT must b
 
 namespace
 {
+
 	//The same byte-reading and console helpers the probe needs, pulled in from
 	//the shared Utilities and Console layers rather than duplicated here.
+
 	using Console::Val;
 	using Console::Hex;
 }
@@ -35,6 +37,7 @@ namespace
  * "make sure you are running as administrator" after the provider has already
  * been written to the scratch directory, and nothing has been mapped.
  */
+
 bool IsElevated() {
 	SID_IDENTIFIER_AUTHORITY nt_authority = SECURITY_NT_AUTHORITY;
 	PSID administrators = nullptr;
@@ -53,6 +56,7 @@ bool IsElevated() {
 	//A failed check is reported as "not elevated" rather than as elevated: the
 	//caller's response to each is the same, and guessing wrong in the other
 	//direction would only produce the failure this is meant to explain early.
+
 	return checked && member != FALSE;
 }
 
@@ -63,6 +67,7 @@ bool IsElevated() {
  * wrote back its success fields. Prints PROBE_RESULT=PASS or PROBE_RESULT=FAIL
  * with every context field and an 80-byte hex dump of the context.
  */
+
 int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	if (probeContextIdx + 1 >= argc) {
 		Log(L"[-] --probe-context requires a file path argument" << std::endl);
@@ -71,6 +76,7 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	const std::wstring probePath = argv[probeContextIdx + 1];
 
 	//1. Read the driver bytes (the same bytes get mapped, never a later re-read).
+
 	std::vector<BYTE> image;
 	if (!Utilities::ReadFileToMemory(probePath, &image) || image.empty()) {
 		Log(L"[-] Failed to read driver bytes from \"" << Val(probePath) << L"\"" << std::endl);
@@ -78,6 +84,7 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	}
 
 	//2. Allocate the context struct in caller-process memory (readable/writable).
+
 	AMEGER_KERNEL_CONTEXT* ctx = static_cast<AMEGER_KERNEL_CONTEXT*>(
 		VirtualAlloc(nullptr, sizeof(AMEGER_KERNEL_CONTEXT), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
 	if (!ctx) {
@@ -89,6 +96,7 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	ctx->version = AMEGER_KERNEL_ABI_VERSION;
 
 	//T4: reserve the user-mode ring buffer the driver will MDL-lock in DriverEntry.
+
 	AMEGER_KERNEL_COMMAND* ring_buffer = static_cast<AMEGER_KERNEL_COMMAND*>(
 		VirtualAlloc(nullptr, AMEGER_RING_SIZE, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
 	if (!ring_buffer) {
@@ -101,6 +109,7 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	ctx->ring_buffer_size = AMEGER_RING_SIZE;
 
 	//The probe runs the real mapping path, so it needs the provider loaded.
+
 	const bool elevated = IsElevated();
 	if (!elevated) {
 		Log(L"[-] The probe needs to run elevated to load the kernel provider." << std::endl);
@@ -113,6 +122,7 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	//normal path does, so the tracing lines and MmPteBase resolve before any
 	//kernel call. Without this, GetOffset(L"MmPteBase") returns 0 and the probe
 	//fails at Driver::Load.
+
 	const std::wstring offsetFilePath = Utilities::GetCurrentAppFolder() + L"\\Offsets.ini";
 	const std::wstring updater = Utilities::GetCurrentAppFolder() + L"\\" + SYMBOL_TOOL_EXE;
 	if (!SymbolsHandler::GetInstance()->ReloadFile(offsetFilePath, updater)) {
@@ -123,6 +133,7 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	}
 
 	//2. Then load the driver.
+
 	NTSTATUS load_status = Driver::Load();
 	if (!(load_status >= 0)) {
 		Log(L"[-] Failed to load the kernel provider; the probe cannot run." << std::endl);
@@ -132,19 +143,25 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	}
 
 	//3. Pass the context as param2 to MapDriver.
+
 	NTSTATUS driver_status = (NTSTATUS)0x8000ffff;
 	SIZE_T resident_size = 0;
 	const ULONG64 base = Mapper::MapDriver(
 		image.data(), image.size(), 0,
 		static_cast<ULONG64>(reinterpret_cast<uintptr_t>(ctx)),
+
 		/*free=*/false, /*destroyHeader=*/true,
+
 		Mapper::AllocationMode::AllocateContiguous,
+
 		/*passAllocationPtr=*/false,
+
 		&driver_status, &resident_size);
 
 	const bool provider_clean = (Driver::Unload() >= 0);
 
 	//4. Check the fields the driver is expected to write back.
+
 	const bool mapped = (base != 0);
 	const bool entry_ok = (driver_status >= 0);
 	const bool fields_ok =
@@ -159,6 +176,7 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 		Log(L"PROBE_RESULT=FAIL" << std::endl);
 
 	//Report every context field so the result is auditable.
+
 	Log(L"driver_started  = " << Val(ctx->driver_started) << std::endl);
 	Log(L"driver_load_mode= " << Val(ctx->driver_load_mode) << std::endl);
 	Log(L"driver_ntstatus= " << Val(Hex(ctx->driver_ntstatus)) << std::endl);
@@ -166,6 +184,7 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	Log(L"probe_echo    = " << Val(Hex(ctx->probe_echo)) << std::endl);
 
 	//T4 additions, reported too.
+
 	Log(L"ring_buffer_user_va= " << Val(Hex(ctx->ring_buffer_user_va)) << std::endl);
 	Log(L"ring_buffer_size  = " << Val(Hex(ctx->ring_buffer_size)) << std::endl);
 	Log(L"shutdown_flag    = " << Val(ctx->shutdown_flag) << std::endl);
@@ -175,6 +194,7 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	//T4 communication test: write a Ping command into the user-mode ring buffer,
 	//give the driver a few timer ticks, then read the heartbeat and the command
 	//status back through the same buffer the driver wrote via its MDL-mapped VA.
+
 	AMEGER_KERNEL_COMMAND* cmd = ring_buffer;
 	cmd->type = AmegerCmdPing;
 	Sleep(200);
@@ -186,6 +206,7 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 
 	//Safe shutdown: request shutdown, then wait for the driver to confirm it is
 	//safe to free memory (shutdown_complete) before the user releases the buffers.
+
 	ctx->shutdown_flag = 1;
 	for (int i = 0; i < 50; i++) {
 		if (ctx->shutdown_complete == 1) break;
@@ -194,14 +215,17 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	Log(L"cmd_status     = " << Val(Hex(cmd->status)) << std::endl);
 
 	if (ctx->shutdown_complete != 1) {
+
 		/* The driver MDL-locks ring_buffer and writes ctx fields. If it has not
 		 * confirmed shutdown it may still hold those MDLs; freeing the user VA
 		 * now is a kernel use-after-free. Leak the two small allocations on this
 		 * path — a bounded, safe leak is far better than a bugcheck. */
+
 		Log(L"[-] Driver did not complete shutdown in time; leaving the probe "
 			L"buffers resident rather than freeing memory the driver may still use." << std::endl);
 
 		//Hex dump of the whole context, as it exists after MapDriver returned.
+
 		LogBlank();
 		LogRaw(L"Context hex dump (96 bytes):");
 		const unsigned char* bytes = reinterpret_cast<const unsigned char*>(ctx);
@@ -219,6 +243,7 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	VirtualFree(ring_buffer, 0, MEM_RELEASE);
 
 	//Hex dump of the whole context, as it exists after MapDriver returned.
+
 	LogBlank();
 	LogRaw(L"Context hex dump (96 bytes):");
 	const unsigned char* bytes = reinterpret_cast<const unsigned char*>(ctx);

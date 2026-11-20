@@ -23,6 +23,7 @@
 
 namespace
 {
+
 	/*
 	 * Restores PATH when it goes out of scope.
 	 *
@@ -33,22 +34,27 @@ namespace
 	 * it never asked for, for the rest of the run. Restoring it here means an
 	 * early return cannot leave it behind either.
 	 */
+
 	class ScopedPathChange
 	{
 	public:
 		ScopedPathChange() {
+
 			//Heap rather than a 32 KB automatic buffer. The automatic one was
 			//live at the same time as an identical buffer in ReloadFile, which put
 			//64 KB - and then 128 KB once the second one was counted - on the
 			//stack of a function that is also on the path out of the crash
 			//handler, where the stack has already been walked once by the time
 			//anything is reported.
+
 			std::wstring buffer(kPathBufferChars, L'\0');
 			const DWORD length = GetEnvironmentVariableW(L"PATH", buffer.data(), static_cast<DWORD>(buffer.size()));
+
 			//0 is "PATH was not set", which is a legitimate state to restore to.
 			//At or above the buffer size is truncation, and restoring that would
 			//replace a real PATH with a partial one - so nothing is saved and
 			//nothing is restored.
+
 			if (length > 0 && length < buffer.size()) {
 				had_value_ = true;
 				previous_.assign(buffer.data(), length);
@@ -64,8 +70,10 @@ namespace
 		ScopedPathChange& operator=(const ScopedPathChange&) = delete;
 
 	private:
+
 		//The longest PATH this will read. 32 KB is the same bound the buffer
 		//this replaced used, so the truncation behaviour is unchanged.
+
 		static constexpr size_t kPathBufferChars = 32768;
 
 		bool had_value_ = false;
@@ -73,11 +81,13 @@ namespace
 	};
 
 	//Length of the PATH buffer in ScopedPathChange, in characters. See there.
+
 constexpr size_t kPathBufferChars = 32768;
 
 //Trim ASCII whitespace from both ends. The generator emits no spaces, but a
 	//hand edited or regenerated file routinely does, and an untrimmed name is a
 	//key nothing will ever look up.
+
 	std::wstring Trim(const std::wstring& text) {
 		static const wchar_t* whitespace = L" \t\r\n\f\v";
 		const size_t first = text.find_first_not_of(whitespace);
@@ -96,6 +106,7 @@ constexpr size_t kPathBufferChars = 32768;
 	 * correct. The parsed text now has to be the whole value, and a 0x prefix is
 	 * honoured rather than parsed as the digit zero followed by garbage.
 	 */
+
 	bool ParseOffset(const std::wstring& text, unsigned long long& out) {
 		const std::wstring value = Trim(text);
 		if (value.empty())
@@ -106,6 +117,7 @@ constexpr size_t kPathBufferChars = 32768;
 		//which then reads as a valid offset until whatever uses it is 2^64 bytes
 		//past the start of the kernel. Rejecting the sign here is one character
 		//of test rather than a bound at each of the dozen consumers.
+
 		if (value[0] == L'-' || value[0] == L'+')
 			return false;
 
@@ -118,9 +130,13 @@ constexpr size_t kPathBufferChars = 32768;
 
 		try {
 			size_t consumed = 0;
+
 			//+0 rather than digits 0: the prefix is already consumed by base 16.
+
 			const unsigned long long parsed = std::stoull(value.c_str() + digits, &consumed, base);
+
 			//Anything left over means the value was not what it looked like.
+
 			if (consumed == 0 || consumed != value.size() - digits)
 				return false;
 			out = parsed;
@@ -146,12 +162,14 @@ constexpr size_t kPathBufferChars = 32768;
 	 * The wait is bounded: a tool that hangs would otherwise hang the mapper
 	 * before it ever touches the kernel.
 	 */
+
 	bool RunSymbolTool(const std::wstring& tool_path, DWORD& exit_code) {
 		exit_code = 0;
 
 		//CreateProcessW may modify the command line buffer, so it is given a
 		//writable copy. lpApplicationName carries the real path, so the quoted
 		//command line is only there for display and argument parsing.
+
 		std::wstring command_line = L"\"" + tool_path + L"\"";
 
 		STARTUPINFOW startup{};
@@ -199,6 +217,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 
 	//Trace the exact path being read so a failed run shows where the offsets
 	//file was looked for instead of failing silently.
+
 	LogBlank();
 	Log(L"[*] Attempting to load Offsets.ini from: " << Val(requestedPath) << std::endl);
 	LogBlank();
@@ -207,6 +226,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 
 	//Grouped explicitly: the original relied on && binding tighter than ||,
 	//which is correct but easy to break while editing.
+
 	const bool usingUpdater = !updater.empty();
 	const std::wstring& fileToCheck = usingUpdater ? updater : requestedPath;
 
@@ -216,15 +236,18 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	}
 
 	if (usingUpdater) {
+
 		//The updater always writes to the default location. The previous file is
 		//kept until the new one is in place, so a failed run keeps working
 		//offsets instead of leaving nothing behind.
+
 		const std::wstring outputPath = Utilities::GetCurrentAppFolder() + L"\\Offsets.ini";
 
 		//Both symbol libraries live in the DLLs subfolder, which is not a
 		//default search location, so it has to be on PATH for the child. The
 		//change is scoped to this block and undone on the way out, including on
 		//an early return.
+
 		const ScopedPathChange path_restore;
 
 		//GetEnvironmentVariableW returns the required size and leaves the buffer
@@ -232,17 +255,22 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 		//length would silently replace the parent's PATH with just this folder.
 		//An unset PATH returns 0 and is the intended case; anything at or above
 		//the buffer size means truncation and is left alone.
+
 		const std::wstring dllFolder = Utilities::GetCurrentAppFolder() + L"\\" + SYMBOL_DLL_FOLDER;
 		if (std::filesystem::is_directory(dllFolder)) {
+
 			//On the heap rather than in this frame: see kPathBufferChars. The
 			//ScopedPathChange above already holds a copy of the value being
 			//replaced, so this one only has to survive until SetEnvironmentVariableW
 			//has been called.
+
 			std::wstring oldPath(kPathBufferChars, L'\0');
 			const DWORD pathLength = GetEnvironmentVariableW(L"PATH", oldPath.data(), static_cast<DWORD>(oldPath.size()));
 			if (pathLength == 0 || pathLength >= oldPath.size()) {
+
 				//0 means PATH was unset, which is the intended case; at or above
 				//the buffer size means truncation, which is not.
+
 				Log(L"[-] PATH is too long to extend; leaving PATH alone" << std::endl);
 			}
 			else {
@@ -268,6 +296,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 
 	//Prove the file actually exists before parsing, using the Win32 API so a
 	//missing file reports its absence rather than a generic open failure.
+
 	const DWORD attributes = GetFileAttributesW(path.c_str());
 	if (attributes == INVALID_FILE_ATTRIBUTES) {
 		Log(L"[-] File does not exist! " << Val(path) << std::endl);
@@ -275,6 +304,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	}
 
 	//Log the file size so a zero-byte or truncated file stands out.
+
 	{
 		HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
 			nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -294,6 +324,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	//Offsets.ini comes out as char+null pairs and every offset is rejected as
 	//malformed. Read the file as raw bytes and decode the UTF-16LE content
 	//explicitly, then feed the decoded lines to the parser below.
+
 	std::ifstream bytes(path, std::ios::binary);
 	if (!bytes.is_open()) {
 		Log(L"[-] Failed to open offsets file" << std::endl);
@@ -302,7 +333,9 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 
 	std::vector<char> raw((std::istreambuf_iterator<char>(bytes)), std::istreambuf_iterator<char>());
 	std::wstring text;
+
 	//Skip the UTF-16LE BOM if present.
+
 	size_t start = 0;
 	if (raw.size() >= 2 && (unsigned char)raw[0] == 0xFF && (unsigned char)raw[1] == 0xFE)
 		start = 2;
@@ -320,6 +353,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	//Entries are held structured rather than pre-rendered: the field group is
 	//sorted by name below, and a rendered string cannot be sorted against a
 	//list of names.
+
 	struct LoadedEntry {
 		std::wstring section;
 		std::wstring name;
@@ -335,13 +369,16 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	//Counted separately so the summary can say what was actually loaded: an
 	//Offsets.ini entry is either a symbol (a [<module>] section) or a structure
 	//field (a [<module>.fields] section).
+
 	size_t symbolCount = 0;
 	size_t fieldCount = 0;
 
 	while (std::getline(tss, line)) {
+
 		// The offsets file uses CRLF line endings; std::getline splits on '\n'
 		// and leaves a trailing '\r' on CRLF lines, which made section headers
 		// fail the "ends with ]" check and got skipped. Strip it first.
+
 		if (!line.empty() && line.back() == L'\r') {
 			line.pop_back();
 		}
@@ -349,7 +386,9 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 			continue;
 		}
 		if (line[0] == L'[') {
+
 			//A section header needs both brackets; substr would underflow here.
+
 			if (line.back() != L']') {
 				Log(L"[-] Malformed section header, skipping" << std::endl);
 				continue;
@@ -372,6 +411,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 		//std::stoull throws on anything that is not a number, which would take
 		//the whole mapper down on a malformed offsets file. ParseOffset throws
 		//nothing and returns false instead.
+
 		unsigned long long parsed = 0;
 		if (!ParseOffset(offset, parsed)) {
 			Log(L"[-] Skipping malformed offset for " << Val(name) << std::endl);
@@ -385,6 +425,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 		//machine generated, so a repeat means the generator changed or the file
 		//was hand edited, and either way the two values disagree and the later
 		//one is being taken on trust.
+
 		const auto [existing, inserted] = symbols.emplace(name, parsed);
 		if (!inserted && existing->second != parsed) {
 			Log(L"[-] Duplicate entry for " << Val(name) << L" with conflicting offsets ("
@@ -412,6 +453,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	 * A field this list does not name keeps its file order and still reports, so a
 	 * newly resolved field can never vanish from the report by being absent here.
 	 */
+
 	static const std::vector<std::wstring> fieldOrder{
 		L"_KLDR_DATA_TABLE_ENTRY.BaseDllName",
 		L"_DRIVER_OBJECT.DriverExtension",
@@ -431,6 +473,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	//below without being captured - naming it in a capture list is an error.
 	//rank is hoisted out of the comparator so the lookup is not rebuilt on every
 	//comparison, and so the comparator only has to capture rank.
+
 	const auto rank = [](const std::wstring& name) {
 		for (size_t i = 0; i < fieldOrder.size(); i++)
 			if (fieldOrder[i] == name)
@@ -463,6 +506,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	 * produced, and the head of the group is occupied by the offsets that are
 	 * consumed first.
 	 */
+
 	static const std::vector<std::wstring> symbolOrder{
 		L"MmAllocateIndependentPagesEx",
 		L"MmFreeIndependentPages",
@@ -485,10 +529,12 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	 * position is now found by name, and the line falls back to the end of the
 	 * list if that name is missing too, so it always prints.
 	 */
+
 	const std::wstring wroteBefore = L"g_HashCacheLock";
 
 	//Rank is hoisted out of the comparator so the lookup is not rebuilt on every
 	//comparison, and so the comparator only has to capture rank.
+
 	const auto symbolRank = [](const std::wstring& name) {
 		for (size_t i = 0; i < symbolOrder.size(); i++)
 			if (symbolOrder[i] == name)
@@ -503,6 +549,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 
 	//Only printed when the updater actually produced the file; with
 	//--dontUpdateOffsets nothing was written by this run.
+
 	bool wrote_printed = false;
 	LogBlank();
 	for (const auto& entry : symbolEntries) {
@@ -543,6 +590,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	 * own stage that reports its own missing symbol by name, so requiring all of
 	 * them here would refuse runs that legitimately use --no-forensics.
 	 */
+
 	static const std::vector<std::wstring> kRequiredEntries{ L"MmPteBase" };
 
 	std::wstring missing;
@@ -562,6 +610,7 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 
 		//Prove what the parser actually read: dump the first 100 wide chars of
 		//the file (BOM included) so a mangled or empty file is visible at a glance.
+
 		if (!missing.empty()) {
 			std::wifstream peek(path);
 			if (peek.is_open()) {
@@ -593,6 +642,7 @@ unsigned long long SymbolsHandler::GetOffset(const std::wstring& name) {
 
 //Structure field offsets are stored as "<Struct>.<Field>" entries and are
 //unique, so a plain lookup is enough.
+
 unsigned long long SymbolsHandler::GetFieldOffset(const std::wstring& structAndField) {
 	const auto it = symbols.find(structAndField);
 	return it == symbols.end() ? kFieldUnresolved : it->second;

@@ -31,6 +31,7 @@
 
 namespace Console
 {
+
 	/*
 	 * Read an on/off environment variable.
 	 *
@@ -39,11 +40,14 @@ namespace Console
 	 * compared against. AMEGER_NO_COLOR=10 and =true both used to enable colour,
 	 * so the variable was very nearly the opposite of what it says.
 	 */
+
 	inline bool EnvironmentFlag(const wchar_t* name) {
 		wchar_t value[16] = { 0 };
 		const DWORD length = GetEnvironmentVariableW(name, value, static_cast<DWORD>(std::size(value)));
+
 		//0 is "not set", at or above the buffer size is truncation: neither is a
 		//value this can judge, and neither should be read as one.
+
 		if (length == 0 || length >= std::size(value))
 			return false;
 
@@ -59,11 +63,13 @@ namespace Console
 			return false;
 
 		//Something else entirely: not a request for the behaviour.
+
 		return false;
 	}
 
 	//True when AMEGER_NO_COLOR asks for plain output. Read once, at first
 	//use, so every colour below and EnableAnsiColors() agree on the answer.
+
 	inline bool ColorsDisabled() {
 		static const bool disabled = EnvironmentFlag(L"AMEGER_NO_COLOR");
 		return disabled;
@@ -71,12 +77,14 @@ namespace Console
 
 	//True when AMEGER_VERBOSE asks for the per-entry diagnostics that would
 	//otherwise flood the log (e.g. every restored page-table entry).
+
 	inline bool Verbose() {
 		static const bool verbose = EnvironmentFlag(L"AMEGER_VERBOSE");
 		return verbose;
 	}
 
 	//The sequence itself, or an empty string when colour is disabled.
+
 	inline const wchar_t* ColorOrPlain(const wchar_t* code) {
 		return ColorsDisabled() ? L"" : code;
 	}
@@ -96,6 +104,7 @@ namespace Console
 	 * AMEGER_NO_COLOR=1 and when stdout is not a console (a redirected file
 	 * keeps the bytes out of it entirely, so a log still reads as plain text).
 	 */
+
 	inline void EnableAnsiColors() {
 		if (ColorsDisabled())
 			return;
@@ -118,6 +127,7 @@ namespace Console
 	//Widen an ASCII identifier. Every string the tool widens this way is a
 	//narrow module, symbol or driver name, so a per byte copy is correct and
 	//needs no locale.
+
 	inline std::wstring ToWide(const char* text) {
 		const std::string narrow(text ? text : "");
 		return std::wstring(narrow.begin(), narrow.end());
@@ -125,6 +135,7 @@ namespace Console
 
 	//A value to print in green. Built by Val()/Hex(); streamed through the
 	//operator below so the green span wraps exactly the value and nothing else.
+
 	struct GreenText {
 		std::wstring text;
 	};
@@ -141,6 +152,7 @@ namespace Console
 	 * informational rather than an error, red for one that makes a path
 	 * unusable - and is built by Tint() below.
 	 */
+
 	struct ColoredText {
 		const wchar_t* color;
 		std::wstring text;
@@ -151,6 +163,7 @@ namespace Console
 	}
 
 	//An integer as 0x-prefixed hexadecimal.
+
 	template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
 	inline std::wstring Hex(T value) {
 		std::wostringstream stream;
@@ -160,14 +173,17 @@ namespace Console
 
 	//Wrap a value so it prints green. A pointer prints as 0x-prefixed hex; an
 	//integer prints in decimal, so Hex() is used where hex is wanted.
+
 	inline GreenText Val(const std::wstring& text) { return GreenText{ text }; }
 	inline GreenText Val(const wchar_t* text) { return GreenText{ text ? text : L"" }; }
 	inline GreenText Val(wchar_t* text) { return GreenText{ text ? text : L"" }; }
 	inline GreenText Val(const char* text) { return GreenText{ ToWide(text) }; }
 	inline GreenText Val(const void* pointer) {
+
 		//Formatted the same way as Hex() (lowercase, 0x-prefixed) rather than
 		//with operator<<(void*), which on MSVC prints the C %p form: uppercase
 		//and without the 0x that every other address in the output carries.
+
 		std::wostringstream stream;
 		stream << L"0x" << std::hex << reinterpret_cast<uintptr_t>(pointer);
 		return GreenText{ stream.str() };
@@ -178,12 +194,14 @@ namespace Console
 	//Wrap a value so it prints in `color` rather than the default green. The
 	//colour is one of the k* constants above, chosen by the caller from what
 	//the value turned out to be.
+
 	inline ColoredText Tint(const wchar_t* color, const std::wstring& text) { return ColoredText{ color, text }; }
 	inline ColoredText Tint(const wchar_t* color, const wchar_t* text) { return ColoredText{ color, text ? text : L"" }; }
 	template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
 	inline ColoredText Tint(const wchar_t* color, T value) { return ColoredText{ color, std::to_wstring(value) }; }
 
 	//Colour of a one character tag, or null when the tag is not one of ours.
+
 	inline const wchar_t* TagColor(wchar_t tag) {
 		switch (tag) {
 		case L'+': return kGreen;
@@ -199,6 +217,7 @@ namespace Console
 	//Write text, colouring a leading "[x]" tag when it is one of ours. "[!!]"
 	//(the crash handler) and the six character "[INFO]" are treated as tags as
 	//well. Text that carries no recognised tag is written unchanged.
+
 	inline void WriteTagged(const std::wstring& text) {
 		size_t tag_length = 0;
 		const wchar_t* color = nullptr;
@@ -236,6 +255,7 @@ namespace Console
 	//so it is not what fixed that crash; it is kept because it still writes a
 	//newline without the MSVCP140 detour. Defined before Line so its
 	//operator<< can call it.
+
 	inline void WriteNewline() {
 		const HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
 		if (console == INVALID_HANDLE_VALUE || console == nullptr)
@@ -264,6 +284,7 @@ namespace Console
 		//A prebuilt line (e.g. one buffered so it can be printed after a value
 		//it depends on). Without this overload the generic template below would
 		//stream it raw and the leading tag would lose its colour.
+
 		Line& operator<<(const std::wstring& text) {
 			Begin();
 			WriteTagged(text);
@@ -272,18 +293,22 @@ namespace Console
 
 		//std::endl and friends; resolved explicitly because a function
 		//template cannot be deduced by the generic overload below.
+
 		Line& operator<<(std::wostream& (*manipulator)(std::wostream&)) {
 			(void)manipulator; // overload identity only; newline path below
 			Begin();
+
 			//Bypass MSVCP140's std::endl and write the newline straight to the
 			//console handle. The 0xC0000096 this was blamed on is
 			//STATUS_PRIVILEGED_INSTRUCTION (a ring 3 RDMSR), not a stack
 			//overrun, so it is not what fixed that crash.
+
 			Console::WriteNewline();
 			return *this;
 		}
 
 		//std::hex, std::dec and friends.
+
 		Line& operator<<(std::ios_base& (*manipulator)(std::ios_base&)) {
 			Begin();
 			std::wcout << manipulator;
@@ -330,6 +355,7 @@ namespace Console
 #define LogBlank() Console::WriteNewline()
 
 //Val()/Hex()/Tint() are used unqualified at the call sites to keep them readable.
+
 using Console::Val;
 using Console::Hex;
 using Console::Tint;

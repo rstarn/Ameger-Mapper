@@ -20,9 +20,11 @@
 
 namespace PE
 {
+
 	// One IMAGE_BASE_RELOCATION block: where its fixups apply and how many
 	// 2-byte entries follow. `address` is the RVA the block applies to, already
 	// added to the image base, so it points straight at the patched field.
+
 	struct RelocInfo
 	{
 		ULONG64 address;
@@ -34,6 +36,7 @@ namespace PE
 	//rather than by name, in which case `name` is empty. Both forms are legal and
 	//both have to be resolved: an unresolved IAT slot is 0 and the driver jumps
 	//there on its first call to that function.
+
 	struct ImportFunctionInfo
 	{
 		std::string name;
@@ -42,6 +45,7 @@ namespace PE
 	};
 
 	//One imported module and everything it imports.
+
 	struct ImportInfo
 	{
 		std::string module_name;
@@ -63,6 +67,7 @@ namespace PE
 	//and the position of the section table - is a different width or a different
 	//offset in a PE32 optional header. Parsing a 32-bit image as PE32+ produces
 	//values that are wrong in a way nothing downstream can detect.
+
 	PIMAGE_NT_HEADERS64 GetNtHeaders(void* image_base, size_t image_size);
 
 	//Locate the section table and prove the whole of it lies inside the buffer.
@@ -76,6 +81,7 @@ namespace PE
 	//On success `out_sections` points at the first IMAGE_SECTION_HEADER and
 	//`out_count` is the number of entries proven to fit. On failure both are
 	//left untouched and false is returned.
+
 	bool GetSectionTable(void* image_base, size_t image_size, PIMAGE_SECTION_HEADER& out_sections, uint16_t& out_count);
 
 	//Collect the base relocation blocks into `relocs`.
@@ -87,6 +93,7 @@ namespace PE
 	//block that does not lie inside the image). The caller must refuse to map:
 	//applying only part of a relocation set leaves pointers aimed at the
 	//preferred base, and the first use of one is a bugcheck.
+
 	bool GetRelocs(void* image_base, size_t image_size, vec_relocs& relocs);
 
 	//Collect the import descriptors and the functions they pull in into
@@ -98,6 +105,7 @@ namespace PE
 	//caller must refuse to map: a descriptor that is skipped leaves its IAT
 	//slots holding the file's placeholder values, so the driver's first call
 	//through one jumps to a file offset instead of a kernel function.
+
 	bool GetImports(void* image_base, size_t image_size, vec_imports& imports);
 
 	/*
@@ -115,5 +123,6 @@ namespace PE
 	 *
 	 * Called only when GetRelocs returned an empty vector.
 	 */
+
 	bool VerifyNoAbsoluteReferences(void* image_base, size_t image_size);
 }

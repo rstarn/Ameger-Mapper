@@ -27,6 +27,7 @@
  * copy before it is written: a block whose VirtualAddress is outside the image
  * would otherwise patch memory past the end of the mapper's own allocation.
  */
+
 bool Mapper::RelocateImageByDelta(const PE::vec_relocs& relocs, const ULONG64 delta, const ULONG64 image_base, const ULONG64 image_size) {
 	for (const auto& current_reloc : relocs) {
 		for (auto i = 0u; i < current_reloc.count; ++i) {
@@ -47,6 +48,7 @@ bool Mapper::RelocateImageByDelta(const PE::vec_relocs& relocs, const ULONG64 de
 			//8 bytes written to it. Refusing the whole image (rather than
 			//skipping the entry) matches the rule above: a partially applied
 			//relocation set leaves pointers aimed at the preferred base.
+
 			const ULONG64 target = current_reloc.address + offset;
 			if (target < image_base || image_size < sizeof(ULONG64) ||
 				target - image_base > image_size - sizeof(ULONG64)) {
@@ -56,6 +58,7 @@ bool Mapper::RelocateImageByDelta(const PE::vec_relocs& relocs, const ULONG64 de
 			}
 
 			*reinterpret_cast<ULONG64*>(target) += delta;
+
 		}
 	}
 	return true;
@@ -63,6 +66,7 @@ bool Mapper::RelocateImageByDelta(const PE::vec_relocs& relocs, const ULONG64 de
 
 //Section names are 8 bytes and are not null terminated, so they must never be
 //streamed as a C string: that would read past the end of the field.
+
 static std::wstring SectionName(const PIMAGE_SECTION_HEADER section) {
 	const auto* name = reinterpret_cast<const char*>(section->Name);
 	const size_t length = strnlen_s(name, IMAGE_SIZEOF_SHORT_NAME);
@@ -77,14 +81,19 @@ static std::wstring SectionName(const PIMAGE_SECTION_HEADER section) {
  * so a value an attacker can compute is a value an attacker writes past. See the
  * call site for what this replaced.
  */
+
 static uintptr_t RandomSecurityCookie() {
+
 	//Lazy, so the generator is seeded once per run rather than on every image.
+
 	static std::mt19937_64 engine{ std::random_device{}() };
 
 	uintptr_t value = 0;
+
 	//Two outcomes are excluded rather than one: 0, which is the value
 	//__security_check_cookie compares against, and ~0, whose complement is 0 -
 	//so the pair the CRT keeps consistent can never be (0, ~0) by accident.
+
 	do {
 		value = static_cast<uintptr_t>(engine());
 	} while (value == 0 || value == ~static_cast<uintptr_t>(0));
@@ -109,6 +118,7 @@ static uintptr_t RandomSecurityCookie() {
  *
  * @Jerem584
  */
+
 bool Mapper::FixSecurityCookie(void* local_image, size_t image_size, ULONG64 kernel_image_base)
 {
 	auto headers = PE::GetNtHeaders(local_image, image_size);
@@ -135,11 +145,13 @@ bool Mapper::FixSecurityCookie(void* local_image, size_t image_size, ULONG64 ker
 	 * was silently left unfixed. The declared Size has to cover the cookie field
 	 * itself, and only that field has to be inside the buffer.
 	 */
+
 	const DWORD load_config_size = headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].Size;
 	const size_t cookie_field_end = offsetof(IMAGE_LOAD_CONFIG_DIRECTORY, SecurityCookie) + sizeof(uintptr_t);
 
 	//The load config directory is a file controlled RVA: it has to lie inside
 	//the local image, with room for the field that is read from it.
+
 	if (load_config_size < cookie_field_end ||
 		load_config_directory >= image_size ||
 		cookie_field_end > image_size - load_config_directory)
@@ -161,6 +173,7 @@ bool Mapper::FixSecurityCookie(void* local_image, size_t image_size, ULONG64 ker
 	//The rebased slot has to land inside the local image: the read and the
 	//write below both dereference it, and a corrupt load config would otherwise
 	//point either of them outside the buffer.
+
 	const auto local_base = reinterpret_cast<uintptr_t>(local_image);
 	const auto local_limit = local_base + image_size;
 	if (stack_cookie < local_base || stack_cookie > local_limit ||
@@ -176,6 +189,7 @@ bool Mapper::FixSecurityCookie(void* local_image, size_t image_size, ULONG64 ker
 
 	//Default of the toolchain that produced this project; a different value
 	//means the author compiled with a custom /GS cookie, which is supported.
+
 	static constexpr uintptr_t kDefaultCookie = 0x2B992DDFA232;
 	if (*(uintptr_t*)(stack_cookie) != kDefaultCookie)
 		Log(L"[INFO] Non-default stack cookie found, remapping it anyway" << std::endl);
@@ -206,6 +220,7 @@ bool Mapper::FixSecurityCookie(void* local_image, size_t image_size, ULONG64 ker
 	 * Zero stays excluded as well: it is the value the check treats as "cookie
 	 * not initialised".
 	 */
+
 	uintptr_t new_cookie = 0;
 	do {
 		new_cookie = RandomSecurityCookie() & static_cast<uintptr_t>(0x0000FFFFFFFFFFFFull);
@@ -218,6 +233,7 @@ bool Mapper::FixSecurityCookie(void* local_image, size_t image_size, ULONG64 ker
 	//above. A driver that never calls the CRT initialiser keeps its link-time
 	//complement, which is the same limitation this comment already described.
 	*(uintptr_t*)(stack_cookie) = new_cookie;
+
 	return true;
 }
 
@@ -243,6 +259,7 @@ bool Mapper::FixSecurityCookie(void* local_image, size_t image_size, ULONG64 ker
  * import handling that touches the kernel. Kept separate from ResolveImports so
  * that function stays testable without a provider.
  */
+
 static bool ResolveImportFromKernel(const Mapper::ImportLookup& request, void*, ULONG64& out_address) {
 	if (!request.module_base)
 		return false;
@@ -274,6 +291,7 @@ bool Mapper::ResolveImports(const PE::vec_imports& imports, ImportResolver resol
 			ULONG64 resolved = 0;
 			if (resolver(request, context, resolved)) {
 				*current_function_data.address = resolved;
+
 				continue;
 			}
 
@@ -281,12 +299,14 @@ bool Mapper::ResolveImports(const PE::vec_imports& imports, ImportResolver resol
 			//ntoskrnl but live in it, so the first module is frequently the wrong
 			//place to look. When the descriptor already named ntoskrnl there is no
 			//second module left to try, so that is simply the failure.
+
 			if (Module != Driver::ntoskrnlAddr) {
 				ImportLookup fallback = request;
 				fallback.module_base = Driver::ntoskrnlAddr;
 
 				if (resolver(fallback, context, resolved)) {
 					*current_function_data.address = resolved;
+
 					continue;
 				}
 			}
@@ -325,6 +345,7 @@ bool Mapper::ResolveImports(const PE::vec_imports& imports, ImportResolver resol
  * its first section - but everything that is written or freed uses realBase, so
  * the shifted base is only ever used to compute addresses.
  */
+
 ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 param2, bool free, bool destroyHeader, AllocationMode mode, bool PassAllocationAddressAsFirstParam, NTSTATUS* exitCode, SIZE_T* residentSize) {
 
 	if (!data || data_size == 0) {
@@ -344,6 +365,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 	//Every bound below is checked before it is used: the image is untrusted
 	//input, so SizeOfHeaders/section spans are validated against the allocation
 	//instead of being trusted.
+
 	if (image_size == 0 || nt_headers->OptionalHeader.SizeOfHeaders > image_size ||
 		nt_headers->OptionalHeader.SizeOfHeaders > data_size) {
 		Log(L"[-] Invalid image size in PE headers" << std::endl);
@@ -359,6 +381,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 	//the file controlled SizeOfOptionalHeader, so the check that proves the table
 	//fits inside the buffer is what the three loops below were relying on without
 	//making.
+
 	PIMAGE_SECTION_HEADER image_section = nullptr;
 	uint16_t section_count = 0;
 	if (!PE::GetSectionTable(data, data_size, image_section, section_count)) {
@@ -385,6 +408,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 	 * and far from its cause. The minimum is correct whatever order the table is
 	 * in, and costs one pass.
 	 */
+
 	DWORD TotalVirtualHeaderSize = image_section[0].VirtualAddress;
 	for (uint16_t i = 1; i < section_count; ++i) {
 		if (image_section[i].VirtualAddress < TotalVirtualHeaderSize)
@@ -404,9 +428,11 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 	}
 	else if (mode == AllocationMode::AllocateContiguous)
 	{
+
 		//Page aligned, so the image occupies whole pages: a driver that hides
 		//its own image page by page must not be handed a base that shares its
 		//first page with a POOL_HEADER.
+
 		kernel_image_base = Driver::AllocateContiguous(image_size);
 	}
 	else { // AllocatePool
@@ -450,6 +476,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 			//The image is untrusted input: the destination must stay inside the
 			//allocation we just made and the source inside the file buffer,
 			//otherwise the copy reads and writes out of bounds.
+
 			if (section_va > nt_headers->OptionalHeader.SizeOfImage ||
 				section_raw_size > nt_headers->OptionalHeader.SizeOfImage - section_va) {
 				Log(L"[-] Section " << Val(SectionName(&current_image_section[i])) << L" does not fit in the image, aborted" << std::endl);
@@ -499,7 +526,9 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 * case is an image that holds no absolute pointer into itself - and that is
 		 * checkable, so it is checked rather than assumed.
 		 */
+
 		if (relocations.empty()) {
+
 			/*
 			 * Say exactly what was checked.
 			 *
@@ -517,6 +546,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 			 * not where the image lands. Quoting it here named an address no
 			 * code pointer ends up at.
 			 */
+
 			if (!PE::VerifyNoAbsoluteReferences(local_image_base, nt_headers->OptionalHeader.SizeOfImage)) {
 				Log(L"[-] Refusing to map: the image keeps absolute pointers into itself and has no relocations to fix them" << std::endl);
 				kernel_image_base = realBase;
@@ -531,8 +561,10 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		if (!FixSecurityCookie(local_image_base, nt_headers->OptionalHeader.SizeOfImage, kernel_image_base))
 		{
 			Log(L"[-] Failed to fix cookie" << std::endl);
+
 			//Fall into the shared cleanup instead of returning: both the local
 			//image and the kernel allocation would otherwise leak.
+
 			kernel_image_base = realBase;
 			break;
 		}
@@ -562,9 +594,12 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		//because the provider cannot change protection on it; with independent
 		//pages each section gets the protection its characteristics ask for,
 		//which is closer to what the loader does.
+
 		if (mode == AllocationMode::AllocateIndependentPages)
 		{
+
 			//Used only to make the protection readable in the log below.
+
 			auto ProtectionToString = [](ULONG prot) -> const char* {
 				switch (prot)
 				{
@@ -592,6 +627,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 
 				//The section span is file controlled and has to lie inside the
 				//independent-pages allocation before its protection is changed.
+
 				if (secAddr < realBase || secSize > image_size ||
 					secAddr - realBase > image_size - secSize) {
 					Log(L"[-] Section " << Val(SectionName(sec)) << L" lies outside the allocation, skipping protection change" << std::endl);
@@ -619,12 +655,14 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 				<< std::endl);
 
 				if (!Driver::MmSetPageProtection(secAddr, secSize, prot)) {
+
 					//Counted, not just logged. A section that should be
 					//PAGE_EXECUTE_READ but stayed PAGE_READWRITE prints exactly one
 					//line and is then indistinguishable from every other section in
 					//the log, so a run where the protection call was unavailable
 					//across the board read as a clean success. The summary below
 					//says how many of them there were.
+
 					Log(L"[-] Failed to set protection for section: " << Val(SectionName(sec)) << std::endl);
 					++protection_failures;
 				}
@@ -642,6 +680,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 * Reached by hooking NtAddAtom (see Driver::CallKernelFunction), which
 		 * is why a failure here is reported rather than fatal.
 		 */
+
 		const ULONG64 address_of_entry_point = kernel_image_base + nt_headers->OptionalHeader.AddressOfEntryPoint;
 
 		/*
@@ -663,6 +702,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 * deliberately not released: the driver holds a reference to it for as
 		 * long as it is loaded, exactly like the image itself.
 		 */
+
 		ULONG64 driver_object = 0;
 		if (PassAllocationAddressAsFirstParam) {
 			Log(L"[INFO] Passing the allocation base as the first DriverEntry argument, as requested" << std::endl);
@@ -680,6 +720,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 			 * DriverEntry must actually receive the object, otherwise the
 			 * driver sees a null first argument and cannot record its range.
 			 */
+
 			param1 = driver_object;
 		}
 
@@ -692,12 +733,14 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 * labelled "DriverObject", because --PassAllocationPtr deliberately
 		 * passes something else and a fixed label would then name a null.
 		 */
+
 		LogBlank();
 		Log(L"[!] Calling DriverEntry | Entry " << Val(reinterpret_cast<void*>(address_of_entry_point))
 			<< L" | DriverEntry (" << Val(param1) << L", " << Val(param2) << L")" << std::endl);
 
 		NTSTATUS status = 0;
 		if (!Driver::CallKernelFunction(&status, address_of_entry_point, param1, param2)) {
+
 			/*
 			 * The hook never went in, so DriverEntry never executed. Nothing the
 			 * driver would have owned exists yet, so releasing both the image and
@@ -707,6 +750,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 			 * CallKernelFunction returns true the driver has run and holds
 			 * pointers into both, and no failure from here on may free them.
 			 */
+
 			Log(L"[-] Failed to call driver entry" << std::endl);
 
 			if (driver_object) {
@@ -725,6 +769,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 * return below regardless: a failed restore is an emergency to surface,
 		 * not a reason to release memory the driver is using.
 		 */
+
 		const bool hook_restored = Driver::RestoreSucceeded();
 
 		if (exitCode)
@@ -734,20 +779,29 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 
 		/*
 		 * DriverEntry reported a failure (e.g. 0xC035003C when the hypervisor is
-		 * already resident). Unwind: destroy the driver object here, and hand the
-		 * mapped image to the post-loop failure path (which resets
-		 * kernel_image_base to realBase and frees it for the active allocation
-		 * mode). Leaving both resident is the pool leak this fix removes.
+		 * already resident). The image is deliberately LEFT RESIDENT: once kernel
+		 * code has run it may have registered callbacks/timers/devices that point
+		 * back into the image, so freeing it here is a use-after-free. The
+		 * callback/timer safety gate already forces `free = false` for any image
+		 * importing such APIs, and the success path only frees when `free` is
+		 * true; this branch must honour the same decision. It used to break into
+		 * the unconditional post-loop free, which bypassed the gate and made the
+		 * "image left resident" verdict path unreachable.
+		 *
+		 * The fabricated driver object is ours and can be released: DriverEntry
+		 * failed, so the driver is not loaded. The real failure status is already
+		 * in *exitCode; return the base so the caller reports it as "mapped, but
+		 * DriverEntry failed" rather than "failed to map".
 		 */
-		if (status != 0) {
+
+		const bool driver_entry_failed = !NT_SUCCESS(status);
+		if (driver_entry_failed) {
 			Log(L"[-] DriverEntry returned " << Val(Hex(status))
-				<< L"; unwinding the mapped image and driver object" << std::endl);
+				<< L"; the image is left resident because kernel code has already run" << std::endl);
 			if (driver_object) {
 				Driver::DestroyDriverObjectForEntry(driver_object);
 				driver_object = 0;
 			}
-			kernel_image_base = realBase;
-			break;
 		}
 
 		if (!hook_restored)
@@ -757,7 +811,8 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		//Optional early release, --free. Only safe for drivers that have copied
 		//out everything they need, because the image becomes invalid as soon as
 		//DriverEntry returns.
-		if (free) {
+
+		if (free && !driver_entry_failed) {
 			LogBlank();
 			Log(L"[+] Freeing memory" << std::endl);
 			bool free_status = false;
@@ -792,18 +847,21 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 * but it used to be invisible, and a run that only prints "mapped
 		 * successfully" reads like nothing was left behind.
 		 */
+
 		LogBlank();
-		if (free) {
+		if (free && !driver_entry_failed) {
 			Log(L"[+] Image released (--free); only the driver object at "
 				<< Val(reinterpret_cast<void*>(driver_object))
 				<< L" remains, which the loaded driver still references" << std::endl);
 		}
 		else {
+
 			//Dot leaders, so the values line up under each other instead of sitting after
 			//labels of different widths. Each label is padded with dots to a fixed
 			//20 character field: "Image" is 5 so it takes 15, "Driver Object" is 13
 			//so it takes 7. Both fields are then the same width, so the two spaces
 			//that follow put both values in the same column.
+
 			Log(L"[+] Resident In Kernel Memory:" << std::endl);
 			LogBlank();
 			Log(L"      Image...............  " << Val(reinterpret_cast<void*>(realBase))
@@ -814,11 +872,13 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		LogBlank();
 
 		//Success: the driver is loaded. The user mode copy is no longer needed.
+
 		VirtualFree(local_image_base, 0, MEM_RELEASE);
 
 		//image_size was reduced by the stripped header span up front, so it is
 		//the exact byte range resident at realBase - the range a consumer must
 		//cover to reach the whole image and nothing past the allocation.
+
 		if (residentSize)
 			*residentSize = image_size;
 
@@ -829,6 +889,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 	//Every failure path above breaks out with kernel_image_base reset to realBase,
 	//so this release always frees the allocation itself and never the header
 	//shifted address.
+
 	VirtualFree(local_image_base, 0, MEM_RELEASE);
 
 	Log(L"[+] Freeing memory" << std::endl);

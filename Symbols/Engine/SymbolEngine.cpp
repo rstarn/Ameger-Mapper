@@ -32,6 +32,7 @@
 
 namespace
 {
+
 	/*
 	 * The dbghelp entry points this file uses, resolved once at first use.
 	 *
@@ -39,6 +40,7 @@ namespace
 	 * structures (SYMBOL_INFO_PACKAGEW, SYMSRV_INDEX_INFOW, IMAGE_DEBUG_TYPE)
 	 * that are passed across the boundary, only the calls go through pointers.
 	 */
+
 	struct DbgHelp
 	{
 		HMODULE module = nullptr;
@@ -51,11 +53,13 @@ namespace
 		BOOL(WINAPI* SymFindFileInPathW)(HANDLE, PCWSTR, PCWSTR, void*, DWORD, DWORD, DWORD, PWSTR, PSTR, PSTR) = nullptr;
 		BOOL(WINAPI* SymFromNameW)(HANDLE, PCWSTR, PSYMBOL_INFOW) = nullptr;
 		BOOL(WINAPI* SymGetTypeFromNameW)(HANDLE, DWORD64, PCWSTR, PSYMBOL_INFOW) = nullptr;
+
 		//IMAGE_DEBUG_TYPE and PMODLOAD_EXTRA_DATA are spelled as int / void*
 		//rather than by name: they are declared inside dbghelp.h's own guard
 		//and are not visible here, and a failed declaration collapses the whole
 		//prototype into a short one. Both are ABI-compatible (4 byte enum, and
 		//pointer) and every argument the call sites pass converts implicitly.
+
 		BOOL(WINAPI* SymGetTypeInfo)(HANDLE, DWORD64, ULONG, int, void*) = nullptr;
 		DWORD64(WINAPI* SymLoadModuleExW)(HANDLE, HMODULE, PCWSTR, PCWSTR, DWORD64, DWORD, void*, void*) = nullptr;
 		BOOL(WINAPI* SymUnloadModule64)(HANDLE, DWORD64) = nullptr;
@@ -85,13 +89,16 @@ namespace
 
 		//Locate the running executable's folder without pulling in Utilities,
 		//which this tool does not link.
+
 		static std::wstring ExeFolder() {
 			wchar_t buffer[MAX_PATH] = { 0 };
 			const DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+
 			/* A truncated path is not null-terminated: std::wstring(buffer)
 			 * would read past the array. GetModuleFileNameW returns nSize on
 			 * truncation, so only a length strictly less than the buffer is a
 			 * complete, terminated path. */
+
 			if (length == 0u || length >= MAX_PATH)
 				return {};
 			std::wstring path(buffer);
@@ -105,11 +112,13 @@ namespace
 				return false;
 
 			//Preferred: the DLLs subfolder, which is where the release ships them.
+
 			path = folder + L"\\" + kSymbolDllFolder + L"\\dbghelp.dll";
 			module = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 
 			//Fallback: next to the executable, for a developer layout that has
 			//not adopted the DLLs folder yet.
+
 			if (!module) {
 				path = folder + L"\\dbghelp.dll";
 				module = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
@@ -143,12 +152,14 @@ namespace
 
 namespace
 {
+
 	/*
 	 * The identity a debug file is indexed by on the symbol server: a GUID and
 	 * age when the file carries a GUID, otherwise the timestamp signature and
 	 * age. The same rule is applied to the binary and to a cached PDB so their
 	 * identities can be compared directly.
 	 */
+
 	struct DebugIdentity {
 		bool hasGuid = false;
 		GUID guid{};
@@ -189,6 +200,7 @@ namespace
  * out symbol resolution aborts for the whole run. The random component does not
  * make the path unguessable, it makes a pre-created one impossible to land.
  */
+
 std::wstring MakeTempSymbolStore() {
 	wchar_t tempRoot[MAX_PATH + 1] = { 0 };
 	if (!GetTempPathW(MAX_PATH, tempRoot))
@@ -196,6 +208,7 @@ std::wstring MakeTempSymbolStore() {
 
 	//Seeded once, like every other generator in this project. 64 bits of it; the
 	//whole value is rendered as hex so nothing here is short either.
+
 	static std::mt19937_64 engine{ std::random_device{}() };
 
 	for (int attempt = 0; attempt < 16; ++attempt) {
@@ -231,6 +244,7 @@ std::wstring MakeTempSymbolStore() {
  * An empty result means no symbols are available, which the caller treats as a
  * hard failure rather than continuing with a missing offset.
  */
+
 SymbolEngine::SymbolEngine(const std::wstring& cachePath) : cachePath(cachePath) {
 	process = (unsigned long long)GetCurrentProcess();
 
@@ -241,6 +255,7 @@ SymbolEngine::SymbolEngine(const std::wstring& cachePath) : cachePath(cachePath)
 	//No downstream store is given here on purpose: every download goes through
 	//GetPDB, which points SymFindFileInPathW at a temporary store so the flat
 	//cache folder is never rebuilt into a symstore tree.
+
 	const std::wstring searchPath = L"SRV*http://msdl.microsoft.com/download/symbols";
 	if (!dbg.SymInitializeW((HANDLE)process, searchPath.c_str(), FALSE))
 		Log(L"[-] SymInitializeW failed, error " << Val(GetLastError()) << std::endl);
@@ -256,6 +271,7 @@ SymbolEngine::~SymbolEngine() {
 std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 
 	//Resolved once; every call below goes through these pointers.
+
 	const auto& dbg = Dbg();
 	if (!dbg.module)
 		return {};
@@ -274,11 +290,13 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 	}
 
 	//The flat cache path this binary's PDB belongs at.
+
 	const std::wstring flatPath = cachePath + L"\\" + binaryInfo.pdbfile;
 	const DebugIdentity binaryIdentity = IdentityOf(binaryInfo);
 
 	//Cache hit: the flat PDB exists and its index belongs to this exact binary.
 	//A PDB whose index does not match is a miss, not a silent load.
+
 	if (std::filesystem::exists(flatPath)) {
 		SYMSRV_INDEX_INFOW cachedInfo{};
 		cachedInfo.sizeofstruct = sizeof(SYMSRV_INDEX_INFOW);
@@ -291,8 +309,10 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 
 	void* id;
 	DWORD idType;
+
 	//A binary with no GUID is identified by its signature and timestamp
 	//instead, which is what the classic PDB layout uses.
+
 	if (binaryInfo.guid == GUID{}) { // GUID is zeroed
 		id = &binaryInfo.sig;
 		idType = SSRVOPT_DWORDPTR;
@@ -304,6 +324,7 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 
 	//A private, throwaway store: symsrv writes the nested <name>\<GUID>\ layout
 	//and a pingme.txt there instead of under the flat cache folder.
+
 	const std::wstring tempStore = MakeTempSymbolStore();
 	if (tempStore.empty()) {
 		Log(L"[-] Could not create a temporary symbol store" << std::endl);
@@ -332,10 +353,12 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 	//symsrv.dll was loaded at all. A network outage, a 404 for a PDB Microsoft
 	//has not published, or a cache ACL problem all produced silence: no message
 	//and no file, and the caller reported only "no symbols available".
+
 	if (!found) {
 		Log(L"[-] SymFindFileInPathW could not retrieve " << Val(binaryInfo.pdbfile)
 			<< L", error " << Val(static_cast<unsigned long>(GetLastError())) << std::endl);
 	}
+
 	//Windows does not ship symsrv.dll and dbghelp loads it from its own folder.
 	//If it is not loaded after those calls, the DLLs folder is wrong or the file
 	//is not the one that was meant to be there - a different problem from the
@@ -346,12 +369,15 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 
 	std::wstring result;
 	if (!downloadedPath.empty()) {
+
 		//The flat cache folder may not exist yet on a first run.
+
 		std::error_code dirError;
 		std::filesystem::create_directories(cachePath, dirError);
 
 		//MOVEFILE_COPY_ALLOWED because %TEMP% and the cache folder can be on
 		//different volumes, where a plain rename cannot work.
+
 		if (MoveFileExW(downloadedPath.c_str(), flatPath.c_str(),
 			MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
 			Log(L"[+] Downloaded " << Val(binaryInfo.pdbfile) << L" to " << Val(flatPath) << std::endl);
@@ -365,6 +391,7 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 
 	//Remove the temporary store whatever happened: nothing of it may survive,
 	//least of all a pingme.txt or a GUID subfolder.
+
 	std::error_code removeError;
 	std::filesystem::remove_all(tempStore, removeError);
 
@@ -374,6 +401,7 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const std::vector<std::wstring>& symbolName) {
 
 	//Resolved once; every call below goes through these pointers.
+
 	const auto& dbg = Dbg();
 	if (!dbg.module)
 		return {};
@@ -382,6 +410,7 @@ std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const
 
 	//std::filesystem::file_size throws when the path does not exist, which
 	//would take the whole tool down instead of reporting the problem.
+
 	std::error_code fileSizeError;
 	const auto fileSize = std::filesystem::file_size(pdbPath, fileSizeError);
 	if (fileSizeError) {
@@ -395,6 +424,7 @@ std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const
 	//addresses dbghelp returns are offsets from that base and can be written
 	//straight into Offsets.ini. The loading line is printed by the caller, which
 	//reports every module together at the end instead of in resolution order.
+
 	DWORD64 ModBase = dbg.SymLoadModuleExW(
 		(HANDLE)process, // Process handle of the current process
 		NULL,                // Handle to the module's image file (not needed)
@@ -435,6 +465,7 @@ std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const
 		//Symbol offsets are relative to the module base, which can exceed 32
 		//bits, so they are kept at full width. The caller prints them, in a
 		//fixed order, once every module has resolved.
+
 		const uint64_t offset = SymInfoPackage.si.Address - ModBase;
 		offsets.push_back(offset);
 	}
@@ -446,11 +477,13 @@ std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const
 
 namespace
 {
+
 	/*
 	 * Upper bound on the members a type may declare before this file stops
 	 * enumerating it. Used where the count comes out of the PDB and sizes an
 	 * allocation directly; see the use below.
 	 */
+
 	constexpr DWORD kMaxTypeChildren = 0x10000;
 }
 
@@ -469,13 +502,17 @@ namespace
 // actually matched, because it can differ from the requested one.
 //
 // Silent on failure: the caller reports it, so this stays usable as a predicate.
+
 static bool GetFieldOffsetInternal(HANDLE hProcess, ULONG64 ModBase, const std::wstring& structName, const std::wstring& fieldName, ULONG64& outOffset, std::wstring& matchedName) {
 
 	//Resolved once; every call below goes through these pointers.
+
 	const auto& dbg = Dbg();
 	if (!dbg.module)
 		return false;
+
 	//Fallback spellings for the types this project cares about.
+
 	static const std::vector<std::wstring> alternateNames = {
 		L"_PiDDBCacheEntry", L"PiDDBCacheEntry", L"_PIDDBCACHE_ENTRY", L"_PIDDB_CACHE_ENTRY",
 		L"_HashBucketEntry", L"HashBucketEntry", L"_HASHBUCKET_ENTRY",
@@ -501,6 +538,7 @@ static bool GetFieldOffsetInternal(HANDLE hProcess, ULONG64 ModBase, const std::
 
 //Members have to be enumerated before their offsets can be read;
 		//SymGetTypeInfo has no "find a member by name" call.
+
 		DWORD childrenCount = 0;
 		if (!dbg.SymGetTypeInfo(hProcess, ModBase, typeIndex, TI_GET_CHILDRENCOUNT, &childrenCount) || !childrenCount)
 			continue;
@@ -515,6 +553,7 @@ static bool GetFieldOffsetInternal(HANDLE hProcess, ULONG64 ModBase, const std::
 		 * resolves against; treating it as a miss costs the field, and refusing
 		 * to allocate costs nothing.
 		 */
+
 		if (childrenCount > kMaxTypeChildren) {
 			Log(L"[!] " << Val(structName) << L" reports " << Val(childrenCount)
 				<< L" members, above the supported maximum; skipping it" << std::endl);
@@ -557,6 +596,7 @@ static bool GetFieldOffsetInternal(HANDLE hProcess, ULONG64 ModBase, const std::
 std::vector<SymbolEngine::FieldResult> SymbolEngine::GetStructFieldOffsets(const std::wstring& pdbPath, const std::vector<FieldRequest>& fields) {
 
 	//Resolved once; every call below goes through these pointers.
+
 	const auto& dbg = Dbg();
 	if (!dbg.module)
 		return {};
@@ -597,12 +637,15 @@ std::vector<SymbolEngine::FieldResult> SymbolEngine::GetStructFieldOffsets(const
 		//how to report it, based on the request's optional flag. Reporting used
 		//to happen here, which is why the field block landed in the middle of
 		//the console report.
+
 		FieldResult result{};
 		std::wstring matchedName;
 		if (GetFieldOffsetInternal((HANDLE)process, ModBase, structName, fieldName, result.offset, matchedName)) {
+
 			//Set even when the offset is 0: that is how the caller tells a field
 			//that legitimately sits at the start of the struct from one that was
 			//not found.
+
 			result.matchedName = matchedName;
 		}
 

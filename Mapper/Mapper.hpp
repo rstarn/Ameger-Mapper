@@ -18,8 +18,10 @@
 
 namespace Mapper
 {
+
 	//One import being resolved, handed to an ImportResolver.
 	//name is null when the import is by ordinal rather than by name.
+
 	struct ImportLookup {
 		ULONG64 module_base;
 		const std::string* name;
@@ -29,13 +31,18 @@ namespace Mapper
 	//Resolves one import to a kernel address, written to out_address.
 	//Returns false when the named function, or the ordinal, is not present in
 	//the module the descriptor named. out_address is only written on success.
+
 	typedef bool (*ImportResolver)(const ImportLookup& request, void* context, ULONG64& out_address);
+
 	//Where the kernel side of the image is allocated.
+
 	enum class AllocationMode
 	{
+
 		//Single nonpaged pool block holding the whole image. The allocation
 		//stays RWX for the lifetime of the mapping: the provider cannot apply
 		//per section protection to a pool block.
+
 		AllocatePool,
 
 		//One page aligned, physically contiguous block for the whole image.
@@ -43,11 +50,13 @@ namespace Mapper
 		//is page aligned: a driver that blanks whole pages of its own image
 		//(memhv's self-hide) must not touch the pool header in front of the
 		//allocation or the block that follows it. This is the default.
+
 		AllocateContiguous,
 
 		//One independent-page allocation per section, so each section can be
 		//given its own protection through MmSetPageProtection after the copy.
 		//Closer to how the loader maps a driver, but requires that export.
+
 		AllocateIndependentPages
 	};
 
@@ -76,6 +85,7 @@ namespace Mapper
 	 * is released before returning.
 	 */
 	//Note: if you set PassAllocationAddressAsFirstParam as true, param1 will be ignored
+
 	ULONG64 MapDriver(BYTE* data, size_t data_size, ULONG64 param1 = 0, ULONG64 param2 = 0, bool free = false, bool destroyHeader = true, AllocationMode mode = AllocationMode::AllocateContiguous, bool PassAllocationAddressAsFirstParam = false, NTSTATUS* exitCode = nullptr, SIZE_T* residentSize = nullptr);
 
 	/*
@@ -95,14 +105,17 @@ namespace Mapper
 	//Applies DIR64 fixups by delta inside [image_base, image_base+image_size).
 	//Returns false on an unsupported relocation type or a target outside the
 	//image, in both cases having applied nothing further.
+
 	bool RelocateImageByDelta(const PE::vec_relocs& relocs, ULONG64 delta, ULONG64 image_base, ULONG64 image_size);
 
 	//Rewrites /GS security cookie so it matches the base the image runs at.
 	//Returns false only when the headers themselves cannot be read; a missing
 	//load config, a zero cookie and a cookie outside the image are all "nothing
 	//to fix", not failures.
+
 	bool FixSecurityCookie(void* local_image, size_t image_size, ULONG64 kernel_image_base);
 
 	//Fills every IAT slot. Returns false on the first unresolvable import.
+
 	bool ResolveImports(const PE::vec_imports& imports, ImportResolver resolver, void* context);
 }

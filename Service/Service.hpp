@@ -5,6 +5,7 @@
 
 namespace Service
 {
+
 	/*
 	 * Register the provider as a kernel service and load it.
 	 *
@@ -17,6 +18,7 @@ namespace Service
 	 * Returns STATUS_IMAGE_CERT_REVOKED when the vulnerable driver blocklist is
 	 * enabled, STATUS_ACCESS_DENIED when something blocked the load.
 	 */
+
 	NTSTATUS RegisterAndStart(const std::wstring& driver_path, const std::wstring& serviceName);
 
 	/*
@@ -28,5 +30,6 @@ namespace Service
 	 * because a still loaded driver with no service key is a state the kernel
 	 * reports differently and is worth surfacing.
 	 */
+
 	NTSTATUS StopAndRemove(const std::wstring& serviceName);
 }

@@ -18,6 +18,7 @@
 
 #include <Windows.h>
 #include <psapi.h>
+#include <algorithm>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -62,6 +63,7 @@
  * actually running. The value gates a kernel call whose prototype changed in
  * 24H2, so it has to be the real build.
  */
+
 extern "C" NTSTATUS NTAPI RtlGetVersion(PRTL_OSVERSIONINFOW version_information);
 
 /*
@@ -69,13 +71,16 @@ extern "C" NTSTATUS NTAPI RtlGetVersion(PRTL_OSVERSIONINFOW version_information)
  * SymbolTool so both programs print the same way: two-space indent, coloured
  * leading tags and green values, all inert under AMEGER_NO_COLOR=1.
  */
+
 namespace
 {
+
 	/*
 	 * Symbolic name for the NTSTATUS values a DriverEntry is likely to return,
 	 * so a failed run reads as something other than a bare number. Codes not
 	 * listed here still print their hex value; only the name is generic.
 	 */
+
 	const wchar_t* StatusName(NTSTATUS status) {
 		switch (status) {
 		case STATUS_SUCCESS:                  return L"STATUS_SUCCESS";
@@ -89,12 +94,14 @@ namespace
 		case STATUS_OBJECT_NAME_COLLISION:    return L"STATUS_OBJECT_NAME_COLLISION";
 		case STATUS_INVALID_IMAGE_FORMAT:     return L"STATUS_INVALID_IMAGE_FORMAT";
 		case STATUS_PRIVILEGE_NOT_HELD:       return L"STATUS_PRIVILEGE_NOT_HELD";
+
 		//0xC0000096 is a privileged instruction executed in user mode
 		//(RDMSR/WRMSR/HLT/CLI/IN/OUT), not a stack overrun. The stack overrun
 		//is 0xC0000409; conflating the two is what made a ring-3 RDMSR look
 		//like a /GS canary failure.
 		case STATUS_PRIVILEGED_INSTRUCTION:   return L"STATUS_PRIVILEGED_INSTRUCTION";
 		case STATUS_STACK_BUFFER_OVERRUN:     return L"STATUS_STACK_BUFFER_OVERRUN";
+
 		//The hypervisor's CheckSupport() refuses to launch and reports this
 		//custom code instead of a standard NTSTATUS. It means the AMD SVM
 		//support gate failed - most often a stale resident hypervisor
@@ -114,6 +121,7 @@ namespace
 	//wmain's. The 0xC0000096 this split was blamed for is
 	//STATUS_PRIVILEGED_INSTRUCTION (a ring-3 RDMSR), not a /GS stack overrun;
 	//the split is kept because it still keeps wmain's frame small.
+
 	__declspec(noinline)
 	DWORD RunningBuildNumber() {
 		RTL_OSVERSIONINFOW version = {};
@@ -142,6 +150,7 @@ namespace
 	 * 0x3B with the fault in the vulnerable provider, not in the mapped driver.
 	 * There is no guest-side bypass - HVCI has to be off.
 	 */
+
 	constexpr ULONG kCodeIntegrityHvciKmciEnabled = 0x0400;
 	constexpr ULONG kCodeIntegrityHvciKmciAuditMode = 0x0800;
 	constexpr ULONG kCodeIntegrityHvciKmciStrictMode = 0x1000;
@@ -155,6 +164,7 @@ namespace
 	// Returns true when HVCI is enforced OR when the state cannot be determined.
 	// This gate prevents a guaranteed 0x3B bugcheck, so an unknown state must be
 	// treated as unsafe rather than silently allowing the write.
+
 	bool HvciIsEnforced(bool* queryFailed = nullptr) {
 		CodeIntegrityInformation info = {};
 		info.Length = sizeof(info);
@@ -168,6 +178,7 @@ namespace
 		if (queryFailed) *queryFailed = false;
 
 		//Audit mode alone does not block writes, so it is not part of the test.
+
 		const ULONG enforcing = kCodeIntegrityHvciKmciEnabled |
 			kCodeIntegrityHvciKmciStrictMode |
 			kCodeIntegrityHvciIumEnabled;
@@ -176,6 +187,7 @@ namespace
 	}
 
 	//Trim ASCII whitespace from both ends of a string.
+
 	std::wstring TrimWhitespace(const std::wstring& text) {
 		static const wchar_t* whitespace = L" \t\r\n\f\v";
 		const size_t first = text.find_first_not_of(whitespace);
@@ -187,6 +199,7 @@ namespace
 
 	//Normalise typed or pasted input: trim whitespace, drop the surrounding
 	//quotes Windows drag-and-drop inserts, and resolve to an absolute path.
+
 	std::wstring SanitizeDriverPath(std::wstring line) {
 		line = TrimWhitespace(line);
 		if (line.size() >= 2 && line.front() == L'"' && line.back() == L'"')
@@ -205,6 +218,7 @@ namespace
 	//Group a byte count with thousands separators: 3072 -> "3,072". Built by
 	//hand rather than with a locale facet so the summary reads the same on every
 	//machine the mapper runs on.
+
 	std::wstring GroupThousands(uint64_t value) {
 		const std::wstring digits = std::to_wstring(value);
 		std::wstring grouped;
@@ -219,6 +233,7 @@ namespace
 
 	//Human readable size for the summary, always in KB or MB so it lines up
 	//next to the exact byte count.
+
 	std::wstring HumanReadableSize(uint64_t bytes) {
 		std::wostringstream stream;
 		stream << std::fixed << std::setprecision(2);
@@ -237,11 +252,13 @@ namespace
 	 * operator question, the abort messages, or the hide warnings, because those
 	 * are the output the operator acts on.
 	 */
+
 	bool g_silent = false;
 
 	//Lowercase hex SHA-256 of a byte buffer, via CNG. Returns "unavailable"
 	//rather than failing the run when the provider cannot be opened, which only
 	//happens on a system with no CNG at all.
+
 	std::wstring Sha256Hex(const std::vector<BYTE>& data) {
 		BCRYPT_ALG_HANDLE algorithm = nullptr;
 		if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)
@@ -285,6 +302,7 @@ namespace
 	//Authenticode status through WinVerifyTrust. A present but untrusted or
 	//expired chain is reported with its status code rather than as "signed", so
 	//the summary never claims more than the trust engine verified.
+
 	std::wstring SignatureStatus(const std::wstring& path) {
 		WINTRUST_FILE_INFO file_info = {};
 		file_info.cbStruct = sizeof(file_info);
@@ -302,6 +320,7 @@ namespace
 		const LONG status = WinVerifyTrust(nullptr, &policy, &trust_data);
 
 		//Release the state WinVerifyTrust allocated for this check.
+
 		trust_data.dwStateAction = WTD_STATEACTION_CLOSE;
 		WinVerifyTrust(nullptr, &policy, &trust_data);
 
@@ -331,6 +350,7 @@ namespace
 	 * be mapped, so the caller refuses it rather than handing it to the mapper.
 	 * Everything here runs in user mode, before the provider is loaded.
 	 */
+
 	bool DescribeDriverImage(const std::wstring& path, std::vector<BYTE>* out_image) {
 		std::vector<BYTE> image;
 		if (!Utilities::ReadFileToMemory(path, &image) || image.empty()) {
@@ -349,6 +369,7 @@ namespace
 		//any section below is read. This is the same check the mapper makes
 		//through PE::GetSectionTable, so a file that summarises cleanly here is
 		//also a file the mapper can walk.
+
 		PIMAGE_SECTION_HEADER section = nullptr;
 		uint16_t section_count = 0;
 		if (!PE::GetSectionTable(image.data(), image.size(), section, section_count)) {
@@ -403,8 +424,10 @@ namespace
 
 		std::wstring sections;
 		for (uint16_t i = 0; i < section_count; ++i) {
+
 			//The name is an 8 byte field that is not null terminated when it uses
 			//all eight bytes, so it is copied into a wider buffer first.
+
 			char name[IMAGE_SIZEOF_SHORT_NAME + 1] = { 0 };
 			std::memcpy(name, section[i].Name, IMAGE_SIZEOF_SHORT_NAME);
 			if (!sections.empty())
@@ -422,6 +445,7 @@ namespace
 
 		//Hand back the bytes that were just summarised. The mapper maps these,
 		//never a later re-read of the same path.
+
 		if (out_image)
 			*out_image = std::move(image);
 
@@ -442,9 +466,12 @@ namespace
 	 * out_image receives the validated bytes, the same ones DescribeDriverImage
 	 * summarised.
 	 */
+
 	std::wstring PromptForDriverPath(std::vector<BYTE>* out_image) {
 		for (;;) {
+
 			//Prompt immediately without extra spacing.
+
 			LogRaw(L"Driver path: ");
 
 			std::wstring line;
@@ -458,6 +485,7 @@ namespace
 				continue;
 
 			//Separate the echoed input from the summary that follows it.
+
 			LogBlank();
 
 			std::error_code ec;
@@ -472,8 +500,10 @@ namespace
 			if (_wcsicmp(std::filesystem::path(path).extension().c_str(), L".sys") != 0) {
 				Log(L"[INFO] Warning: \"" << Val(path) << L"\" does not have a .sys extension" << std::endl);
 			}
+
 			//The file is readable and is a regular file: summarise it. A file
 			//that is not a PE image can never be mapped, so that re-prompts too.
+
 			if (!DescribeDriverImage(path, out_image))
 				continue;
 			return path;
@@ -488,6 +518,7 @@ namespace
 	 * Returns true ONLY when the PE parses cleanly AND no dangerous imports
 	 * found. Any ambiguity => false (do not free).
 	 */
+
 	bool CheckCallbackSafetyGate(const std::vector<uint8_t>& image) {
 		static const char* dangerous[] = {
 			"PsSetCreateProcessNotifyRoutine",
@@ -516,6 +547,7 @@ namespace
 
 		// The section table that rva_to_off walks must itself fit in the image;
 		// an unchecked NumberOfSections would walk past the buffer.
+
 		const uint8_t* const sectionTable =
 			reinterpret_cast<const uint8_t*>(IMAGE_FIRST_SECTION(nt));
 		if (sectionTable < image.data() || sectionTable > image.data() + image.size())
@@ -528,24 +560,29 @@ namespace
 		const auto& dir = nt->OptionalHeader
 			.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
 		if (dir.VirtualAddress == 0 || dir.Size == 0) {
+
 			// No imports at all — highly suspicious for a kernel driver.
+
 			return false;
 		}
 
 		// Convert RVA to file offset via section table. The section bounds are
 		// widened to 64 bits before addition so a large section cannot wrap and
 		// make an out-of-range RVA look valid.
+
 		auto rva_to_off = [&](DWORD rva) -> size_t {
 			auto* sec = IMAGE_FIRST_SECTION(nt);
 			for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
 				const uint64_t va = sec[i].VirtualAddress;
 				const uint64_t span = sec[i].SizeOfRawData;
 				if (rva >= va && (uint64_t)rva < va + span) {
+
 					/* Widen BEFORE adding: PointerToRawData and the RVA delta
 					 * are both DWORDs, so adding them in 32 bits can wrap a
 					 * hostile near-0xFFFFFFFF PointerToRawData into a small,
 					 * in-bounds offset that passes fits() and makes this gate
 					 * read the wrong part of the file. */
+
 					const uint64_t offset = (uint64_t)sec[i].PointerToRawData +
 					                        (uint64_t)(rva - sec[i].VirtualAddress);
 					return offset > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)offset;
@@ -554,7 +591,9 @@ namespace
 			return SIZE_MAX;
 		};
 		const uint8_t* const img_begin = image.data();
+
 		// True when [off, off+len) lies wholly inside the image.
+
 		auto fits = [&](size_t off, size_t len) -> bool {
 			return off <= image.size() && len <= image.size() - off;
 		};
@@ -565,6 +604,7 @@ namespace
 
 		// Walk each import descriptor. Check the CURRENT descriptor fits before
 		// reading it, and stop only at the terminating all-zero descriptor.
+
 		for (;;) {
 			if (!fits(impOff, sizeof(IMAGE_IMPORT_DESCRIPTOR)))
 				return false;
@@ -576,6 +616,7 @@ namespace
 			if (off == SIZE_MAX || !fits(off, 2)) return false;
 
 			// Walk the ILT (OriginalFirstThunk or FirstThunk)
+
 			DWORD thunkRva = imp->OriginalFirstThunk
 				? imp->OriginalFirstThunk
 				: imp->FirstThunk;
@@ -591,7 +632,9 @@ namespace
 				uint64_t slot = thunk->u1.AddressOfData;
 				if (slot == 0)
 					break; // null terminator
+
 				// Skip ordinal imports
+
 				if (!(slot & IMAGE_ORDINAL_FLAG64)) {
 					if (slot > 0xFFFFFFFFull) return false; // RVA is 32-bit
 					size_t nameOff = rva_to_off((DWORD)slot);
@@ -600,14 +643,18 @@ namespace
 					auto* ibn = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(
 						img_begin + nameOff);
 					const char* name = (const char*)ibn->Name;
+
 					// Require a NUL terminator inside the image before strcmp.
+
 					const size_t nameStart = nameOff + offsetof(IMAGE_IMPORT_BY_NAME, Name);
 					if (nameStart >= image.size()) return false;
 					if (memchr(img_begin + nameStart, 0, image.size() - nameStart) == nullptr)
 						return false;
 					for (int k = 0; dangerous[k]; k++) {
 						if (strcmp(name, dangerous[k]) == 0) {
+
 							// Detected a callback/timer import — refuse to free
+
 							return false;
 						}
 					}
@@ -617,7 +664,9 @@ namespace
 			}
 			impOff += sizeof(IMAGE_IMPORT_DESCRIPTOR);
 		}
+
 		// No dangerous imports found — safe to free
+
 		return true;
 	}
 
@@ -636,14 +685,19 @@ namespace
 	 * keep running, so freeing its image is only safe for one that will not
 	 * execute in guest mode again.
 	 */
+
 	int PromptIsHypervisor() {
+
 		//Prompt immediately after probe output without extra spacing.
+
 		LogRaw(L"Is the driver a Hypervisor? [Y/N]: ");
 
 		for (;;) {
 			std::wstring line;
 			if (!std::getline(std::wcin, line)) {
+
 				//No console: a pipe or closed stdin, so nothing can be asked.
+
 				LogBlank();
 				return -1;
 			}
@@ -653,6 +707,7 @@ namespace
 				++p;
 
 			//Anything other than y or n (including an empty answer) re-prompts.
+
 			if (*p != L'y' && *p != L'Y' && *p != L'n' && *p != L'N') {
 				Log(L"[-] Answer with y or n" << std::endl);
 				continue;
@@ -668,6 +723,7 @@ namespace
 	 * that cannot be determined, or one of 26100+, returns false and the
 	 * contiguous allocation path is used instead.
 	 */
+
 	bool IndPagesAvailable() {
 		const DWORD build = RunningBuildNumber();
 		return build != 0 && build < 26100;
@@ -682,6 +738,7 @@ namespace
  * a real console; a pipe, a redirected file or a closed stdin returns from it
  * at once, so a script or CI run is never left hanging.
  */
+
 void PauseBeforeExit() {
 	LogBlank();
 	Log(L"Press Enter to exit..." << std::endl);
@@ -696,6 +753,7 @@ void PauseBeforeExit() {
 
 //What the crash-time module walk found. Plain data, so the walk that fills it
 //can run inside __try.
+
 struct FaultingModule
 {
 	uint64_t base;
@@ -722,6 +780,7 @@ struct FaultingModule
  *
  * Returns false when no module contains the address.
  */
+
 bool FindFaultingModule(const void* address, FaultingModule* out_module)
 {
 	out_module->base = 0;
@@ -737,7 +796,15 @@ bool FindFaultingModule(const void* address, FaultingModule* out_module)
 		DWORD needed = 0;
 		if (EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), &needed))
 		{
-			for (DWORD i = 0; i < needed / sizeof(HMODULE) && !found; ++i)
+
+			/* EnumProcessModules reports the REQUIRED byte count in `needed`,
+			 * which can exceed the buffer when more than 512 modules are loaded.
+			 * Clamp the walk to what was actually delivered or the loop reads
+			 * modules[512+] off the stack. */
+
+			const DWORD delivered = (std::min)(static_cast<DWORD>(needed / sizeof(HMODULE)),
+			                                  static_cast<DWORD>(sizeof(modules) / sizeof(HMODULE)));
+			for (DWORD i = 0; i < delivered && !found; ++i)
 			{
 				const uint64_t base = reinterpret_cast<uint64_t>(modules[i]);
 				const auto* dos = reinterpret_cast<const PIMAGE_DOS_HEADER>(base);
@@ -747,6 +814,7 @@ bool FindFaultingModule(const void* address, FaultingModule* out_module)
 				//e_lfanew is read out of the mapped image and is the only field
 				//that can point this walk outside it. A loaded image keeps its
 				//NT headers in the first page.
+
 				if (static_cast<uint64_t>(dos->e_lfanew) + sizeof(IMAGE_NT_HEADERS64) > 0x1000)
 					continue;
 
@@ -780,6 +848,7 @@ bool FindFaultingModule(const void* address, FaultingModule* out_module)
  * provider loaded would keep whatever state it created alive, so the handler
  * unloads before letting the process die.
  */
+
 LONG WINAPI SimplestCrashHandler(EXCEPTION_POINTERS* ExceptionInfo)
 {
 	if (ExceptionInfo && ExceptionInfo->ExceptionRecord)
@@ -792,17 +861,21 @@ LONG WINAPI SimplestCrashHandler(EXCEPTION_POINTERS* ExceptionInfo)
 		//alone does not say what it means: it is a privileged instruction
 		//(RDMSR/WRMSR/HLT/CLI/IN/OUT) executed in user mode, which a ring-3
 		//binary raises the moment it touches one.
+
 		if (rec->ExceptionCode == 0xC0000096)
 			Log(L"[!!] STATUS_PRIVILEGED_INSTRUCTION: a ring 0 instruction (RDMSR/WRMSR/HLT/CLI/IN/OUT) ran in user mode" << std::endl);
 
 		//Name the module that contains the faulting address from its mapped
 		//headers, so the crash resolves to a function in that module's PDB
 		//instead of an anonymous address.
+
 		FaultingModule module = {};
 		if (FindFaultingModule(rec->ExceptionAddress, &module)) {
+
 			//Derive the module name from the path rather than a second
 			//module-name API (the SDK's GetModuleBaseNameA maps to a 4-arg
 			//k32 variant here).
+
 			const std::wstring modName = std::filesystem::path(module.name).filename().wstring();
 			Log(L"[!!] Faulting module: " << Val(modName)
 				<< L" | base " << Val(Hex(module.base))
@@ -819,6 +892,7 @@ LONG WINAPI SimplestCrashHandler(EXCEPTION_POINTERS* ExceptionInfo)
 	//Returning EXCEPTION_EXECUTE_HANDLER terminates the process instead of
 	//resuming the faulting code, so the wait has to happen here rather than on
 	//the wmain exit path.
+
 	PauseBeforeExit();
 
 	return EXCEPTION_EXECUTE_HANDLER;
@@ -829,6 +903,7 @@ LONG WINAPI SimplestCrashHandler(EXCEPTION_POINTERS* ExceptionInfo)
 //help text both work. A single leading dash is deliberately not one of them:
 //Windows convention reserves -flag for a POSIX tool, which this is not, and
 //accepting it silently would make a mistyped -free run with the flag ignored.
+
 int paramExists(const int argc, wchar_t** argv, const wchar_t* param) {
 	size_t plen = wcslen(param);
 	for (int i = 1; i < argc; i++) {
@@ -846,12 +921,15 @@ int paramExists(const int argc, wchar_t** argv, const wchar_t* param) {
 //driver path. Only --offsetsPath takes a separate value today, but this is a
 //property of the argument list and is asked here rather than duplicated at each
 //place that walks it.
+
 static bool IsOptionValue(const int argc, wchar_t** argv, int i) {
 	if (i < 1 || i >= argc)
 		return false;
+
 	// An option's value is the argument immediately after ANY occurrence of that
 	// option. Checking only the first occurrence (paramExists) let a repeated
 	// --offsetsPath's value be mistaken for the driver path.
+
 	const wchar_t* prev = argv[i - 1];
 	if (wcslen(prev) < 2ull)
 		return false;
@@ -867,8 +945,6 @@ static bool IsOptionValue(const int argc, wchar_t** argv, int i) {
 	return _wcsicmp(name, L"offsetsPath") == 0 ||
 	       _wcsicmp(name, L"probe-context") == 0;
 }
-
-
 
 void help() {
 	LogBlank();
@@ -916,6 +992,7 @@ void help() {
  */
 //noinline: keep this helper's frame separate from wmain's. The 0xC0000096 it
 //was split out for is STATUS_PRIVILEGED_INSTRUCTION, not a stack overrun.
+
 __declspec(noinline)
 bool ApplyHypervisorHide(bool hide, ULONG64 text_base, SIZE_T text_size) {
 	bool hide_ok = !hide;
@@ -946,6 +1023,7 @@ bool ApplyHypervisorHide(bool hide, ULONG64 text_base, SIZE_T text_size) {
 			 * the whole resident range, executable span included, which is the
 			 * exact livelock ProtectSelf is being given the span to avoid.
 			 */
+
 			if (!Hypervisor::Protect(text_base, text_size)) {
 				Log(L"[-] Hypervisor self-hide failed" << std::endl);
 				hide_ok = false;
@@ -960,6 +1038,7 @@ bool ApplyHypervisorHide(bool hide, ULONG64 text_base, SIZE_T text_size) {
 			}
 
 			// Publish the NPT rewrites to every CPU.
+
 			LogBlank();
 			if (!Hypervisor::FlushAllProcessors()) {
 				Log(L"[!] Not every processor confirmed the NPT flush" << std::endl);
@@ -986,6 +1065,7 @@ bool ApplyHypervisorHide(bool hide, ULONG64 text_base, SIZE_T text_size) {
  */
 //Forward declaration: ComputeExecutableSpan is defined later in this file,
 //after wmain, so RunMapAndHide needs it declared before use.
+
 __declspec(noinline)
 void ComputeExecutableSpan(BYTE* image, size_t image_size, bool copyHeader,
                            ULONG64 resident_base, SIZE_T resident_size,
@@ -1058,13 +1138,16 @@ bool RunMapAndHide(std::vector<BYTE>& raw_image, const std::wstring& driver_path
  */
 //noinline: keep this helper's frame separate from wmain's. The 0xC0000096 it
 //was split out for is STATUS_PRIVILEGED_INSTRUCTION, not a stack overrun.
+
 __declspec(noinline)
 bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree, bool& indPagesMode,
                        bool forceFreeAllowed, bool forceAsk, const std::vector<uint8_t>& image) {
+
 	//Scatter the allocation across independent pages whenever this build
 	//allows it: a discontiguous physical run is harder to fingerprint than a
 	//contiguous blob. On a build where MmAllocateIndependentPagesEx changed
 	//(26100+) it falls back to contiguous with a note instead of aborting.
+
 	auto enableIndPages = []() {
 		if (IndPagesAvailable()) {
 			if (!g_silent)
@@ -1078,12 +1161,15 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 
 	// --hide was given, so the operator already decided. The allocation shape
 	// follows the NPT hide routine's range support, not the driver.
+
 	if (hide) {
+
 		/* NPT hide keeps the image resident: the hidden physical pages ARE the
 		 * allocation being hidden in the nested page table. Releasing it with
 		 * --free (even --force-free) would free the very pages under the EPT/NPT
 		 * hide and hang the machine. Freeing is incompatible with hiding, so
 		 * force it off here. */
+
 		free = false;
 		forceFree = false;
 		copyHeader = true;
@@ -1103,6 +1189,7 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 	// --free was given, so the operator already decided. forceFree survives only
 	// if --force-free was also given and the callback gate let it through.
 	// Layer 1: NEVER enable free when the gate refuses callback/timer APIs.
+
 	if (free) {
 		if (!forceFreeAllowed) {
 			free = false;
@@ -1133,6 +1220,7 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 	// needs a console to ask on. A redirected stdin is not a console, so the
 	// question is unreachable from a script unless --developer --force-ask was
 	// given; that pair exists to make this branch testable, nothing else.
+
 	HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
 	DWORD mode = 0;
 	const bool console_attached = (input != INVALID_HANDLE_VALUE && input != nullptr && GetConsoleMode(input, &mode));
@@ -1160,8 +1248,10 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 		}
 		break;
 	case 0: // Operator says non-hypervisor (prompt answer N)
+
 		// 17p: Do NOT trust the prompt answer. Consult the callback/timer gate
 		// BEFORE allowing free, and never set free=true when the gate refuses.
+
 		if (!forceFreeAllowed) {
 			free = false;
 			forceFree = false;
@@ -1171,8 +1261,10 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 				Log(L"[!] The image will remain resident regardless of prompt answer." << std::endl);
 			}
 		} else {
+
 			// 17p belt-and-suspenders: re-parse PE imports (fail-closed) in case
 			// forceFreeAllowed was stale or a prior gate path false-positived.
+
 			if (!CheckCallbackSafetyGate(image)) {
 				free = false;
 				forceFree = false;
@@ -1193,7 +1285,9 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 		}
 		if (enableIndPages())
 			indPagesMode = true;
+
 		/* 17p belt-and-suspenders: gate refusal is absolute. */
+
 		if (!forceFreeAllowed || !CheckCallbackSafetyGate(image)) { free = false; forceFree = false; }
 		break;
 	default: // Operator input ended
@@ -1230,6 +1324,7 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
  */
 //noinline: keep this helper's frame separate from wmain's. The 0xC0000096 it
 //was split out for is STATUS_PRIVILEGED_INSTRUCTION, not a stack overrun.
+
 __declspec(noinline)
 void ComputeExecutableSpan(BYTE* image, size_t image_size, bool copyHeader,
                            ULONG64 resident_base, SIZE_T resident_size,
@@ -1256,6 +1351,7 @@ void ComputeExecutableSpan(BYTE* image, size_t image_size, bool copyHeader,
 
 			//Widened before the add: both fields are file controlled 32-bit
 			//values whose sum can wrap in 32 bits.
+
 			const ULONG64 section_end = static_cast<ULONG64>(section->VirtualAddress) + section->Misc.VirtualSize;
 
 			if (!text_found || section->VirtualAddress < text_rva)
@@ -1278,9 +1374,11 @@ void ComputeExecutableSpan(BYTE* image, size_t image_size, bool copyHeader,
 				Log(L"[!] Executable span starts outside the resident image; the whole image will be hidden" << std::endl);
 			}
 			else {
+
 				//Clamped to what was allocated: the span comes from the file
 				//and the size from the headers, and the range handed to the
 				//driver has to stay inside the resident image.
+
 				const ULONG64 available = resident_size - offset;
 				*text_base = resident_base + offset;
 				*text_size = static_cast<SIZE_T>(span < available ? span : available);
@@ -1302,6 +1400,7 @@ void ComputeExecutableSpan(BYTE* image, size_t image_size, bool copyHeader,
  * The 0xC0000096 it was split out for is STATUS_PRIVILEGED_INSTRUCTION (a ring 3
  * RDMSR), not a /GS stack overrun, so the split is not what fixed that crash.
  */
+
 __declspec(noinline)
 void ReportRunResult(bool driver_ok, bool provider_clean, const std::wstring& driver_path,
                       NTSTATUS driver_status) {
@@ -1319,11 +1418,13 @@ void ReportRunResult(bool driver_ok, bool provider_clean, const std::wstring& dr
 	}
 
 	if (!provider_clean) {
+
 		//Unmissable on purpose: this is the state the whole tool exists to avoid
 		//leaving behind, and it is the one condition where the machine is no safer
 		//than before the run started - in fact it is less safe, because the run
 		//also removed the provider's traces from PiDDB, the hash cache and
 		//MmUnloadedDrivers while leaving the driver itself loaded.
+
 		LogBlank();
 		Log(L"[!!] The provider driver was NOT unloaded and is still resident in kernel memory." << std::endl);
 		LogBlank();
@@ -1341,6 +1442,7 @@ void ReportRunResult(bool driver_ok, bool provider_clean, const std::wstring& dr
  * by itself, because "a hypervisor is active" and "this driver is a hypervisor"
  * are independent facts and only the pair decides whether a map can proceed.
  */
+
 struct HypervisorProbeResult {
 	bool active = false;                   // the vmmcall returned COMM_CHECK
 	bool svm_supported = false;            // CPUID says this CPU implements SVM
@@ -1361,6 +1463,7 @@ struct HypervisorProbeResult {
  * This function decides nothing. It used to abort the run on a match, which
  * made mapping an ordinary driver impossible while any hypervisor was loaded.
  */
+
 HypervisorProbeResult RunHypervisorProbe() {
 	HypervisorProbeResult result;
 
@@ -1378,6 +1481,7 @@ HypervisorProbeResult RunHypervisorProbe() {
 	//words: a resident hypervisor is informational - VBS, Hyper-V and
 	//Credential Guard all set the bit - and a CPU without SVM cannot run the
 	//SVM path at all.
+
 	const wchar_t* const hypervisor_color = result.cpuid_hypervisor_present ? Console::kYellow : Console::kGreen;
 	const wchar_t* const svm_color = result.svm_supported ? Console::kGreen : Console::kRed;
 
@@ -1388,12 +1492,14 @@ HypervisorProbeResult RunHypervisorProbe() {
 
 	//Separates the CPUID verdict from the vmmcall probe below, so the two read
 	//as the two separate tests they are rather than as one block.
+
 	LogBlank();
 
 	//CallVM issues the vmmcall and catches the #UD internally: trapped says
 	//whether the instruction faulted (nothing intercepted it) or completed.
 	//A nested __try is illegal here (C2712) because the caller holds locals
 	//that need unwinding, so we rely on CallVM's own handler.
+
 	bool trapped = false;
 	const ULONG64 probe_result = Hypervisor::CallVM(
 		Hypervisor::Shared::MAGIC, Hypervisor::Shared::CommandId::CheckPresence, 0, 0, &trapped);
@@ -1407,10 +1513,12 @@ HypervisorProbeResult RunHypervisorProbe() {
 		Log(L"[+] VMMCALL executed without fault" << std::endl);
 
 	if (trapped) {
+
 		//Nothing returned: the vmmcall faulted before any hypervisor saw it,
 		//and 0xAABB is only CallVM's sentinel for that. Printing it would
 		//present a sentinel as a probe result and colour it red, which reads
 		//as a failure when a bare metal machine is the normal case.
+
 		Log(L"[!] " << Tint(Console::kYellow, L"Probe skipped: nothing returned (expected COMM_CHECK="
 			+ Hex(Hypervisor::Shared::COMM_CHECK) + L")") << std::endl);
 	}
@@ -1425,6 +1533,7 @@ HypervisorProbeResult RunHypervisorProbe() {
 	}
 
 	//Adds spacing after probe result before the hypervisor question prompt.
+
 	LogBlank();
 
 	return result;
@@ -1439,6 +1548,7 @@ HypervisorProbeResult RunHypervisorProbe() {
  * ordinary driver, and a hypervisor image is only refused when one is already
  * running, because two of them on one machine fight over VMX/SVM ownership.
  */
+
 bool ShouldProceedWithMap(const HypervisorProbeResult& probe, bool hide, bool forceHideOverwrite) {
 	if (!hide) {
 		if (probe.active) {
@@ -1452,6 +1562,7 @@ bool ShouldProceedWithMap(const HypervisorProbeResult& probe, bool hide, bool fo
 	}
 
 	// hide is set: the operator declared this driver a hypervisor.
+
 	if (!probe.active)
 		return true;
 
@@ -1466,15 +1577,19 @@ bool ShouldProceedWithMap(const HypervisorProbeResult& probe, bool hide, bool fo
 }
 
 int wmain(const int argc, wchar_t** argv) {
+
 	//Installed first so an access violation anywhere below still unloads the
 	//provider rather than leaving it loaded in a half configured state.
+
 	SetUnhandledExceptionFilter(SimplestCrashHandler);
 
 	//Enabled before anything is printed so the interactive errors and warnings
 	//below render as intended.
+
 	Console::EnableAnsiColors();
 
 	//Explicit help request. Handled before the flags so it never starts a run.
+
 	if (paramExists(argc, argv, L"help") > 0) {
 		help();
 		PauseBeforeExit();
@@ -1486,6 +1601,7 @@ int wmain(const int argc, wchar_t** argv) {
 	//diagnostic - it issues a vmmcall and reports the raw ABI result - so it is
 	//refused unless --developer was also given, which keeps a production run
 	//from reaching it by accident.
+
 	int probeContextIdx = paramExists(argc, argv, L"probe-context");
 	if (probeContextIdx > 0) {
 		if (paramExists(argc, argv, L"developer") <= 0) {
@@ -1511,12 +1627,14 @@ int wmain(const int argc, wchar_t** argv) {
 	// --silent only silences the callback-gate refusal explanation now that the
 	// classifier is gone. It is not inferred from a missing console: a headless
 	// run needs that explanation more than an interactive one does.
+
 	g_silent = silent;
 
 	// --force-ask is a testing switch for the operator question: a piped stdin
 	// is not a console, so without it the question cannot be exercised from a
 	// script. It is refused on its own so it can never be mistaken for a
 	// production flag.
+
 	if (forceAsk && !developer) {
 		Log(L"[-] --force-ask requires --developer" << std::endl);
 		PauseBeforeExit();
@@ -1527,6 +1645,7 @@ int wmain(const int argc, wchar_t** argv) {
 	// bugchecks on most systems. It is listed under Developer Flags for the same
 	// reason --force-ask is, so it carries the same gate: a production run
 	// cannot reach it by adding one flag.
+
 	if (forceHideOverwrite && !developer) {
 		Log(L"[-] --force-hide-overwrite requires --developer" << std::endl);
 		PauseBeforeExit();
@@ -1534,6 +1653,7 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 
 	// Validate flag combinations
+
 	if (requireHide && !hide) {
 		Log(L"[-] --require-hide requires --hide to be specified" << std::endl);
 		help();
@@ -1554,6 +1674,7 @@ int wmain(const int argc, wchar_t** argv) {
 	 * acknowledgement, an image that imports callback-registering routines is
 	 * refused.
 	 */
+
 	if (free && !forceFree) {
 		Log(L"[-] --free ignored: the image would be released while the driver may still be running" << std::endl);
 		Log(L"[-] Add --force-free if you are certain the driver does not touch its image after DriverEntry." << std::endl);
@@ -1570,6 +1691,7 @@ int wmain(const int argc, wchar_t** argv) {
 	 * is read and before the provider is loaded, and refuse with the one fix
 	 * that exists: turn Memory Integrity off.
 	 */
+
 	bool hvciQueryFailed = false;
 	if (HvciIsEnforced(&hvciQueryFailed)) {
 		if (hvciQueryFailed) {
@@ -1601,6 +1723,7 @@ int wmain(const int argc, wchar_t** argv) {
 	 * This runs before the driver file is read and before Driver::Load, so a
 	 * refused run has not touched the kernel.
 	 */
+
 	if (indPagesMode) {
 		const DWORD build = RunningBuildNumber();
 		if (build == 0) {
@@ -1644,8 +1767,10 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 
 	if (FilePathParamIdx > 0) {
+
 		//The value is the next argument. When the flag is the last one there is
 		//none, and argv[argc] is NULL, which would be read as a wide string.
+
 		if (FilePathParamIdx + 1 >= argc) {
 			Log(L"[-] --offsetsPath requires a file path argument" << std::endl);
 			help();
@@ -1659,6 +1784,7 @@ int wmain(const int argc, wchar_t** argv) {
 	//Warn on any argument that looks like a flag but was not recognized. A typo
 	//in an option name would otherwise be silently ignored, and the run would
 	//proceed with the default behaviour instead of what was asked for.
+
 	static const wchar_t* knownFlags[] = {
 		L"free", L"force-free", L"indPages", L"PassAllocationPtr", L"copy-header",
 		L"hide", L"no-forensics", L"dontUpdateOffsets", L"offsetsPath", L"help", L"probe-context",
@@ -1668,7 +1794,9 @@ int wmain(const int argc, wchar_t** argv) {
 		const wchar_t* arg = argv[i];
 		if (arg[0] != L'-' && arg[0] != L'/')
 			continue;
+
 		//The argument after --offsetsPath is its value, not a flag.
+
 		if (IsOptionValue(argc, argv, i))
 			continue;
 
@@ -1680,8 +1808,10 @@ int wmain(const int argc, wchar_t** argv) {
 			name = arg + 2; // --name form
 		}
 		else {
+
 			//A single dash, which paramExists does not accept. Report the
 			//accepted forms instead of silently ignoring a typo.
+
 			Log(L"[-] Unrecognized option: " << Val(arg)
 				<< L" (flags are written as --name or /name, not -name)" << std::endl);
 			continue;
@@ -1709,6 +1839,7 @@ int wmain(const int argc, wchar_t** argv) {
 	 * offsets file was never read from where it was asked for, and the run went
 	 *on with the previous Offsets.ini.
 	 */
+
 	int drvIndex = -1;
 	for (int i = 1; i < argc; i++) {
 		if (IsOptionValue(argc, argv, i))
@@ -1723,6 +1854,7 @@ int wmain(const int argc, wchar_t** argv) {
 	//driver list, WdFilter). Everything is validated and fails cleanly, but
 	//every one of them is another write into a kernel data structure, so this
 	//flag reduces the number of chances the run has to destabilize the system.
+
 	if (paramExists(argc, argv, L"no-forensics") > 0) {
 		Driver::g_skipForensicCleanup = true;
 		Log(L"[+] Forensic cleanup disabled (--no-forensics)" << std::endl);
@@ -1737,8 +1869,10 @@ int wmain(const int argc, wchar_t** argv) {
 	std::vector<BYTE> raw_image;
 	std::wstring driver_path;
 	if (drvIndex > 0) {
+
 		//A path was given on the command line: skip the prompt and behave
 		//exactly as before, so existing scripts are unaffected.
+
 		driver_path = argv[drvIndex];
 
 		if (!std::filesystem::exists(driver_path)) {
@@ -1749,16 +1883,21 @@ int wmain(const int argc, wchar_t** argv) {
 
 		//Summarise the file and refuse a non PE image, the same gate the
 		//interactive prompt applies.
+
 		if (!DescribeDriverImage(driver_path, &raw_image)) {
 			PauseBeforeExit();
 			return -1;
 		}
 	}
 	else {
+
 		//No path argument: ask for one interactively.
+
 		driver_path = PromptForDriverPath(&raw_image);
 		if (driver_path.empty()) {
+
 			//Input ended before a usable path was entered.
+
 			help();
 			PauseBeforeExit();
 			return -1;
@@ -1766,10 +1905,12 @@ int wmain(const int argc, wchar_t** argv) {
 	}
 
 	if (raw_image.empty()) {
+
 		//Both branches above only return a path once DescribeDriverImage has
 		//handed back a non empty buffer, so this cannot normally fire. It is
 		//checked anyway because it is the one condition that would otherwise let
 		//an empty buffer reach the mapper.
+
 		Log(L"[-] Driver image is empty" << std::endl);
 		PauseBeforeExit();
 		return -1;
@@ -1783,6 +1924,7 @@ int wmain(const int argc, wchar_t** argv) {
 	// timer queue is corrupted → 0x0A IRQL_NOT_LESS_OR_EQUAL at
 	// KiInsertTimerTable (Microsoft: "call KeCancelTimer before the KTIMER
 	// object or DPC routine disappears from memory").
+
 	bool callbackGateAllowed = CheckCallbackSafetyGate(raw_image);
 	bool forceFreeAllowed = callbackGateAllowed; /* compatibility with ChooseStealthMode */
 	if (!callbackGateAllowed) {
@@ -1800,17 +1942,20 @@ int wmain(const int argc, wchar_t** argv) {
 	// reports whether a hypervisor is already active; that fact only becomes a
 	// decision once the operator's intent for this driver is known, so the
 	// verdict is taken by ShouldProceedWithMap below, not here.
+
 	const HypervisorProbeResult probe = RunHypervisorProbe();
 
 	//The stealth-mode decision runs in a helper frame of its own rather than in
 	//wmain's. The 0xC0000096 it was split out for is
 	//STATUS_PRIVILEGED_INSTRUCTION, not a /GS stack overrun.
+
 	if (!ChooseStealthMode(hide, copyHeader, free, forceFree, indPagesMode, forceFreeAllowed, forceAsk, raw_image)) {
 		PauseBeforeExit();
 		return -1;
 	}
 
 	/* 17l: hard-block — NO path may free a callback-driver image. ChooseStealthMode
+
 	   receives forceFreeAllowed; this is a final backstop against any bypass. */
 	if (!callbackGateAllowed) {
 		free = false;
@@ -1820,12 +1965,14 @@ int wmain(const int argc, wchar_t** argv) {
 	// An active hypervisor blocks a second hypervisor and nothing else. This is
 	// the decision the probe used to take on its own, which made mapping an
 	// ordinary driver impossible while any hypervisor was loaded.
+
 	if (!ShouldProceedWithMap(probe, hide, forceHideOverwrite)) {
 		PauseBeforeExit();
 		return -1;
 	}
 
 	// If --require-hide was specified, check hypervisor presence before mapping
+
 	if (requireHide && hide) {
 		if (!Hypervisor::CheckPresence()) {
 			Log(L"[-] --require-hide: Hide requested but no hypervisor present" << std::endl);
@@ -1854,6 +2001,7 @@ int wmain(const int argc, wchar_t** argv) {
 	 * dropped driver, a service key and a loaded driver to unwind for a file
 	 * read that was going to fail anyway.
 	 */
+
 	if (!NT_SUCCESS(Driver::Load())) {
 		PauseBeforeExit();
 		return -1;
@@ -1862,6 +2010,7 @@ int wmain(const int argc, wchar_t** argv) {
 	//The map + span + --hide work the Y path needs runs in RunMapAndHide, a
 	//helper frame of its own rather than wmain's. The 0xC0000096 it was split
 	//out for is STATUS_PRIVILEGED_INSTRUCTION, not a /GS stack overrun.
+
 	NTSTATUS driver_status = STATUS_SUCCESS;
 	SIZE_T resident_size = 0;
 	ULONG64 resident_base = 0;
@@ -1896,12 +2045,14 @@ int wmain(const int argc, wchar_t** argv) {
 	 * them, because the exit code is what a script or a wrapper keys on and it
 	 * has to mean the same thing as the log.
 	 */
+
 	const bool driver_ok = NT_SUCCESS(driver_status);
 	const bool provider_clean = NT_SUCCESS(Driver::Unload());
 
 	//The verdict + provider-clean report runs in ReportRunResult, a helper
 	//frame of its own rather than wmain's. The 0xC0000096 it was split out for
 	//is STATUS_PRIVILEGED_INSTRUCTION, not a /GS stack overrun.
+
 	ReportRunResult(driver_ok, provider_clean, driver_path, driver_status);
 
 	PauseBeforeExit();
@@ -1909,5 +2060,6 @@ int wmain(const int argc, wchar_t** argv) {
 	//A DriverEntry that returned an error, a provider left loaded, or a
 	//requested hide that did not happen, is a failure of the task as a whole
 	//and the caller has to be able to act on it.
+
 	return (driver_ok && provider_clean && hide_ok) ? 0 : -1;
 }
