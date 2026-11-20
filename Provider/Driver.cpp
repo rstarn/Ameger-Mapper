@@ -3298,7 +3298,13 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 
 	// then delete the element from the avl table
 	if (!RtlDeleteElementGenericTableAvl(PiDDBCacheTable, pFoundEntry)) {
-		Log(L"[-] Can't delete from PiDDBCacheTable" << std::endl);
+		/* Roll back the two list-link writes above so the doubly linked list is
+		 * not left half-unlinked while the AVL node still exists. Restore the
+		 * neighbours' pointers back to pFoundEntry; best-effort, but it keeps
+		 * kernel PiDDB state consistent when the AVL delete fails. */
+		WriteMemory(prev_flink_addr, &pFoundEntry, sizeof(pFoundEntry));
+		WriteMemory(next_blink_addr, &pFoundEntry, sizeof(pFoundEntry));
+		Log(L"[-] Can't delete from PiDDBCacheTable (list links rolled back)" << std::endl);
 		ExReleaseResourceLite(PiDDBLock);
 		return false;
 	}

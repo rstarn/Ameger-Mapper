@@ -41,6 +41,15 @@ PIMAGE_NT_HEADERS64 PE::GetNtHeaders(void* image_base, size_t image_size) {
 	if (nt_headers->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
 		return nullptr;
 
+	// A PE32+ optional header must be at least the fixed 64-bit size. A smaller
+	// file-controlled SizeOfOptionalHeader would put the section table inside
+	// the optional header, so every later field would be read from the wrong
+	// place. GetSectionTable computes the table offset from this field.
+	// 240 bytes is IMAGE_SIZEOF_NT_OPTIONAL64_HEADER; spell it literally because
+	// this SDK's winnt.h does not define that alias.
+	if (nt_headers->FileHeader.SizeOfOptionalHeader < 240u)
+		return nullptr;
+
 	return nt_headers;
 }
 
@@ -134,9 +143,14 @@ bool PE::GetRelocs(void* image_base, size_t image_size, vec_relocs& relocs) {
 	 */
 	const ULONG64 image_end = reinterpret_cast<ULONG64>(image_base) + image_size;
 	auto current_base_relocation = reinterpret_cast<PIMAGE_BASE_RELOCATION>(reinterpret_cast<ULONG64>(image_base) + reloc_va);
-	const ULONG64 reloc_end = reinterpret_cast<ULONG64>(current_base_relocation) + reloc_size;
+	const ULONG64 reloc_raw_end = reinterpret_cast<ULONG64>(current_base_relocation) + reloc_size;
+	// Never walk past the image buffer even if the directory size overclaims.
+	const ULONG64 reloc_end = reloc_raw_end < image_end ? reloc_raw_end : image_end;
 
-	while (reinterpret_cast<ULONG64>(current_base_relocation) < reloc_end && current_base_relocation->SizeOfBlock) {
+	// Require a whole IMAGE_BASE_RELOCATION before dereferencing SizeOfBlock;
+	// otherwise the loop condition itself reads past the last short block.
+	while (reinterpret_cast<ULONG64>(current_base_relocation) + sizeof(IMAGE_BASE_RELOCATION) <= reloc_end &&
+	       current_base_relocation->SizeOfBlock) {
 		const ULONG64 block_start = reinterpret_cast<ULONG64>(current_base_relocation);
 
 		//SizeOfBlock is file controlled: a block that claims to be larger than
@@ -285,7 +299,11 @@ bool PE::GetImports(void* image_base, size_t image_size, vec_imports& imports) {
 				reinterpret_cast<ULONG64>(current_first_thunk) + sizeof(IMAGE_THUNK_DATA64) > image_limit)
 				return false;
 
-			if (!name_table->u1.Function || !current_first_thunk->u1.Function)
+			/* The name table (OriginalFirstThunk, or FirstThunk when absent) is
+			 * the authoritative terminator. The IAT side may hold a zero for a
+			 * bound or optional import while name-table entries remain; ending
+			 * on it would silently drop those imports and leave IAT slots at 0. */
+			if (!name_table->u1.Function)
 				break;
 
 			//An import is either a name/hint pair or a bare ordinal. Both are

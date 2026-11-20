@@ -194,42 +194,68 @@ namespace Hypervisor
      */
     inline bool FlushAllProcessors()
     {
-        const DWORD processorCount = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-        if (processorCount == 0)
-            return false;
-
         const HANDLE thread = GetCurrentThread();
 
         GROUP_AFFINITY original = { 0 };
         if (!GetThreadGroupAffinity(thread, &original))
             return false;
 
+        /* Enumerate processor groups and each group's actual active mask.
+         * Deriving the group as index/64 is wrong: Windows groups can hold
+         * fewer than 64 logical processors and group numbering is not a simple
+         * division of a global index, which could pin a nonexistent CPU or skip
+         * real ones. RelationGroup reports each group's GroupMask directly. */
+        DWORD bytes = 0;
+        GetLogicalProcessorInformationEx(RelationGroup, nullptr, &bytes);
+        if (bytes == 0)
+            return false;
+        std::vector<BYTE> buffer(bytes);
+        auto* info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data());
+        if (!GetLogicalProcessorInformationEx(RelationGroup, info, &bytes))
+            return false;
+
         bool allFlushed = true;
-        for (DWORD index = 0; index < processorCount; index++)
-        {
-            GROUP_AFFINITY affinity = { 0 };
-            affinity.Group = static_cast<WORD>(index / 64);
-            affinity.Mask = 1ULL << (index % 64);
-
-            GROUP_AFFINITY previous = { 0 };
-            if (!SetThreadGroupAffinity(thread, &affinity, &previous))
-            {
-                printf("  [*] flush CPU %lu: pin failed\n", index);
-                allFlushed = false;
+        for (auto* cursor = info;
+             reinterpret_cast<BYTE*>(cursor) + cursor->Size <= buffer.data() + bytes;
+             cursor = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(
+                 reinterpret_cast<BYTE*>(cursor) + cursor->Size)) {
+            if (cursor->Relationship != RelationGroup || cursor->Group.ActiveGroupCount == 0)
                 continue;
-            }
+            // GROUP_RELATIONSHIP holds ActiveGroupCount PROCESSOR_GROUP_INFO
+            // entries in GroupInfo; each carries its group number and active mask.
+            for (WORD g = 0; g < cursor->Group.ActiveGroupCount; ++g) {
+                const PROCESSOR_GROUP_INFO& groupInfo = cursor->Group.GroupInfo[g];
+                const WORD group = g; // GROUP_INFO entries are ordered by group number
+                for (WORD bit = 0; bit < 64; ++bit) {
+                    const KAFFINITY mask = static_cast<KAFFINITY>(1ULL) << bit;
+                    if ((groupInfo.ActiveProcessorMask & mask) == 0)
+                        continue;
 
-            if (CallVM(Shared::MAGIC, Shared::CommandId::FlushNpt) != Shared::ErrorCodes::Success)
-            {
-                printf("  [*] flush CPU %lu: vmmcall failed\n", index);
-                allFlushed = false;
-            }
-            else
-            {
-                if (Console::ColorsDisabled())
-                    printf("  [+] Flushing CPU %lu: Success\n", index);
-                else
-                    printf("  \x1b[92m[+]\x1b[0m Flushing CPU \x1b[92m%lu\x1b[0m: \x1b[92mSuccess\x1b[0m\n", index);
+                    GROUP_AFFINITY affinity = { 0 };
+                    affinity.Group = group;
+                    affinity.Mask = mask;
+
+                    GROUP_AFFINITY previous = { 0 };
+                    if (!SetThreadGroupAffinity(thread, &affinity, &previous))
+                    {
+                        printf("  [*] flush G%u:C%u: pin failed\n", group, bit);
+                        allFlushed = false;
+                        continue;
+                    }
+
+                    if (CallVM(Shared::MAGIC, Shared::CommandId::FlushNpt) != Shared::ErrorCodes::Success)
+                    {
+                        printf("  [*] flush G%u:C%u: vmmcall failed\n", group, bit);
+                        allFlushed = false;
+                    }
+                    else
+                    {
+                        if (Console::ColorsDisabled())
+                            printf("  [+] Flushing G%u:C%u: Success\n", group, bit);
+                        else
+                            printf("  \x1b[92m[+]\x1b[0m Flushing G%u:C%u: \x1b[92mSuccess\x1b[0m\n", group, bit);
+                    }
+                }
             }
         }
 

@@ -840,10 +840,25 @@ int paramExists(const int argc, wchar_t** argv, const wchar_t* param) {
 //property of the argument list and is asked here rather than duplicated at each
 //place that walks it.
 static bool IsOptionValue(const int argc, wchar_t** argv, int i) {
-	if (i < 1)
+	if (i < 1 || i >= argc)
 		return false;
-	return paramExists(argc, argv, L"offsetsPath") == i - 1
-		|| paramExists(argc, argv, L"probe-context") == i - 1;
+	// An option's value is the argument immediately after ANY occurrence of that
+	// option. Checking only the first occurrence (paramExists) let a repeated
+	// --offsetsPath's value be mistaken for the driver path.
+	const wchar_t* prev = argv[i - 1];
+	if (wcslen(prev) < 2ull)
+		return false;
+	const wchar_t* name = nullptr;
+	if (prev[0] == L'/') {
+		name = prev + 1; // /name form
+	}
+	else if (prev[0] == L'-' && prev[1] == L'-' && wcslen(prev) >= 3ull) {
+		name = prev + 2; // --name form
+	}
+	if (!name)
+		return false;
+	return _wcsicmp(name, L"offsetsPath") == 0 ||
+	       _wcsicmp(name, L"probe-context") == 0;
 }
 
 
@@ -1644,25 +1659,27 @@ int wmain(const int argc, wchar_t** argv) {
 	};
 	for (int i = 1; i < argc; i++) {
 		const wchar_t* arg = argv[i];
-		if (arg[0] != L'-')
+		if (arg[0] != L'-' && arg[0] != L'/')
 			continue;
 		//The argument after --offsetsPath is its value, not a flag.
 		if (IsOptionValue(argc, argv, i))
 			continue;
 
-		if (arg[1] != L'-') {
-			//A single dash, which paramExists does not accept. It used to be
-			//stripped down to the flag name and compared against the known list,
-			//so -free came out as "free" - a known flag - and produced no
-			//warning, while paramExists never matched it. The run then went
-			//ahead with the memory free silently disabled. Say which form is
-			//accepted instead.
+		const wchar_t* name = nullptr;
+		if (arg[0] == L'/') {
+			name = arg + 1; // /name form, accepted by paramExists
+		}
+		else if (arg[1] == L'-') {
+			name = arg + 2; // --name form
+		}
+		else {
+			//A single dash, which paramExists does not accept. Report the
+			//accepted forms instead of silently ignoring a typo.
 			Log(L"[-] Unrecognized option: " << Val(arg)
 				<< L" (flags are written as --name or /name, not -name)" << std::endl);
 			continue;
 		}
 
-		const wchar_t* name = arg + 2;
 		bool known = false;
 		for (const wchar_t* flag : knownFlags) {
 			if (_wcsicmp(name, flag) == 0) {

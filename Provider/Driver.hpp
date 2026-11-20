@@ -286,11 +286,17 @@ namespace Driver
 			return false;
 		}
 
-		/* Same four-byte signature CallKernelFunction itself uses: REX.W+B8
-		 * mov-immediate prefix at the head, FF E0 jmp rax at the tail. */
-		const bool hooked =
-			bytes[0] == 0x48 && bytes[1] == 0xb8 &&
-			bytes[10] == 0xff && bytes[11] == 0xe0;
+		/* Detect our stub (mov rax,<imm64>; jmp rax) robustly. The mov-immediate
+		 * prefix alone (48 b8) is enough to flag a leftover or foreign hook: no
+		 * legitimate NtAddAtom prologue begins with a raw REX.W+B8 immediate
+		 * load, so checking it plus either the jmp tail or a kernel-range
+		 * immediate catches full and partially written stubs alike. */
+		uint64_t embedded = 0;
+		memcpy(&embedded, bytes + 2, sizeof(embedded));
+		const bool movRaxImm = bytes[0] == 0x48 && bytes[1] == 0xb8;
+		const bool jmpRax = bytes[10] == 0xff && bytes[11] == 0xe0;
+		const bool hooked = movRaxImm &&
+			(jmpRax || embedded >= 0xFFFF000000000000ULL);
 		if (hooked) {
 			Log(L"[!!] CRITICAL: ntoskrnl.NtAddAtom still contains a hook stub "
 				"from a previous run. Aborting rather than chaining or corrupting "
