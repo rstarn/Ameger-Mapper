@@ -1984,11 +1984,36 @@ bool Driver::WriteToReadOnlyMemory(uint64_t address, void* buffer, uint32_t size
 	uint32_t chunk_offset[16] = {};
 	uint32_t chunk_size[16] = {};
 
-	auto restore_scratch_entries = [&]() {
+	/*
+	 * Restore every aliased scratch PTE and VERIFY by reading it back. A failed
+	 * restore leaves a present, user-writable alias of a kernel page in the
+	 * caller's page tables - a write-to-kernel-code primitive. The caller's own
+	 * byte check only reads the target through the kernel VA (ReadMemory), so it
+	 * cannot see this leak; only the PTE readback can. Retry transient provider
+	 * copy failures, then fail closed and poison all further kernel calls.
+	 */
+	auto restore_scratch_entries = [&]() -> bool {
+		bool all_restored = true;
 		for (uint32_t i = 0; i < page_count; ++i) {
-			if (pte_saved[i])
-				WriteMemory(pte_address[i], &saved_pte[i], sizeof(saved_pte[i]));
+			if (!pte_saved[i])
+				continue;
+			bool restored = false;
+			uint64_t observed = 0;
+			for (unsigned attempt = 0u; attempt < 4u && !restored; ++attempt) {
+				if (!WriteMemory(pte_address[i], &saved_pte[i], sizeof(saved_pte[i])))
+					continue;
+				if (!ReadMemory(pte_address[i], &observed, sizeof(observed)))
+					continue;
+				restored = (observed == saved_pte[i]);
+			}
+			if (!restored) {
+				Log(L"[!!] CRITICAL: failed to restore scratch alias PTE "
+					<< Val(reinterpret_cast<void*>(pte_address[i]))
+					<< L"; a user-writable kernel alias may be live" << std::endl);
+				all_restored = false;
+			}
 		}
+		return all_restored;
 	};
 
 	/*
@@ -2126,7 +2151,14 @@ bool Driver::WriteToReadOnlyMemory(uint64_t address, void* buffer, uint32_t size
 		}
 	}
 
-	restore_scratch_entries();
+	const bool ptes_restored = restore_scratch_entries();
+	if (!ptes_restored) {
+		/* A user-writable alias of a kernel page is still live in this process.
+		 * Poison the kernel-call primitive so no further NtAddAtom stub can be
+		 * installed on top of an unsafe state; the process must be rebooted. */
+		g_kernelCallPoisoned = true;
+		ok = false;
+	}
 	/* The scratch region belongs to the permanent rotating pool; it is never
 	 * freed here. Freeing and reallocating the same VA is what allowed a stale
 	 * alias translation to be reused. */

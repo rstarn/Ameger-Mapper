@@ -111,6 +111,8 @@ uint64_t Utilities::GetKernelModuleAddress(const std::string& module_name) {
 			VirtualFree(buffer, 0, MEM_RELEASE);
 
 		buffer = VirtualAlloc(nullptr, buffer_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+		if (buffer == nullptr)
+			return 0; // allocation failed; with a NULL buffer the query loops forever
 		status = NtQuerySystemInformation(static_cast<SYSTEM_INFORMATION_CLASS>(Nt::SystemModuleInformation), buffer, buffer_size, &buffer_size);
 	}
 

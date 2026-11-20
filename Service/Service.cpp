@@ -45,20 +45,23 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 
 	DWORD orig_type_len = 0;
 	DWORD orig_type_data = 0;
+	DWORD orig_image_type = REG_SZ; // type of a pre-existing ImagePath, preserved on restore
 	std::wstring orig_image_path;
 	bool have_orig_image = false;
 	bool have_orig_type = false;
 
 	{
 		DWORD sz = 0;
-		if (RegQueryValueExW(dservice, L"ImagePath", nullptr, nullptr, nullptr, &sz) == ERROR_SUCCESS && sz > 0)
+		DWORD image_type = REG_SZ;
+		if (RegQueryValueExW(dservice, L"ImagePath", nullptr, &image_type, nullptr, &sz) == ERROR_SUCCESS && sz > 0)
 		{
 			std::vector<wchar_t> buf(sz / sizeof(wchar_t) + 1);
 			DWORD got = sz;
-			if (RegQueryValueExW(dservice, L"ImagePath", nullptr, nullptr,
+			if (RegQueryValueExW(dservice, L"ImagePath", nullptr, &image_type,
 					reinterpret_cast<LPBYTE>(buf.data()), &got) == ERROR_SUCCESS)
 			{
 				orig_image_path.assign(buf.data());
+				orig_image_type = image_type;
 				have_orig_image = true;
 			}
 		}
@@ -81,7 +84,7 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 			{
 				if (have_orig_image)
 				{
-					RegSetKeyValueW(restore_key, NULL, L"ImagePath", REG_EXPAND_SZ,
+					RegSetKeyValueW(restore_key, NULL, L"ImagePath", orig_image_type,
 						orig_image_path.c_str(),
 						static_cast<DWORD>((orig_image_path.size() + 1) * sizeof(wchar_t)));
 				}

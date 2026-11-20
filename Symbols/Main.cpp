@@ -32,7 +32,10 @@ namespace
 	//unit in for a single function is not worth the build coupling.
 	std::wstring GetCurrentAppFolder() {
 		wchar_t buffer[1024] = { 0 };
-		if (!GetModuleFileNameW(NULL, buffer, static_cast<UINT>(std::size(buffer))))
+		const DWORD length = GetModuleFileNameW(NULL, buffer, static_cast<UINT>(std::size(buffer)));
+		/* nSize on return means the path was truncated and is not null-terminated;
+		 * only a shorter result is safe to wrap in std::wstring. */
+		if (length == 0u || length >= std::size(buffer))
 			return L"";
 		std::wstring::size_type pos = std::wstring(buffer).find_last_of(L"\\/");
 		if (pos == std::wstring::npos)

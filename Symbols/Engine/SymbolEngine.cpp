@@ -87,7 +87,12 @@ namespace
 		//which this tool does not link.
 		static std::wstring ExeFolder() {
 			wchar_t buffer[MAX_PATH] = { 0 };
-			if (!GetModuleFileNameW(nullptr, buffer, MAX_PATH))
+			const DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+			/* A truncated path is not null-terminated: std::wstring(buffer)
+			 * would read past the array. GetModuleFileNameW returns nSize on
+			 * truncation, so only a length strictly less than the buffer is a
+			 * complete, terminated path. */
+			if (length == 0u || length >= MAX_PATH)
 				return {};
 			std::wstring path(buffer);
 			const auto pos = path.find_last_of(L"\\/");

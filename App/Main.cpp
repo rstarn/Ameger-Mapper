@@ -541,7 +541,14 @@ namespace
 				const uint64_t va = sec[i].VirtualAddress;
 				const uint64_t span = sec[i].SizeOfRawData;
 				if (rva >= va && (uint64_t)rva < va + span) {
-					return sec[i].PointerToRawData + (rva - sec[i].VirtualAddress);
+					/* Widen BEFORE adding: PointerToRawData and the RVA delta
+					 * are both DWORDs, so adding them in 32 bits can wrap a
+					 * hostile near-0xFFFFFFFF PointerToRawData into a small,
+					 * in-bounds offset that passes fits() and makes this gate
+					 * read the wrong part of the file. */
+					const uint64_t offset = (uint64_t)sec[i].PointerToRawData +
+					                        (uint64_t)(rva - sec[i].VirtualAddress);
+					return offset > (uint64_t)SIZE_MAX ? SIZE_MAX : (size_t)offset;
 				}
 			}
 			return SIZE_MAX;
