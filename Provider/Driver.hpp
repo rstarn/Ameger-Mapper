@@ -257,6 +257,49 @@ namespace Driver
 	}
 
 	/*
+	 * Poison flag. Set once a restore cannot be verified byte-for-byte. From
+	 * that point every CallKernelFunction refuses to patch again, so a damaged
+	 * or partially restored NtAddAtom can never get a second stub stacked on
+	 * top of it. Namespace-scope inline gives one flag across all template
+	 * instantiations (each signature otherwise has its own static cache).
+	 */
+	inline bool g_kernelCallPoisoned = false;
+
+	/*
+	 * Fail-closed startup integrity check. The residue a previous process
+	 * leaves if it is killed or bugchecks between hook install and restore is
+	 * exactly our 12-byte stub (mov rax,<addr>; jmp rax). Patching over an
+	 * unknown stub would either clobber someone else's hook or chain a second
+	 * jump on top of ours, neither of which is recoverable. Call once from
+	 * Load(), before any kernel write; abort the whole run on failure.
+	 */
+	inline bool VerifyNtAddAtomNotHooked() {
+		const uint64_t address = GetKernelModuleExport(ntoskrnlAddr, "NtAddAtom");
+		if (!address) {
+			Log(L"[-] Cannot resolve ntoskrnl.NtAddAtom for the integrity check" << std::endl);
+			return false;
+		}
+
+		uint8_t bytes[12] = {};
+		if (!ReadMemory(address, bytes, sizeof(bytes))) {
+			Log(L"[-] Cannot read ntoskrnl.NtAddAtom for the integrity check" << std::endl);
+			return false;
+		}
+
+		/* Same four-byte signature CallKernelFunction itself uses: REX.W+B8
+		 * mov-immediate prefix at the head, FF E0 jmp rax at the tail. */
+		const bool hooked =
+			bytes[0] == 0x48 && bytes[1] == 0xb8 &&
+			bytes[10] == 0xff && bytes[11] == 0xe0;
+		if (hooked) {
+			Log(L"[!!] CRITICAL: ntoskrnl.NtAddAtom still contains a hook stub "
+				"from a previous run. Aborting rather than chaining or corrupting "
+				"it; a reboot is required to clear it." << std::endl);
+		}
+		return !hooked;
+	}
+
+	/*
 	 * Call an arbitrary kernel function from user mode.
 	 *
 	 * How it works: ntoskrnl!NtAddAtom is overwritten with
@@ -313,6 +356,13 @@ namespace Driver
 		//Every return below leaves this false, so the caller's flag is only ever
 		//set once the restore has actually been confirmed.
 		RestoreSucceeded() = false;
+
+		//A previously failed restore may have left ntoskrnl patched. Refuse to
+		//install a second stub over unknown bytes - that is the path to a
+		//permanent hook and a bugcheck. Fail closed for the rest of the run.
+		if (g_kernelCallPoisoned) {
+			return false;
+		}
 
 		if constexpr (!call_void) {
 			if (!out_result)
@@ -449,21 +499,36 @@ namespace Driver
 		 * what previously let a caller release memory a running kernel object
 		 * was using.
 		 */
-		bool restored = WriteToReadOnlyMemory(kernel_NtAddAtom, original_kernel_function, sizeof(kernel_injected_jmp));
-
-		if (!restored) {
-			Log(L"[!] NtAddAtom restore failed, retrying" << std::endl);
-			restored = WriteToReadOnlyMemory(kernel_NtAddAtom, original_kernel_function, sizeof(kernel_injected_jmp));
+		/*
+		 * Write back, then VERIFY by reading the twelve bytes and comparing them
+		 * byte-for-byte with what was saved. Trusting only the write's return
+		 * value is not enough: a stale-TLB window can report a successful write
+		 * while the page still shows the stub. Only an exact match proves
+		 * ntoskrnl is clean. Up to three attempts, matching the prior retry
+		 * count, now with verification on every attempt.
+		 */
+		bool restored = false;
+		uint8_t verify[sizeof(kernel_injected_jmp)] = {};
+		for (unsigned attempt = 0u; attempt < 3u && !restored; ++attempt) {
+			if (!WriteToReadOnlyMemory(kernel_NtAddAtom, original_kernel_function,
+			                          sizeof(kernel_injected_jmp))) {
+				continue;
+			}
+			if (!ReadMemory(kernel_NtAddAtom, verify, sizeof(verify))) {
+				continue;
+			}
+			restored = (memcmp(verify, original_kernel_function, sizeof(verify)) == 0);
 		}
 
 		if (!restored) {
-			//ntoskrnl is still patched. Say so plainly: the process must not exit
-			//believing the hook is gone, because NtAddAtom will jump into the
-			//last target until something else restores it.
-			Log(L"[!!] CRITICAL: ntoskrnl.NtAddAtom is still hooked after a "
-				"failed restore. Do not terminate this process: every NtAddAtom "
-				"call on this machine now jumps to the last target until the page "
-				"is repaired." << std::endl);
+			//ntoskrnl may still be patched. Poison all further calls, say so
+			//plainly, and keep the process from exiting believing the hook is
+			//gone: NtAddAtom would jump into the last target until a reboot.
+			g_kernelCallPoisoned = true;
+			Log(L"[!!] CRITICAL: ntoskrnl.NtAddAtom could not be verified restored "
+				"after three attempts. No further kernel calls will be made. Do not "
+				"terminate this process expecting the hook to be gone: a reboot is "
+				"required to guarantee NtAddAtom is clean." << std::endl);
 		}
 		else {
 			RestoreSucceeded() = true;

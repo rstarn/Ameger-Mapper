@@ -378,6 +378,14 @@ NTSTATUS Driver::Load() {
 		return STATUS_ACCESS_DENIED;
 	}
 
+	/* Fail-closed integrity check before the first hook is ever installed. If a
+	 * previous run left NtAddAtom patched, refuse to continue instead of stacking
+	 * a second stub over bytes we cannot prove clean. */
+	if (!Driver::VerifyNtAddAtomNotHooked()) {
+		Driver::Unload();
+		return STATUS_ACCESS_DENIED;
+	}
+
 	//When the provider was reused instead of being loaded by us, it is running
 	//under a name we did not generate. GetDriverNameW() produces a fresh random
 	//name every run, but the kernel entry we need to clear holds the name the
