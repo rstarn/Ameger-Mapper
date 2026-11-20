@@ -25,6 +25,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cstring>
+#include <cstddef>
 #include <intrin.h>
 #include <ctime>
 
@@ -151,14 +152,20 @@ namespace
 		ULONG CodeIntegrityOptions;
 	};
 
-	bool HvciIsEnforced() {
+	// Returns true when HVCI is enforced OR when the state cannot be determined.
+	// This gate prevents a guaranteed 0x3B bugcheck, so an unknown state must be
+	// treated as unsafe rather than silently allowing the write.
+	bool HvciIsEnforced(bool* queryFailed = nullptr) {
 		CodeIntegrityInformation info = {};
 		info.Length = sizeof(info);
 		ULONG returned = 0;
 		const NTSTATUS status = NtQuerySystemInformation(
 			static_cast<SYSTEM_INFORMATION_CLASS>(103), &info, sizeof(info), &returned);
-		if (!NT_SUCCESS(status))
-			return false;
+		if (!NT_SUCCESS(status)) {
+			if (queryFailed) *queryFailed = true;
+			return true; // fail closed: unknown HVCI state is treated as enforced
+		}
+		if (queryFailed) *queryFailed = false;
 
 		//Audit mode alone does not block writes, so it is not part of the test.
 		const ULONG enforcing = kCodeIntegrityHvciKmciEnabled |
@@ -507,6 +514,17 @@ namespace
 			image.data() + dos->e_lfanew);
 		if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
 
+		// The section table that rva_to_off walks must itself fit in the image;
+		// an unchecked NumberOfSections would walk past the buffer.
+		const uint8_t* const sectionTable =
+			reinterpret_cast<const uint8_t*>(IMAGE_FIRST_SECTION(nt));
+		if (sectionTable < image.data() || sectionTable > image.data() + image.size())
+			return false;
+		const uint64_t sectionBytes =
+			(uint64_t)nt->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER);
+		if (sectionBytes > (uint64_t)((image.data() + image.size()) - sectionTable))
+			return false;
+
 		const auto& dir = nt->OptionalHeader
 			.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
 		if (dir.VirtualAddress == 0 || dir.Size == 0) {
@@ -514,67 +532,83 @@ namespace
 			return false;
 		}
 
-		// Convert RVA to file offset via section table
+		// Convert RVA to file offset via section table. The section bounds are
+		// widened to 64 bits before addition so a large section cannot wrap and
+		// make an out-of-range RVA look valid.
 		auto rva_to_off = [&](DWORD rva) -> size_t {
 			auto* sec = IMAGE_FIRST_SECTION(nt);
 			for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-				if (rva >= sec[i].VirtualAddress &&
-					rva < sec[i].VirtualAddress + sec[i].SizeOfRawData) {
-					return sec[i].PointerToRawData +
-						(rva - sec[i].VirtualAddress);
+				const uint64_t va = sec[i].VirtualAddress;
+				const uint64_t span = sec[i].SizeOfRawData;
+				if (rva >= va && (uint64_t)rva < va + span) {
+					return sec[i].PointerToRawData + (rva - sec[i].VirtualAddress);
 				}
 			}
 			return SIZE_MAX;
 		};
+		const uint8_t* const img_begin = image.data();
+		// True when [off, off+len) lies wholly inside the image.
+		auto fits = [&](size_t off, size_t len) -> bool {
+			return off <= image.size() && len <= image.size() - off;
+		};
 
 		size_t impOff = rva_to_off(dir.VirtualAddress);
-		if (impOff == SIZE_MAX) return false;
-		if (impOff + sizeof(IMAGE_IMPORT_DESCRIPTOR) > image.size())
+		if (impOff == SIZE_MAX || !fits(impOff, sizeof(IMAGE_IMPORT_DESCRIPTOR)))
 			return false;
 
-		auto* imp = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(
-			image.data() + impOff);
-
-		// Walk each import descriptor
-		for (; imp->Name != 0; imp++) {
-			if ((const uint8_t*)imp + sizeof(*imp) > image.data() + image.size())
+		// Walk each import descriptor. Check the CURRENT descriptor fits before
+		// reading it, and stop only at the terminating all-zero descriptor.
+		for (;;) {
+			if (!fits(impOff, sizeof(IMAGE_IMPORT_DESCRIPTOR)))
 				return false;
+			auto* imp = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(
+				img_begin + impOff);
+			if (imp->Name == 0 && imp->OriginalFirstThunk == 0 && imp->FirstThunk == 0)
+				break; // null terminator
 			size_t off = rva_to_off(imp->Name);
-			if (off == SIZE_MAX || off >= image.size()) return false;
+			if (off == SIZE_MAX || !fits(off, 2)) return false;
 
 			// Walk the ILT (OriginalFirstThunk or FirstThunk)
 			DWORD thunkRva = imp->OriginalFirstThunk
 				? imp->OriginalFirstThunk
 				: imp->FirstThunk;
 			size_t thunkOff = rva_to_off(thunkRva);
-			if (thunkOff == SIZE_MAX) return false;
+			if (thunkOff == SIZE_MAX || !fits(thunkOff, sizeof(IMAGE_THUNK_DATA64)))
+				return false;
 
 			auto* thunk = reinterpret_cast<const IMAGE_THUNK_DATA64*>(
-				image.data() + thunkOff);
-			for (; thunk->u1.AddressOfData != 0; thunk++) {
-				if ((const uint8_t*)thunk + sizeof(*thunk) >
-					image.data() + image.size())
+				img_begin + thunkOff);
+			for (;;) {
+				if (!fits(thunkOff, sizeof(IMAGE_THUNK_DATA64)))
 					return false;
+				uint64_t slot = thunk->u1.AddressOfData;
+				if (slot == 0)
+					break; // null terminator
 				// Skip ordinal imports
-				if (thunk->u1.Ordinal & IMAGE_ORDINAL_FLAG64) continue;
-				size_t nameOff = rva_to_off(
-					(DWORD)thunk->u1.AddressOfData);
-				if (nameOff == SIZE_MAX) return false;
-				if (nameOff + sizeof(IMAGE_IMPORT_BY_NAME) > image.size())
-					return false;
-				auto* ibn = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(
-					image.data() + nameOff);
-				const char* name = (const char*)ibn->Name;
-				// Bounds-check the name against the end of the image
-				if ((const uint8_t*)name >= image.data() + image.size())
-					return false;
-				for (int k = 0; dangerous[k]; k++) {
-					if (strcmp(name, dangerous[k]) == 0) {
-						// Detected a callback/timer import — refuse to free
+				if (!(slot & IMAGE_ORDINAL_FLAG64)) {
+					if (slot > 0xFFFFFFFFull) return false; // RVA is 32-bit
+					size_t nameOff = rva_to_off((DWORD)slot);
+					if (nameOff == SIZE_MAX || !fits(nameOff, sizeof(IMAGE_IMPORT_BY_NAME)))
 						return false;
+					auto* ibn = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(
+						img_begin + nameOff);
+					const char* name = (const char*)ibn->Name;
+					// Require a NUL terminator inside the image before strcmp.
+					const size_t nameStart = nameOff + offsetof(IMAGE_IMPORT_BY_NAME, Name);
+					if (nameStart >= image.size()) return false;
+					if (memchr(img_begin + nameStart, 0, image.size() - nameStart) == nullptr)
+						return false;
+					for (int k = 0; dangerous[k]; k++) {
+						if (strcmp(name, dangerous[k]) == 0) {
+							// Detected a callback/timer import — refuse to free
+							return false;
+						}
 					}
 				}
+				thunkOff += sizeof(IMAGE_THUNK_DATA64);
+				thunk = reinterpret_cast<const IMAGE_THUNK_DATA64*>(img_begin + thunkOff);
 			}
+			impOff += sizeof(IMAGE_IMPORT_DESCRIPTOR);
 		}
 		// No dangerous imports found — safe to free
 		return true;
@@ -1023,6 +1057,13 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 	// --hide was given, so the operator already decided. The allocation shape
 	// follows the NPT hide routine's range support, not the driver.
 	if (hide) {
+		/* NPT hide keeps the image resident: the hidden physical pages ARE the
+		 * allocation being hidden in the nested page table. Releasing it with
+		 * --free (even --force-free) would free the very pages under the EPT/NPT
+		 * hide and hang the machine. Freeing is incompatible with hiding, so
+		 * force it off here. */
+		free = false;
+		forceFree = false;
 		copyHeader = true;
 		indPagesMode = Hypervisor::kHypervisorSupportsDiscontiguousNpt ? IndPagesAvailable() : false;
 		if (!g_silent) {
@@ -1507,8 +1548,16 @@ int wmain(const int argc, wchar_t** argv) {
 	 * is read and before the provider is loaded, and refuse with the one fix
 	 * that exists: turn Memory Integrity off.
 	 */
-	if (HvciIsEnforced()) {
+	bool hvciQueryFailed = false;
+	if (HvciIsEnforced(&hvciQueryFailed)) {
+		if (hvciQueryFailed) {
+			Log(L"[-] Could not query the Hypervisor-Enforced Code Integrity state." << std::endl);
+			Log(L"[-] Refusing to proceed: the HVCI state is unknown and the kernel write" << std::endl);
+			Log(L"[-] primitive would bugcheck (0x3B) if Memory Integrity is actually on." << std::endl);
+		}
+		else {
 		Log(L"[-] Hypervisor-Enforced Code Integrity (Memory Integrity) is enabled." << std::endl);
+		}
 		Log(L"[-] The hypervisor write-protects kernel code pages, so the mapper cannot install its" << std::endl);
 		Log(L"[-] kernel call primitive; attempting it bugchecks the machine (0x3B) inside the provider." << std::endl);
 		Log(L"[-] Turn it off and reboot: Windows Security > Device security > Core isolation details" << std::endl);

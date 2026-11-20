@@ -104,6 +104,8 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	const bool elevated = IsElevated();
 	if (!elevated) {
 		Log(L"[-] The probe needs to run elevated to load the kernel provider." << std::endl);
+		VirtualFree(ring_buffer, 0, MEM_RELEASE);
+		VirtualFree(ctx, 0, MEM_RELEASE);
 		return -1;
 	}
 
@@ -115,6 +117,8 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	const std::wstring updater = Utilities::GetCurrentAppFolder() + L"\\" + SYMBOL_TOOL_EXE;
 	if (!SymbolsHandler::GetInstance()->ReloadFile(offsetFilePath, updater)) {
 		Log(L"[-] Failed to load Offsets.ini; the probe cannot run." << std::endl);
+		VirtualFree(ring_buffer, 0, MEM_RELEASE);
+		VirtualFree(ctx, 0, MEM_RELEASE);
 		return -1;
 	}
 
@@ -122,6 +126,8 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	NTSTATUS load_status = Driver::Load();
 	if (!(load_status >= 0)) {
 		Log(L"[-] Failed to load the kernel provider; the probe cannot run." << std::endl);
+		VirtualFree(ring_buffer, 0, MEM_RELEASE);
+		VirtualFree(ctx, 0, MEM_RELEASE);
 		return -1;
 	}
 
@@ -186,13 +192,33 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 		Sleep(10);
 	}
 	Log(L"cmd_status     = " << Val(Hex(cmd->status)) << std::endl);
+
 	if (ctx->shutdown_complete != 1) {
-		Log(L"[-] Driver did not complete shutdown in time." << std::endl);
+		/* The driver MDL-locks ring_buffer and writes ctx fields. If it has not
+		 * confirmed shutdown it may still hold those MDLs; freeing the user VA
+		 * now is a kernel use-after-free. Leak the two small allocations on this
+		 * path — a bounded, safe leak is far better than a bugcheck. */
+		Log(L"[-] Driver did not complete shutdown in time; leaving the probe "
+			L"buffers resident rather than freeing memory the driver may still use." << std::endl);
+
+		//Hex dump of the whole context, as it exists after MapDriver returned.
+		LogBlank();
+		LogRaw(L"Context hex dump (96 bytes):");
+		const unsigned char* bytes = reinterpret_cast<const unsigned char*>(ctx);
+		std::wostringstream hex;
+		for (size_t i = 0; i < sizeof(*ctx); ++i) {
+			hex << std::hex << std::setw(2) << std::setfill(L'0') << static_cast<unsigned>(bytes[i]);
+			if (i + 1 < sizeof(*ctx))
+				hex << L' ';
+		}
+		LogRaw(hex.str());
+
+		return (mapped && entry_ok && fields_ok && provider_clean) ? 0 : -1;
 	}
 
 	VirtualFree(ring_buffer, 0, MEM_RELEASE);
 
-	//Hex dump of the whole 88-byte context, as it exists after MapDriver returned.
+	//Hex dump of the whole context, as it exists after MapDriver returned.
 	LogBlank();
 	LogRaw(L"Context hex dump (96 bytes):");
 	const unsigned char* bytes = reinterpret_cast<const unsigned char*>(ctx);

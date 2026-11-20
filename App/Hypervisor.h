@@ -140,8 +140,9 @@ namespace Hypervisor
         if (hvOutput == 0xFFFF)
             return true; // command not implemented
 
-        if (hvOutput <= Shared::ErrorCodes::InvalidProcess)
-            return true; // documented error code
+        if (hvOutput >= Shared::ErrorCodes::Success &&
+            hvOutput <= Shared::ErrorCodes::InvalidProcess)
+            return true; // documented error code (Success itself is not an error)
 
         return false;
     }

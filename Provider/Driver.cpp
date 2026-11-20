@@ -1431,6 +1431,13 @@ static bool ReadWideStringField(const UNICODE_STRING& text, std::wstring& out) {
 	if (text.MaximumLength < text.Length)
 		return false;
 
+	/* The Buffer came from a candidate field discovered by content matching, so
+	 * it is not known to be a valid mapping. Probe it before handing it to the
+	 * provider; every other pointer-from-structure read in this file does the
+	 * same, and skipping it here can fault inside the IOCTL (0x50). */
+	if (!ProbeKernelRangeMapped((uint64_t)text.Buffer, text.Length))
+		return false;
+
 	auto buffer = std::make_unique<wchar_t[]>((ULONG64)text.Length / 2ULL + 1ULL);
 	if (!Driver::ReadMemory((uintptr_t)text.Buffer, buffer.get(), text.Length))
 		return false;
@@ -2902,6 +2909,15 @@ bool Driver::ClearMmUnloadedDrivers() {
 		us_driver_base_dll_name.Length % sizeof(wchar_t) != 0 ||
 		us_driver_base_dll_name.MaximumLength < us_driver_base_dll_name.Length) {
 		Log(L"[-] Driver name structure does not look valid, refusing to write" << std::endl);
+		return false;
+	}
+
+	/* Probe the name buffer before dereferencing it through the provider: the
+	 * field offset may be wrong for this build, which would turn a read into a
+	 * kernel fault inside the vulnerable driver. */
+	if (!ProbeKernelRangeMapped((uint64_t)us_driver_base_dll_name.Buffer,
+	                            us_driver_base_dll_name.Length)) {
+		Log(L"[-] Driver name buffer is not mapped, refusing to read" << std::endl);
 		return false;
 	}
 
