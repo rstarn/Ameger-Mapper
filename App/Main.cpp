@@ -998,25 +998,34 @@ static bool IsOptionValue(const int argc, wchar_t** argv, int i) {
 
 void help() {
 	LogBlank();
-	LogRaw(L"[+] Usage: Mapper.exe [--free [--force-free]][--indPages][--PassAllocationPtr][--copy-header][--hide [--require-hide]]" << std::endl);
-	LogRaw(L"         [--no-forensics][--silent][--dontUpdateOffsets [--offsetsPath \"FilePath\"]] [driver.sys]" << std::endl);
+	LogRaw(L"[+] Usage: Mapper.exe [options] [driver.sys]" << std::endl);
+	LogRaw(L"    Flags may be written as --name or /name. With no driver path, one is prompted for." << std::endl);
 	LogBlank();
-	LogRaw(L"[+] With neither --hide nor --free, Mapper asks:" << std::endl);
-	LogRaw(L"      Is the driver a Hypervisor? [Y/N]" << std::endl);
-	LogRaw(L"      The CPUID and VMMCALL probe output above the question is what to answer from." << std::endl);
+	LogRaw(L"[+] Deciding what happens to the image:" << std::endl);
+	LogRaw(L"      --hide                    Hide the image in the nested page table (for a hypervisor driver)" << std::endl);
+	LogRaw(L"      --require-hide            Abort if --hide was requested but no hypervisor is present" << std::endl);
+	LogRaw(L"      --free                    Release the image after DriverEntry; needs --force-free as well" << std::endl);
+	LogRaw(L"      --force-free              Acknowledge the driver never touches its image after DriverEntry" << std::endl);
+	LogRaw(L"                                (a callback-gate refusal still keeps the image resident)" << std::endl);
+	LogRaw(L"      (neither flag)            Ask whether the driver is a hypervisor, then choose hide or free" << std::endl);
 	LogBlank();
-	LogRaw(L"[+] Stealth and Safety Flags:" << std::endl);
-	LogRaw(L"      --hide                    Hide image in NPT (hypervisors)" << std::endl);
-	LogRaw(L"      --require-hide            Abort if --hide requested but no hypervisor present" << std::endl);
-	LogRaw(L"      --free                    Request image release after DriverEntry; ignored unless --force-free is also given" << std::endl);
-	LogRaw(L"      --force-free              Acknowledge that releasing is safe (the driver does not touch its image after DriverEntry)" << std::endl);
-	LogRaw(L"      --copy-header             Keep PE header in mapped image" << std::endl);
+	LogRaw(L"[+] Mapping and cleanup options:" << std::endl);
+	LogRaw(L"      --indPages                Per-section allocation and protection (pre-24H2 builds only)" << std::endl);
+	LogRaw(L"      --PassAllocationPtr       Pass the allocation base as DriverEntry's first argument" << std::endl);
+	LogRaw(L"      --copy-header             Keep the PE header in the mapped image" << std::endl);
+	LogRaw(L"      --no-forensics            Skip clearing PiDDB / hash-bucket / WdFilter residue" << std::endl);
 	LogRaw(L"      --silent                  Suppress the callback-gate refusal explanation" << std::endl);
 	LogBlank();
-	LogRaw(L"[+] Developer Flags:" << std::endl);
-	LogRaw(L"      --developer               Enable developer-only diagnostics (--probe-context)" << std::endl);
-	LogRaw(L"      --force-ask               With --developer: ask the question even when stdin is not a console" << std::endl);
-	LogRaw(L"      --force-hide-overwrite    Map a hypervisor over an active one (will bugcheck on most systems)" << std::endl);
+	LogRaw(L"[+] Symbol options:" << std::endl);
+	LogRaw(L"      --dontUpdateOffsets       Read Offsets.ini as-is instead of running SymbolTool" << std::endl);
+	LogRaw(L"      --offsetsPath <file>      Read that Offsets.ini (implies --dontUpdateOffsets)" << std::endl);
+	LogBlank();
+	LogRaw(L"[+] Developer diagnostics (require --developer):" << std::endl);
+	LogRaw(L"      --developer               Enable the options listed below" << std::endl);
+	LogRaw(L"      --probe-context <sys>     Pass a 96-byte context to DriverEntry and report what it wrote" << std::endl);
+	LogRaw(L"      --force-ask               Ask the y/n question even when stdin is not a console" << std::endl);
+	LogBlank();
+	LogRaw(L"      --help                    Show this text" << std::endl);
 	LogBlank();
 }
 
@@ -1609,30 +1618,26 @@ HypervisorProbeResult RunHypervisorProbe() {
  * running, because two of them on one machine fight over VMX/SVM ownership.
  */
 
-bool ShouldProceedWithMap(const HypervisorProbeResult& probe, bool hide, bool forceHideOverwrite) {
+bool ShouldProceedWithMap(const HypervisorProbeResult& probe, bool hide) {
 	if (!hide) {
 		if (probe.active) {
 			Log(L"[!] A hypervisor is already active. This driver is a normal driver (--free or answer N); "
 				L"the probe result is informational and mapping will proceed." << std::endl);
 		}
-		if (forceHideOverwrite) {
-			Log(L"[-] --force-hide-overwrite ignored: this driver is being mapped as a normal driver." << std::endl);
-		}
 		return true;
 	}
 
-	// hide is set: the operator declared this driver a hypervisor.
+	// hide is set: the operator declared this driver a hypervisor. Two of them
+	// fighting over VMX/SVM ownership bugchecks on most systems, so this is an
+	// unconditional refusal. There is no override flag: a developer who needs
+	// that experiment can patch the source, while a production run cannot be
+	// one mistyped switch away from a machine check.
 
 	if (!probe.active)
 		return true;
 
-	if (forceHideOverwrite) {
-		Log(L"[!] --force-hide-overwrite: mapping a hypervisor over an active one. This WILL bugcheck on most systems." << std::endl);
-		return true;
-	}
-
 	Log(L"[-] Cannot map a second hypervisor: one is already active." << std::endl);
-	Log(L"[-] Unmap the active hypervisor first, or pass --developer --force-hide-overwrite if you understand the risk." << std::endl);
+	Log(L"[-] Unmap the active hypervisor first, then try again." << std::endl);
 	return false;
 }
 
@@ -1666,7 +1671,6 @@ int wmain(const int argc, wchar_t** argv) {
 	bool silent = paramExists(argc, argv, L"silent") > 0;
 	bool developer = paramExists(argc, argv, L"developer") > 0;
 	bool forceAsk = paramExists(argc, argv, L"force-ask") > 0;
-	bool forceHideOverwrite = paramExists(argc, argv, L"force-hide-overwrite") > 0;
 
 	// --silent only silences the callback-gate refusal explanation now that the
 	// classifier is gone. It is not inferred from a missing console: a headless
@@ -1681,17 +1685,6 @@ int wmain(const int argc, wchar_t** argv) {
 
 	if (forceAsk && !developer) {
 		Log(L"[-] --force-ask requires --developer" << std::endl);
-		PauseBeforeExit();
-		return -1;
-	}
-
-	// --force-hide-overwrite maps a hypervisor over a running one, which
-	// bugchecks on most systems. It is listed under Developer Flags for the same
-	// reason --force-ask is, so it carries the same gate: a production run
-	// cannot reach it by adding one flag.
-
-	if (forceHideOverwrite && !developer) {
-		Log(L"[-] --force-hide-overwrite requires --developer" << std::endl);
 		PauseBeforeExit();
 		return -1;
 	}
@@ -1850,7 +1843,7 @@ int wmain(const int argc, wchar_t** argv) {
 	static const wchar_t* knownFlags[] = {
 		L"free", L"force-free", L"indPages", L"PassAllocationPtr", L"copy-header",
 		L"hide", L"no-forensics", L"dontUpdateOffsets", L"offsetsPath", L"help", L"probe-context",
-		L"require-hide", L"silent", L"developer", L"force-ask", L"force-hide-overwrite"
+		L"require-hide", L"silent", L"developer", L"force-ask"
 	};
 	for (int i = 1; i < argc; i++) {
 		const wchar_t* arg = argv[i];
@@ -2028,7 +2021,7 @@ int wmain(const int argc, wchar_t** argv) {
 	// the decision the probe used to take on its own, which made mapping an
 	// ordinary driver impossible while any hypervisor was loaded.
 
-	if (!ShouldProceedWithMap(probe, hide, forceHideOverwrite)) {
+	if (!ShouldProceedWithMap(probe, hide)) {
 		PauseBeforeExit();
 		return -1;
 	}
