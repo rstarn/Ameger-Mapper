@@ -20,12 +20,14 @@ namespace Mapper
 {
 
 	//One import being resolved, handed to an ImportResolver.
-	//name is null when the import is by ordinal rather than by name.
+	//name is null and by_ordinal true when the import is by ordinal. The flag is
+	//separate from ordinal because ordinal 0 is a valid 16-bit field value.
 
 	struct ImportLookup {
 		ULONG64 module_base;
 		const std::string* name;
 		uint16_t ordinal;
+		bool by_ordinal;
 	};
 
 	//Resolves one import to a kernel address, written to out_address.

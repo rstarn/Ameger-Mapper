@@ -512,14 +512,18 @@ static constexpr ULONG kMaxWdFilterRuntimeDrivers = 4096;
  * Nothing that is not a list head can satisfy the second case, because it
  * requires two independent objects to agree on the address of this field.
  *
- * Returns the offset when it verifies and 0 when it does not. A read failure is
- * also 0: the candidate is simply not usable.
+ * Returns the offset when it verifies and kWdListHeadNotFound when it does not.
+ * A distinct sentinel is required: offset 0 is a real, verifiable position (the
+ * first member of the structure), and using 0 for failure made that layout
+ * indistinguishable from a miss. A read failure is also the sentinel.
  */
+
+constexpr uint32_t kWdListHeadNotFound = 0xFFFFFFFFu;
 
 static uint32_t VerifyWdFilterListHead(uint64_t block_base, uint32_t candidate_offset) {
 	LIST_ENTRY head = { 0, 0 };
 	if (!Driver::ReadMemory(block_base + candidate_offset, &head, sizeof(head)))
-		return 0;
+		return kWdListHeadNotFound;
 
 	//Both links of a list head are kernel pointers. An uninitialised field, or
 	//one that lands on something other than a list, yields zero here.
@@ -527,7 +531,7 @@ static uint32_t VerifyWdFilterListHead(uint64_t block_base, uint32_t candidate_o
 	const uint64_t self = block_base + candidate_offset;
 	if (!IsKernelAddress(reinterpret_cast<uint64_t>(head.Flink)) ||
 		!IsKernelAddress(reinterpret_cast<uint64_t>(head.Blink)))
-		return 0;
+		return kWdListHeadNotFound;
 
 	//Empty list: both links point at the head itself.
 
@@ -547,17 +551,17 @@ static uint32_t VerifyWdFilterListHead(uint64_t block_base, uint32_t candidate_o
 
 	if (!ProbeKernelRangeMapped(reinterpret_cast<uint64_t>(head.Flink), sizeof(LIST_ENTRY)) ||
 		!ProbeKernelRangeMapped(reinterpret_cast<uint64_t>(head.Blink), sizeof(LIST_ENTRY)))
-		return 0;
+		return kWdListHeadNotFound;
 
 	LIST_ENTRY first = { 0, 0 };
 	LIST_ENTRY last = { 0, 0 };
 	if (!Driver::ReadMemory(reinterpret_cast<uint64_t>(head.Flink), &first, sizeof(first)) ||
 		!Driver::ReadMemory(reinterpret_cast<uint64_t>(head.Blink), &last, sizeof(last)))
-		return 0;
+		return kWdListHeadNotFound;
 
 	if (reinterpret_cast<uint64_t>(first.Blink) != self ||
 		reinterpret_cast<uint64_t>(last.Flink) != self)
-		return 0;
+		return kWdListHeadNotFound;
 
 	return candidate_offset;
 }
@@ -652,15 +656,16 @@ static bool FindWdFilterRuntimeDriverBlock(uint64_t block_base,
 
 	//The list head: pointer aligned, self verifying, found first.
 
-	uint32_t list_head = 0;
+	uint32_t list_head = kWdListHeadNotFound;
 	for (uint32_t offset = 0; offset < kScanWindow; offset += sizeof(void*)) {
-		if (VerifyWdFilterListHead(block_base, offset)) {
-			list_head = offset;
+		const uint32_t verified = VerifyWdFilterListHead(block_base, offset);
+		if (verified != kWdListHeadNotFound) {
+			list_head = verified;
 			break;
 		}
 	}
 
-	if (!list_head)
+	if (list_head == kWdListHeadNotFound)
 		return false;
 
 	for (uint32_t count_offset = 0; count_offset < kScanWindow; count_offset += sizeof(ULONG)) {

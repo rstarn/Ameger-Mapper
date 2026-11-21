@@ -30,6 +30,11 @@ namespace Utilities
 
 	bool ReadFileToMemory(const std::wstring& file_path, std::vector<BYTE>* out_buffer);
 
+	//Same read from an already-open handle. Callers that must verify the exact
+	//bytes they mapped (Authenticode, hashing) use one handle for both so the
+	//file cannot change between the read and the verification.
+	bool ReadFileToMemory(HANDLE file, std::vector<BYTE>* out_buffer);
+
 	//Write size bytes at address to desired_file_path, truncating it.
 	//Returns false when the write fails.
 

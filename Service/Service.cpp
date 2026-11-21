@@ -16,6 +16,50 @@
 #include "../Utilities/Console.hpp"
 #include "../App/NT.hpp"
 
+namespace
+{
+	/*
+	 * Original values of a service key that already existed before we loaded.
+	 *
+	 * RegisterAndStart saves them on success; StopAndRemove restores them instead
+	 * of deleting the key. A failure path inside RegisterAndStart already did its
+	 * own restore before returning, so this state only describes a load that
+	 * succeeded and therefore has a matching unload.
+	 */
+
+	struct SavedServiceKey {
+		std::wstring name;
+		bool existed = false;
+		bool have_image = false;
+		DWORD image_type = REG_SZ;
+		std::wstring image_path;
+		bool have_type = false;
+		DWORD type_data = 0;
+		DWORD type_len = 0;
+	};
+
+	SavedServiceKey g_savedServiceKey{};
+
+	void RestoreSavedValues(HKEY key, const SavedServiceKey& saved) {
+		if (saved.have_image) {
+			RegSetKeyValueW(key, NULL, L"ImagePath", saved.image_type,
+				saved.image_path.c_str(),
+				static_cast<DWORD>((saved.image_path.size() + 1) * sizeof(wchar_t)));
+		}
+		else {
+			RegDeleteKeyValueW(key, NULL, L"ImagePath");
+		}
+
+		if (saved.have_type) {
+			RegSetKeyValueW(key, NULL, L"Type", REG_DWORD,
+				&saved.type_data, saved.type_len);
+		}
+		else {
+			RegDeleteKeyValueW(key, NULL, L"Type");
+		}
+	}
+}
+
 //The kernel expects \??\<full path> as an NT object path.
 
 NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::wstring& serviceName) {
@@ -172,26 +216,36 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 
 		restore_or_delete_service_key();
 	}
-	else {
 
-		/*
-		 * Put the privilege back the way it was found.
-		 *
-		 * RtlAdjustPrivilege was asked to enable it and reported what it was
-		 * before doing so, and the answer was never used. The privilege stays on
-		 * for the rest of the process - nothing in the map path after the load
-		 * needs it. StopAndRemove does need it (NtUnloadDriver requires the same
-		 * SeLoadDriverPrivilege), so it re-enables it itself before it calls
-		 * NtUnloadDriver, which is why restoring it here does not block the
-		 * later unload. A process that quietly raises its own privilege and leaves
-		 * it raised is not a thing to leave in place by accident, so the earlier
-		 * state is still restored here.
-		 */
+	/*
+	 * Put the privilege back the way it was found, on BOTH outcomes.
+	 *
+	 * RtlAdjustPrivilege was asked to enable it and reported what it was
+	 * before doing so. Nothing in the map path after the load needs it.
+	 * StopAndRemove does need it (NtUnloadDriver requires the same
+	 * SeLoadDriverPrivilege), so it re-enables it itself before it calls
+	 * NtUnloadDriver, which is why restoring it here does not block the
+	 * later unload. A failed load must not leave the process holding a
+	 * privilege it only acquired for that one call: the earlier failure path
+	 * restored the registry key but skipped this, so the token stayed raised.
+	 */
 
-		if (!SeLoadDriverWasEnabled) {
-			BOOLEAN restored = FALSE;
-			Nt::RtlAdjustPrivilege(SE_LOAD_DRIVER_PRIVILEGE, FALSE, FALSE, &restored);
-		}
+	if (!SeLoadDriverWasEnabled) {
+		BOOLEAN restored = FALSE;
+		Nt::RtlAdjustPrivilege(SE_LOAD_DRIVER_PRIVILEGE, FALSE, FALSE, &restored);
+	}
+
+	//Only a successful load reaches here. Remember whether the key was ours or
+	//pre-existing so StopAndRemove can restore instead of delete it.
+	if (NT_SUCCESS(ntStatus)) {
+		g_savedServiceKey.name = serviceName;
+		g_savedServiceKey.existed = key_existed;
+		g_savedServiceKey.have_image = have_orig_image;
+		g_savedServiceKey.image_type = orig_image_type;
+		g_savedServiceKey.image_path = orig_image_path;
+		g_savedServiceKey.have_type = have_orig_type;
+		g_savedServiceKey.type_data = orig_type_data;
+		g_savedServiceKey.type_len = orig_type_len;
 	}
 
 	return ntStatus;
@@ -207,11 +261,30 @@ NTSTATUS Service::StopAndRemove(const std::wstring& serviceName) {
 	LSTATUS status = RegOpenKeyW(HKEY_LOCAL_MACHINE, servicesPath.c_str(), &driver_service);
 	if (status != ERROR_SUCCESS) {
 		if (status == ERROR_FILE_NOT_FOUND) {
+			g_savedServiceKey = SavedServiceKey{};
 			return STATUS_SUCCESS; //already removed
 		}
 		return STATUS_REGISTRY_IO_FAILED;
 	}
 	RegCloseKey(driver_service);
+
+	/* A key that already existed before RegisterAndStart must be restored, not
+	 * deleted: deleting it removes somebody else's service registration. Keys
+	 * this run created still get the tree delete below. */
+
+	const auto restore_or_delete = [&]() -> LSTATUS {
+		if (g_savedServiceKey.name == serviceName && g_savedServiceKey.existed) {
+			HKEY key = nullptr;
+			const LSTATUS opened = RegOpenKeyW(HKEY_LOCAL_MACHINE, servicesPath.c_str(), &key);
+			if (opened != ERROR_SUCCESS)
+				return opened;
+			RestoreSavedValues(key, g_savedServiceKey);
+			RegCloseKey(key);
+			Log(L"[*] Pre-existing service key restored on unload" << std::endl);
+			return ERROR_SUCCESS;
+		}
+		return RegDeleteTreeW(HKEY_LOCAL_MACHINE, servicesPath.c_str());
+	};
 
 	/*
 	 * NtUnloadDriver needs SeLoadDriverPrivilege enabled, just like NtLoadDriver.
@@ -251,11 +324,13 @@ NTSTATUS Service::StopAndRemove(const std::wstring& serviceName) {
 
 	if (!NT_SUCCESS(st)) {
 		Log("[-] Driver Unload Failed!!" << std::endl);
-		RegDeleteTreeW(HKEY_LOCAL_MACHINE, servicesPath.c_str());
+		(void)restore_or_delete();
+		g_savedServiceKey = SavedServiceKey{};
 		return st; //lets consider unload fail as error because can cause problems with anti cheats later
 	}
 
-	status = RegDeleteTreeW(HKEY_LOCAL_MACHINE, servicesPath.c_str());
+	status = restore_or_delete();
+	g_savedServiceKey = SavedServiceKey{};
 	if (status != ERROR_SUCCESS) {
 		return STATUS_REGISTRY_IO_FAILED;
 	}

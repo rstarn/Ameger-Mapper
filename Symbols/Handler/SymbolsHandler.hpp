@@ -12,12 +12,12 @@
 
 //Folder next to Mapper.exe and SymbolTool.exe holding dbghelp.dll and
 //symsrv.dll.
-//This is NOT a default DLL search location: SymbolTool.exe imports dbghelp.dll
-//(so the loader must find it before main runs) and dbghelp then loads symsrv.dll
-//itself. Both therefore resolve through the application directory, the system
-//directories and PATH - so every process that starts SymbolTool has to put this
-//folder on PATH. ReloadFile does that for the process it spawns, and
-//Build\Executors\Create.bat does it for its own invocation.
+//This is NOT a default DLL search location: SymbolTool.exe loads dbghelp.dll
+//explicitly from this folder with LOAD_WITH_ALTERED_SEARCH_PATH, and dbghelp
+//then loads symsrv.dll from the same folder. A static import would be resolved
+//before main() using the application directory and System32 first, where a
+//different dbghelp.dll lives. ReloadFile puts this folder on PATH for the child
+//it spawns and Build\Executors\Create.bat does so for its own invocation.
 #define SYMBOL_DLL_FOLDER L"DLLs"
 
 /*

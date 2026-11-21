@@ -88,6 +88,34 @@ bool Utilities::ReadFileToMemory(const std::wstring& file_path, std::vector<BYTE
 	return true;
 }
 
+bool Utilities::ReadFileToMemory(HANDLE file, std::vector<BYTE>* out_buffer) {
+	if (file == INVALID_HANDLE_VALUE || file == nullptr || !out_buffer)
+		return false;
+
+	//Read from the start regardless of the handle's current position: callers
+	//hand this helper a handle, not a stream, and the contract is "the file".
+	if (SetFilePointer(file, 0, nullptr, FILE_BEGIN) == INVALID_SET_FILE_POINTER &&
+		GetLastError() != NO_ERROR)
+		return false;
+
+	LARGE_INTEGER size{};
+	if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 ||
+		static_cast<uint64_t>(size.QuadPart) > kMaxReadFileSize)
+		return false;
+
+	out_buffer->assign(static_cast<size_t>(size.QuadPart), 0);
+	if (out_buffer->empty())
+		return true;
+
+	DWORD read = 0;
+	if (!ReadFile(file, out_buffer->data(), static_cast<DWORD>(out_buffer->size()), &read, nullptr) ||
+		read != out_buffer->size()) {
+		out_buffer->clear();
+		return false;
+	}
+	return true;
+}
+
 bool Utilities::CreateFileFromMemory(const std::wstring& desired_file_path, const char* address, size_t size) {
 	std::ofstream file_ofstream(desired_file_path.c_str(), std::ios_base::out | std::ios_base::binary);
 

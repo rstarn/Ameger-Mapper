@@ -7,10 +7,10 @@
 //existing Offsets.ini is touched and the mapper keeps working with the last
 //known good values.
 //
-// Note that the final write itself is not atomic: it truncates the destination
-//and then writes. If the process dies between those two steps the file is left
-//truncated. Everything that can fail is checked before this point, so the
-//remaining window is a write failure or a hard kill.
+// The final write is atomic: the bytes go to a pid-suffixed sibling temp file,
+//are flushed, then MoveFileExW(MOVEFILE_REPLACE_EXISTING) swaps it in. A write
+//failure or a hard kill leaves the previous Offsets.ini intact; the temp file
+//is removed on the failure paths that can still run.
 
 #include <Windows.h>
 
@@ -33,18 +33,27 @@ namespace
 	//unit in for a single function is not worth the build coupling.
 
 	std::wstring GetCurrentAppFolder() {
-		wchar_t buffer[1024] = { 0 };
-		const DWORD length = GetModuleFileNameW(NULL, buffer, static_cast<UINT>(std::size(buffer)));
+		/* GetModuleFileNameW reports truncation with a return value equal to the
+		 * buffer size. The old fixed buffer turned a valid long install path into
+		 * an empty folder, which made outputPath "\\Offsets.ini" at the drive
+		 * root. Grow until the whole path fits, with a sanity cap. */
 
-		/* nSize on return means the path was truncated and is not null-terminated;
-		 * only a shorter result is safe to wrap in std::wstring. */
-
-		if (length == 0u || length >= std::size(buffer))
-			return L"";
-		std::wstring::size_type pos = std::wstring(buffer).find_last_of(L"\\/");
-		if (pos == std::wstring::npos)
-			return L"";
-		return std::wstring(buffer).substr(0, pos);
+		std::wstring path;
+		for (DWORD capacity = MAX_PATH;;) {
+			path.assign(capacity, L'\0');
+			const DWORD length = GetModuleFileNameW(NULL, path.data(), capacity);
+			if (length == 0u)
+				return L"";
+			if (length < capacity) {
+				path.resize(length);
+				break;
+			}
+			if (capacity > (1u << 15))
+				return L"";
+			capacity *= 2;
+		}
+		const auto pos = path.find_last_of(L"\\/");
+		return pos == std::wstring::npos ? std::wstring() : path.substr(0, pos);
 	}
 
 	//A symbol resolved from a module's PDB, held until the whole report can be
@@ -219,6 +228,17 @@ int wmain()
 
 		const auto offsets = engine.GetOffset(pdbPath, symbols);
 		if (offsets.size() != symbols.size()) {
+			if (isWdFilter) {
+
+				//WdFilter's symbol names vary between builds. It is an optional
+				//cleanup module: a PDB that lacks one of them means "nothing to
+				//clean up", not "no offsets for this machine". Skip just this
+				//module and still publish the ntoskrnl/ci.dll values.
+
+				Log(L"[INFO] No symbols available for " << Val(binary)
+					<< L"; skipping its cleanup" << std::endl);
+				continue;
+			}
 			Log(L"[-] Could not resolve every symbol of " << Val(binary) << std::endl);
 			return -1;
 		}
@@ -413,21 +433,41 @@ int wmain()
 		fileBytes.push_back(static_cast<BYTE>((c >> 8) & 0xFF));
 	}
 
-	HANDLE hFile = CreateFileW(outputPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+	/* Write a sibling temp file and replace the real one in a single operation.
+	 * CREATE_ALWAYS on outputPath used to truncate the last known good file
+	 * before WriteFile ran, so a short write or a kill left a broken Offsets.ini
+	 * that the mapper then refused on every later run. The temp name carries the
+	 * pid so two SymbolTool instances cannot clobber each other's staging file. */
+
+	const std::wstring tempPath = outputPath + L".tmp." + std::to_wstring(GetCurrentProcessId());
+	HANDLE hFile = CreateFileW(tempPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
 		nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 	if (hFile == INVALID_HANDLE_VALUE) {
 		const DWORD err = GetLastError();
-		Log(L"[-] Could not open " << Val(outputPath) << L" for writing; Win32 error "
+		Log(L"[-] Could not open " << Val(tempPath) << L" for writing; Win32 error "
 			<< Val(err) << std::endl);
 		return -1;
 	}
 
 	DWORD written = 0;
-	const BOOL ok = WriteFile(hFile, fileBytes.data(), static_cast<DWORD>(fileBytes.size()), &written, nullptr);
+	BOOL ok = WriteFile(hFile, fileBytes.data(), static_cast<DWORD>(fileBytes.size()), &written, nullptr);
+	const DWORD write_error = ok ? ERROR_SUCCESS : GetLastError();
+	if (ok)
+		ok = FlushFileBuffers(hFile);
+	const DWORD flush_error = ok ? ERROR_SUCCESS : GetLastError();
 	CloseHandle(hFile);
 	if (!ok || written != static_cast<DWORD>(fileBytes.size())) {
+		const DWORD err = !ok ? (write_error != ERROR_SUCCESS ? write_error : flush_error) : ERROR_WRITE_FAULT;
+		DeleteFileW(tempPath.c_str());
+		Log(L"[-] Failed to write " << Val(tempPath) << L"; Win32 error " << Val(err) << std::endl);
+		return -1;
+	}
+
+	if (!MoveFileExW(tempPath.c_str(), outputPath.c_str(),
+		MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
 		const DWORD err = GetLastError();
-		Log(L"[-] Failed to write " << Val(outputPath) << L"; Win32 error " << Val(err) << std::endl);
+		DeleteFileW(tempPath.c_str());
+		Log(L"[-] Failed to replace " << Val(outputPath) << L"; Win32 error " << Val(err) << std::endl);
 		return -1;
 	}
 

@@ -264,7 +264,7 @@ static bool ResolveImportFromKernel(const Mapper::ImportLookup& request, void*, 
 	if (!request.module_base)
 		return false;
 
-	out_address = request.ordinal != 0
+	out_address = request.by_ordinal
 		? Driver::GetKernelModuleExportOrdinal(request.module_base, request.ordinal)
 		: Driver::GetKernelModuleExport(request.module_base, *request.name);
 
@@ -285,7 +285,8 @@ bool Mapper::ResolveImports(const PE::vec_imports& imports, ImportResolver resol
 		for (auto& current_function_data : current_import.function_datas) {
 			ImportLookup request{};
 			request.module_base = Module;
-			request.name = current_function_data.ordinal ? nullptr : &current_function_data.name;
+			request.by_ordinal = current_function_data.by_ordinal;
+			request.name = request.by_ordinal ? nullptr : &current_function_data.name;
 			request.ordinal = current_function_data.ordinal;
 
 			ULONG64 resolved = 0;
@@ -311,7 +312,7 @@ bool Mapper::ResolveImports(const PE::vec_imports& imports, ImportResolver resol
 				}
 			}
 
-			if (current_function_data.ordinal != 0) {
+			if (current_function_data.by_ordinal) {
 				Log(L"[-] Failed to resolve import ordinal " << Val(current_function_data.ordinal)
 					<< L" (" << Val(Utilities::ToWide(current_import.module_name)) << L")" << std::endl);
 			}
@@ -414,11 +415,29 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		if (image_section[i].VirtualAddress < TotalVirtualHeaderSize)
 			TotalVirtualHeaderSize = image_section[i].VirtualAddress;
 	}
-	if (destroyHeader && TotalVirtualHeaderSize > image_size) {
-		Log(L"[-] Header span exceeds the image, refusing to skip it" << std::endl);
+	// >=, not >: equality would subtract the whole image and leave a zero-byte
+	// allocation whose computed entry point sits outside it.
+	if (destroyHeader && TotalVirtualHeaderSize >= image_size) {
+		Log(L"[-] Header span consumes the whole image, refusing to skip it" << std::endl);
 		VirtualFree(local_image_base, 0, MEM_RELEASE);
 		return 0;
 	}
+
+	/* AddressOfEntryPoint is file controlled and was never validated. It is an
+	 * RVA that becomes kernel_image_base + RVA, so an out-of-range value handed
+	 * Driver::CallKernelFunction transfers control outside the allocation (or
+	 * into arbitrary kernel code). Check it here, in user mode, before any
+	 * kernel state exists. With destroyHeader the copied bytes start at RVA
+	 * TotalVirtualHeaderSize; without it the whole image is copied. */
+
+	const DWORD entry_rva = nt_headers->OptionalHeader.AddressOfEntryPoint;
+	if (entry_rva == 0 || entry_rva < (destroyHeader ? TotalVirtualHeaderSize : 0u) ||
+		entry_rva >= nt_headers->OptionalHeader.SizeOfImage) {
+		Log(L"[-] Entry point lies outside the mapped image, refusing to map" << std::endl);
+		VirtualFree(local_image_base, 0, MEM_RELEASE);
+		return 0;
+	}
+
 	image_size = image_size - (destroyHeader ? TotalVirtualHeaderSize : 0);
 
 	ULONG64 kernel_image_base = 0;

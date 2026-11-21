@@ -45,6 +45,15 @@ PIMAGE_NT_HEADERS64 PE::GetNtHeaders(void* image_base, size_t image_size) {
 	if (nt_headers->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
 		return nullptr;
 
+	/* Same reasoning for the machine type. This mapper uses the x64 image layout,
+	 * x64 relocation types and an x64 hook trampoline, so an ARM64 (0xAA64) or
+	 * otherwise non-AMD64 PE32+ image is not an image it can load. Refusing it
+	 * here prevents mapping foreign code into kernel memory and entering it as
+	 * x64, which is an invalid-instruction bugcheck rather than a clean error. */
+
+	if (nt_headers->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64)
+		return nullptr;
+
 	// A PE32+ optional header must be at least the fixed 64-bit size. A smaller
 	// file-controlled SizeOfOptionalHeader would put the section table inside
 	// the optional header, so every later field would be read from the wrong
@@ -175,7 +184,7 @@ bool PE::GetRelocs(void* image_base, size_t image_size, vec_relocs& relocs) {
 		//and the first use of one is a bugcheck.
 
 		if (current_base_relocation->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) ||
-			block_start + current_base_relocation->SizeOfBlock > image_end)
+			block_start + current_base_relocation->SizeOfBlock > reloc_end)
 			return false;
 
 		RelocInfo reloc_info;
@@ -362,6 +371,7 @@ bool PE::GetImports(void* image_base, size_t image_size, vec_imports& imports) {
 			}
 			else {
 				ImportFunctionInfo import_function_data;
+				import_function_data.by_ordinal = true;
 				import_function_data.ordinal = static_cast<uint16_t>(name_table->u1.Ordinal & 0xFFFF);
 				import_function_data.address = &current_first_thunk->u1.Function;
 

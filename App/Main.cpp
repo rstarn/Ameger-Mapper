@@ -302,11 +302,19 @@ namespace
 	//Authenticode status through WinVerifyTrust. A present but untrusted or
 	//expired chain is reported with its status code rather than as "signed", so
 	//the summary never claims more than the trust engine verified.
+	//
+	//The caller passes the SAME handle the image was read from. Opening `path`
+	//here instead would verify whatever happened to be on disk at this moment,
+	//not the bytes that were summarised and are about to be mapped: a swap in
+	//between produces a "Signed" line for an unsigned image. The handle was
+	//opened with FILE_SHARE_READ only, so no writer can change it underneath us.
 
-	std::wstring SignatureStatus(const std::wstring& path) {
+	std::wstring SignatureStatus(HANDLE image_file, const std::wstring& path) {
+		SetFilePointer(image_file, 0, nullptr, FILE_BEGIN);
 		WINTRUST_FILE_INFO file_info = {};
 		file_info.cbStruct = sizeof(file_info);
 		file_info.pcwszFilePath = path.c_str();
+		file_info.hFile = image_file;
 
 		WINTRUST_DATA trust_data = {};
 		trust_data.cbStruct = sizeof(trust_data);
@@ -352,14 +360,26 @@ namespace
 	 */
 
 	bool DescribeDriverImage(const std::wstring& path, std::vector<BYTE>* out_image) {
+		//One handle for both the read and the Authenticode check. FILE_SHARE_READ
+		//without FILE_SHARE_WRITE denies writers, so the bytes that are verified
+		//are the bytes that get mapped.
+		HANDLE image_file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+			nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (image_file == INVALID_HANDLE_VALUE) {
+			Log(L"[-] Failed to open \"" << Val(path) << L"\"" << std::endl);
+			return false;
+		}
+
 		std::vector<BYTE> image;
-		if (!Utilities::ReadFileToMemory(path, &image) || image.empty()) {
+		if (!Utilities::ReadFileToMemory(image_file, &image) || image.empty()) {
+			CloseHandle(image_file);
 			Log(L"[-] Failed to read \"" << Val(path) << L"\"" << std::endl);
 			return false;
 		}
 
 		const PIMAGE_NT_HEADERS64 nt_headers = PE::GetNtHeaders(image.data(), image.size());
 		if (!nt_headers) {
+			CloseHandle(image_file);
 			Log(L"[-] \"" << Val(path) << L"\" is not a valid PE32+ image" << std::endl);
 			return false;
 		}
@@ -373,6 +393,7 @@ namespace
 		PIMAGE_SECTION_HEADER section = nullptr;
 		uint16_t section_count = 0;
 		if (!PE::GetSectionTable(image.data(), image.size(), section, section_count)) {
+			CloseHandle(image_file);
 			Log(L"[-] \"" << Val(path) << L"\" has a section table that lies outside the file" << std::endl);
 			return false;
 		}
@@ -440,8 +461,9 @@ namespace
 		const auto& reloc = nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
 		Log(L"[+] Relocations:  " << Val(reloc.VirtualAddress && reloc.Size ? L"Present" : L"Absent") << std::endl);
 
-		Log(L"[+] Signature:    " << Val(SignatureStatus(path)) << std::endl);
+		Log(L"[+] Signature:    " << Val(SignatureStatus(image_file, path)) << std::endl);
 		LogBlank();
+		CloseHandle(image_file);
 
 		//Hand back the bytes that were just summarised. The mapper maps these,
 		//never a later re-read of the same path.
@@ -523,8 +545,11 @@ namespace
 		static const char* dangerous[] = {
 			"PsSetCreateProcessNotifyRoutine",
 			"PsSetCreateProcessNotifyRoutineEx",
+			"PsSetCreateProcessNotifyRoutineEx2",
 			"PsSetCreateThreadNotifyRoutine",
+			"PsSetCreateThreadNotifyRoutineEx",
 			"PsSetLoadImageNotifyRoutine",
+			"PsSetLoadImageNotifyRoutineEx",
 			"ObRegisterCallbacks",
 			"CmRegisterCallback",
 			"CmRegisterCallbackEx",
@@ -633,9 +658,16 @@ namespace
 				if (slot == 0)
 					break; // null terminator
 
-				// Skip ordinal imports
+				/* An ordinal thunk carries no name. Resolving it would mean
+				 * opening a DLL path taken from the untrusted image, so treat
+				 * an ordinal as an ambiguous import: this gate's contract is
+				 * "any ambiguity => false (do not free)". A callback imported
+				 * by ordinal must never be mistaken for a safe-to-free image. */
 
-				if (!(slot & IMAGE_ORDINAL_FLAG64)) {
+				if (slot & IMAGE_ORDINAL_FLAG64)
+					return false;
+
+				{
 					if (slot > 0xFFFFFFFFull) return false; // RVA is 32-bit
 					size_t nameOff = rva_to_off((DWORD)slot);
 					if (nameOff == SIZE_MAX || !fits(nameOff, sizeof(IMAGE_IMPORT_BY_NAME)))
@@ -705,10 +737,16 @@ namespace
 			const wchar_t* p = line.c_str();
 			while (*p == L' ' || *p == L'\t')
 				++p;
+			const wchar_t* end = p;
+			while (*end == L' ' || *end == L'\t' || *end == L'\r')
+				++end;
 
-			//Anything other than y or n (including an empty answer) re-prompts.
+			/* A complete answer, not just a first character. The old test
+			 * accepted "yellow" as y and "nonsense" as n, which silently chose
+			 * the free-vs-hide verdict from a truncated token. Anything longer
+			 * than one letter (including an empty answer) re-prompts. */
 
-			if (*p != L'y' && *p != L'Y' && *p != L'n' && *p != L'N') {
+			if (end != p + 1 || (*p != L'y' && *p != L'Y' && *p != L'n' && *p != L'N')) {
 				Log(L"[-] Answer with y or n" << std::endl);
 				continue;
 			}
@@ -1044,8 +1082,14 @@ bool ApplyHypervisorHide(bool hide, ULONG64 text_base, SIZE_T text_size) {
 				Log(L"[!] Not every processor confirmed the NPT flush" << std::endl);
 				hide_ok = false;
 			}
-			else {
+			else if (hide_ok) {
 				Log(L"[+] NPT Flush = Confirmed (Every Processor)" << std::endl);
+			}
+			else {
+				/* The flush worked, but Protect() already failed. Printing an
+				 * unqualified success marker next to "self-hide failed" made the
+				 * log look successful when the image was never hidden. */
+				Log(L"[i] NPT Flush = Confirmed, but the image was not hidden" << std::endl);
 			}
 		}
 	}
@@ -1596,22 +1640,6 @@ int wmain(const int argc, wchar_t** argv) {
 		return 0;
 	}
 
-	//The --probe-context switch runs the param2 propagation probe and returns
-	//immediately, without entering the normal map flow. It is a developer
-	//diagnostic - it issues a vmmcall and reports the raw ABI result - so it is
-	//refused unless --developer was also given, which keeps a production run
-	//from reaching it by accident.
-
-	int probeContextIdx = paramExists(argc, argv, L"probe-context");
-	if (probeContextIdx > 0) {
-		if (paramExists(argc, argv, L"developer") <= 0) {
-			Log(L"[-] --probe-context is a developer diagnostic; pass --developer to run it" << std::endl);
-			PauseBeforeExit();
-			return -1;
-		}
-		return RunProbeContext(argc, argv, probeContextIdx);
-	}
-
 	bool free = paramExists(argc, argv, L"free") > 0;
 	bool forceFree = paramExists(argc, argv, L"force-free") > 0;
 	bool indPagesMode = paramExists(argc, argv, L"indPages") > 0;
@@ -1710,6 +1738,24 @@ int wmain(const int argc, wchar_t** argv) {
 		Log(L"[-] HypervisorEnforcedCodeIntegrity\\Enabled = 0 (REG_DWORD), then restart." << std::endl);
 		PauseBeforeExit();
 		return -1;
+	}
+
+	/*
+	 * --probe-context must be dispatched AFTER the HVCI gate above. It runs the
+	 * real mapping path (Driver::Load and Mapper::MapDriver in Probe.cpp), so on
+	 * a Memory-Integrity host it reaches the same read-only kernel .text write
+	 * the gate exists to prevent. Dispatching it earlier made the gate dead for
+	 * this flag and turned a developer diagnostic into a 0x3B bugcheck.
+	 */
+
+	int probeContextIdx = paramExists(argc, argv, L"probe-context");
+	if (probeContextIdx > 0) {
+		if (paramExists(argc, argv, L"developer") <= 0) {
+			Log(L"[-] --probe-context is a developer diagnostic; pass --developer to run it" << std::endl);
+			PauseBeforeExit();
+			return -1;
+		}
+		return RunProbeContext(argc, argv, probeContextIdx);
 	}
 
 	/*

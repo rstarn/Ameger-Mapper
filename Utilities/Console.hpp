@@ -23,6 +23,7 @@
 #include <Windows.h>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <iostream>
 #include <iterator>
 #include <sstream>
@@ -83,10 +84,27 @@ namespace Console
 		return verbose;
 	}
 
-	//The sequence itself, or an empty string when colour is disabled.
+	/* True when stdout is a real console. Cached at first use so every colour
+	 * constant and EnableAnsiColors() agree on the same answer. A redirected
+	 * file or pipe is not a console, even though GetStdHandle succeeds. */
+
+	inline bool OutputIsConsole() {
+		static const bool value = [] {
+			const HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+			if (output == INVALID_HANDLE_VALUE || output == nullptr)
+				return false;
+			DWORD mode = 0;
+			return GetConsoleMode(output, &mode) != FALSE;
+		}();
+		return value;
+	}
+
+	//The sequence itself, or an empty string when colour is disabled or stdout
+	//is redirected. The comment on EnableAnsiColors promises plain-text logs;
+	//skipping only SetConsoleMode would still write raw escape bytes to a file.
 
 	inline const wchar_t* ColorOrPlain(const wchar_t* code) {
-		return ColorsDisabled() ? L"" : code;
+		return (ColorsDisabled() || !OutputIsConsole()) ? L"" : code;
 	}
 
 	inline const wchar_t* const kReset = ColorOrPlain(L"\x1b[0m");
@@ -106,18 +124,14 @@ namespace Console
 	 */
 
 	inline void EnableAnsiColors() {
-		if (ColorsDisabled())
+		if (ColorsDisabled() || !OutputIsConsole())
 			return;
 
 		static const bool enabled = [] {
-			const HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
-			if (console == INVALID_HANDLE_VALUE || console == nullptr)
-				return true;
-
+			HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
 			DWORD mode = 0;
 			if (!GetConsoleMode(console, &mode))
-				return true;
-
+				return false;
 			SetConsoleMode(console, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 			return true;
 		}();
@@ -257,12 +271,43 @@ namespace Console
 	//operator<< can call it.
 
 	inline void WriteNewline() {
-		const HANDLE console = GetStdHandle(STD_OUTPUT_HANDLE);
-		if (console == INVALID_HANDLE_VALUE || console == nullptr)
+		const HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+		if (output == INVALID_HANDLE_VALUE || output == nullptr)
 			return;
-		const wchar_t newline[] = L"\n";
 		DWORD written = 0;
-		WriteConsoleW(console, newline, 1, &written, nullptr);
+
+		/* Line text goes through the buffered std::wcout, while the newline goes
+		 * straight to the OS handle. Without a flush the newlines all land
+		 * before the text on redirected output, so flush first to keep them in
+		 * the right place. */
+
+		/* printf diagnostics (Hypervisor flush lines) use a second buffered
+		 * stream to the same handle. Flush it too, otherwise those lines are
+		 * held by the CRT and appear after later Log output in a redirected
+		 * log instead of in program order. */
+
+		std::fflush(stdout);
+		std::wcout.flush();
+
+		/*
+		 * GetConsoleMode succeeds only for a real console handle. WriteConsoleW
+		 * fails with ERROR_INVALID_HANDLE on a file or pipe, so when stdout was
+		 * redirected every newline vanished while the line text still reached
+		 * std::wcout: "Mapper.exe > log.txt" produced one continuous line.
+		 * WriteFile on the same handle writes the bytes directly. "\r\n" is what
+		 * std::endl emits through wcout on redirected Windows stdout, so the two
+		 * paths render the same line break even though the byte encodings differ
+		 * (one UTF-16 code unit on a console, two ASCII bytes in a file).
+		 */
+
+		if (OutputIsConsole()) {
+			const wchar_t newline[] = L"\n";
+			WriteConsoleW(output, newline, 1, &written, nullptr);
+		}
+		else {
+			const char newline[] = "\r\n";
+			WriteFile(output, newline, sizeof(newline) - 1, &written, nullptr);
+		}
 	}
 
 	class Line {

@@ -128,6 +128,14 @@ constexpr size_t kPathBufferChars = 32768;
 			digits = 2;
 		}
 
+		/* The sign check above only looked at index 0, so "0x-1" slipped past
+		 * it: stoull("-1", 16) wraps to ULLONG_MAX and the consumed count still
+		 * matches, producing a valid-looking ~0ULL offset. Check the first
+		 * character AFTER the optional prefix as well. */
+
+		if (value.size() <= digits || value[digits] == L'-' || value[digits] == L'+')
+			return false;
+
 		try {
 			size_t consumed = 0;
 

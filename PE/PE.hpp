@@ -32,16 +32,17 @@ namespace PE
 		ULONG32 count;
 	};
 
-	//One imported function. `ordinal` is non-zero when the import is by ordinal
-	//rather than by name, in which case `name` is empty. Both forms are legal and
-	//both have to be resolved: an unresolved IAT slot is 0 and the driver jumps
-	//there on its first call to that function.
+	//One imported function. `by_ordinal` is the explicit form flag; `ordinal`
+	//carries the 16-bit value for ordinal imports and may legitimately be 0, so
+	//it must not double as the flag. Both forms have to be resolved: an
+	//unresolved IAT slot is 0 and the driver jumps there on its first call.
 
 	struct ImportFunctionInfo
 	{
 		std::string name;
 		ULONG64* address;
 		uint16_t ordinal = 0;
+		bool by_ordinal = false;
 	};
 
 	//One imported module and everything it imports.
@@ -60,7 +61,8 @@ namespace PE
 	//
 	//Returns nullptr when the buffer is too small to hold a DOS header, when it
 	//is not a PE image, when e_lfanew points outside it, when the NT signature
-	//does not match, or when the optional header is not a PE32+ one.
+	//does not match, when the optional header is not a PE32+ one, or when the
+	//machine is not AMD64 (the only architecture this mapper can enter).
 	//
 	//The Magic test is here rather than at the call sites because every field
 	//this file reads afterwards - ImageBase, Subsystem, every DataDirectory entry

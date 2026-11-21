@@ -22,12 +22,14 @@
 #include "../../Utilities/Console.hpp"
 
 #include <Windows.h>
+#include <algorithm>
 #include <string>
 #include <memory>
 #include <random>
 #include <filesystem>
 #include <iostream>
 #include <iomanip>
+#include <limits>
 #include <dbghelp.h>
 
 namespace
@@ -91,17 +93,25 @@ namespace
 		//which this tool does not link.
 
 		static std::wstring ExeFolder() {
-			wchar_t buffer[MAX_PATH] = { 0 };
-			const DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+			/* GetModuleFileNameW returns nSize when the buffer was too small.
+			 * Refusing every path >= MAX_PATH disabled all symbol loading for a
+			 * valid long install path, so grow the buffer until the whole path
+			 * fits instead. The cap bounds a pathological return value. */
 
-			/* A truncated path is not null-terminated: std::wstring(buffer)
-			 * would read past the array. GetModuleFileNameW returns nSize on
-			 * truncation, so only a length strictly less than the buffer is a
-			 * complete, terminated path. */
-
-			if (length == 0u || length >= MAX_PATH)
-				return {};
-			std::wstring path(buffer);
+			std::wstring path;
+			for (DWORD capacity = MAX_PATH;;) {
+				path.assign(capacity, L'\0');
+				const DWORD length = GetModuleFileNameW(nullptr, path.data(), capacity);
+				if (length == 0u)
+					return {};
+				if (length < capacity) {
+					path.resize(length);
+					break;
+				}
+				if (capacity > (1u << 15))
+					return {};
+				capacity *= 2;
+			}
 			const auto pos = path.find_last_of(L"\\/");
 			return pos == std::wstring::npos ? std::wstring() : path.substr(0, pos);
 		}
@@ -202,9 +212,26 @@ namespace
  */
 
 std::wstring MakeTempSymbolStore() {
-	wchar_t tempRoot[MAX_PATH + 1] = { 0 };
-	if (!GetTempPathW(MAX_PATH, tempRoot))
-		return {};
+	/* GetTempPathW returns the required size when the buffer is too small. The
+	 * old fixed buffer ignored that nonzero truncation result and built every
+	 * candidate path from a truncated root, so a long TEMP broke symbol
+	 * resolution. Grow until the value fits, with a sanity cap. */
+
+	std::wstring tempRoot;
+	for (DWORD capacity = MAX_PATH;;) {
+		std::wstring buffer(capacity, L'\0');
+		const DWORD length = GetTempPathW(capacity, buffer.data());
+		if (length == 0u)
+			return {};
+		if (length < capacity) {
+			buffer.resize(length);
+			tempRoot = std::move(buffer);
+			break;
+		}
+		if (capacity > (1u << 15))
+			return {};
+		capacity *= 2;
+	}
 
 	//Seeded once, like every other generator in this project. 64 bits of it; the
 	//whole value is rendered as hex so nothing here is short either.
@@ -417,7 +444,13 @@ std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const
 		Log(L"[-] Cannot read " << Val(pdbPath) << L": " << Val(fileSizeError.message().c_str()) << std::endl);
 		return {};
 	}
-	const DWORD FileSize = (DWORD)fileSize;
+	//SymLoadModuleExW takes a DWORD size. A wider file would be passed with a
+	//truncated length, so refuse it rather than load a corrupt module.
+	if (fileSize > (std::numeric_limits<DWORD>::max)()) {
+		Log(L"[-] PDB too large to load: " << Val(pdbPath) << std::endl);
+		return {};
+	}
+	const DWORD FileSize = static_cast<DWORD>(fileSize);
 
 	// Load symbols for the module.
 	//The module is loaded at a fixed base with the PDB as the image, so the
@@ -445,7 +478,9 @@ std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const
 
 	SYMBOL_INFO_PACKAGEW SymInfoPackage{};
 	SymInfoPackage.si.SizeOfStruct = sizeof(SYMBOL_INFOW);
-	SymInfoPackage.si.MaxNameLen = sizeof(SymInfoPackage.name);//MAX_SYM_NAME + 1;
+	//MaxNameLen is in CHARACTERS, not bytes. sizeof(name) is twice the
+	//character count for this WCHAR array and would let dbghelp overrun it.
+	SymInfoPackage.si.MaxNameLen = MAX_SYM_NAME + 1;
 
 	std::vector<ULONG64> offsets{};
 
@@ -511,25 +546,34 @@ static bool GetFieldOffsetInternal(HANDLE hProcess, ULONG64 ModBase, const std::
 	if (!dbg.module)
 		return false;
 
-	//Fallback spellings for the types this project cares about.
+	/* Fallback spellings are scoped to ONE struct family. A single global list
+	 * let HashBucketEntry.DriverName resolve against _PiDDBCacheEntry, which has
+	 * a same-named member but a different layout; the caller then published that
+	 * offset under the HashBucketEntry key. Only alternate spellings of the same
+	 * type may be substituted. */
 
-	static const std::vector<std::wstring> alternateNames = {
-		L"_PiDDBCacheEntry", L"PiDDBCacheEntry", L"_PIDDBCACHE_ENTRY", L"_PIDDB_CACHE_ENTRY",
-		L"_HashBucketEntry", L"HashBucketEntry", L"_HASHBUCKET_ENTRY",
-		L"_RTL_PROCESS_MODULE_INFORMATION", L"RTL_PROCESS_MODULE_INFORMATION",
-		L"_RTL_PROCESS_MODULES", L"RTL_PROCESS_MODULES",
+	static const std::vector<std::vector<std::wstring>> nameFamilies = {
+		{ L"_PiDDBCacheEntry", L"PiDDBCacheEntry", L"_PIDDBCACHE_ENTRY", L"_PIDDB_CACHE_ENTRY" },
+		{ L"_HashBucketEntry", L"HashBucketEntry", L"_HASHBUCKET_ENTRY" },
+		{ L"_RTL_PROCESS_MODULE_INFORMATION", L"RTL_PROCESS_MODULE_INFORMATION" },
+		{ L"_RTL_PROCESS_MODULES", L"RTL_PROCESS_MODULES" },
 	};
 
 	std::vector<std::wstring> candidates = { structName };
-	for (const auto& alternate : alternateNames) {
-		if (alternate != structName)
-			candidates.push_back(alternate);
+	for (const auto& family : nameFamilies) {
+		if (std::find(family.begin(), family.end(), structName) == family.end())
+			continue;
+		for (const auto& alternate : family) {
+			if (alternate != structName)
+				candidates.push_back(alternate);
+		}
+		break;
 	}
 
 	for (const auto& candidate : candidates) {
 		SYMBOL_INFO_PACKAGEW package{};
 		package.si.SizeOfStruct = sizeof(SYMBOL_INFOW);
-		package.si.MaxNameLen = sizeof(package.name);
+		package.si.MaxNameLen = MAX_SYM_NAME + 1;
 
 		if (!dbg.SymGetTypeFromNameW(hProcess, ModBase, candidate.c_str(), &package.si) || !package.si.TypeIndex)
 			continue;
@@ -608,7 +652,13 @@ std::vector<SymbolEngine::FieldResult> SymbolEngine::GetStructFieldOffsets(const
 		Log(L"[-] Cannot read " << Val(pdbPath) << L": " << Val(fileSizeError.message().c_str()) << std::endl);
 		return {};
 	}
-	const DWORD FileSize = (DWORD)fileSize;
+	//SymLoadModuleExW takes a DWORD size. A wider file would be passed with a
+	//truncated length, so refuse it rather than load a corrupt module.
+	if (fileSize > (std::numeric_limits<DWORD>::max)()) {
+		Log(L"[-] PDB too large to load: " << Val(pdbPath) << std::endl);
+		return {};
+	}
+	const DWORD FileSize = static_cast<DWORD>(fileSize);
 
 	DWORD64 ModBase = dbg.SymLoadModuleExW(
 		(HANDLE)process,
