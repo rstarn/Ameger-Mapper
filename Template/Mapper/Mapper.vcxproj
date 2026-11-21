@@ -70,7 +70,7 @@
        its own drops it: the tail calls through extern "C" imports turn into
        call/ret and the shipped .text changes. Restated here so the code stays
        byte for byte what it was before this cleanup. -->
-      <AdditionalOptions>/D "PDB_OFFSETS" /EHc %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions>/EHc %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>

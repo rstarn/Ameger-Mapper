@@ -841,6 +841,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		//out everything they need, because the image becomes invalid as soon as
 		//DriverEntry returns.
 
+		bool image_released = false;
 		if (free && !driver_entry_failed) {
 			LogBlank();
 			Log(L"[+] Freeing memory" << std::endl);
@@ -864,6 +865,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 			else {
 				Log(L"[-] WARNING: Failed to free memory!" << std::endl);
 			}
+			image_released = free_status;
 		}
 
 		/*
@@ -878,10 +880,16 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 */
 
 		LogBlank();
-		if (free && !driver_entry_failed) {
-			Log(L"[+] Image released (--free); only the driver object at "
-				<< Val(reinterpret_cast<void*>(driver_object))
-				<< L" remains, which the loaded driver still references" << std::endl);
+		if (image_released) {
+			/* A failed free leaves the image resident, so the "released"
+			 * summary must be keyed on the call's result, not on --free. */
+			if (driver_object)
+				Log(L"[+] Image released (--free); only the driver object at "
+					<< Val(reinterpret_cast<void*>(driver_object))
+					<< L" remains, which the loaded driver still references" << std::endl);
+			else
+				Log(L"[+] Image released (--free); no driver object was created "
+					<< L"(--PassAllocationPtr)" << std::endl);
 		}
 		else {
 

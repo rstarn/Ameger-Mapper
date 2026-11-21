@@ -181,7 +181,18 @@ namespace Console
 	template <typename T, std::enable_if_t<std::is_integral_v<T>, int> = 0>
 	inline std::wstring Hex(T value) {
 		std::wostringstream stream;
-		stream << L"0x" << std::hex << value;
+		stream << L"0x" << std::hex;
+		//A bare uint8_t selects the character overload and prints a glyph (or
+		//a control byte) instead of its numeric value. Widen small integers.
+		if constexpr (sizeof(T) < sizeof(int)) {
+			if constexpr (std::is_signed_v<T>)
+				stream << static_cast<int>(value);
+			else
+				stream << static_cast<unsigned int>(value);
+		}
+		else {
+			stream << value;
+		}
 		return stream.str();
 	}
 

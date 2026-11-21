@@ -1412,24 +1412,37 @@ NTSTATUS Driver::Unload() {
 	const bool removed = std::filesystem::remove(driver_path, remove_error);
 
 	if (!removed || remove_error) {
-		if (remove_error) {
-			Log(L"[-] Could not remove the provider file (error "
-				<< Val(static_cast<unsigned long>(remove_error.value())) << L")" << std::endl);
+		std::error_code exists_error;
+		const bool still_there = std::filesystem::exists(driver_path, exists_error);
+
+		if (!remove_error && !still_there) {
+			/* The file vanished between the size check and the unlink. Nothing
+			 * is left to wipe or report; treating it as a failed delete used to
+			 * produce STATUS_DELETE_PENDING and a "driver still resident" alarm
+			 * for a file another process had already removed. */
+			Log(L"[INFO] The provider file is already gone, nothing to remove" << std::endl);
 		}
 		else {
-			Log(L"[-] Could not remove the provider file" << std::endl);
+			if (remove_error) {
+				Log(L"[-] Could not remove the provider file (error "
+					<< Val(static_cast<unsigned long>(remove_error.value())) << L")" << std::endl);
+			}
+			else {
+				Log(L"[-] Could not remove the provider file" << std::endl);
+			}
+
+			/*
+			 * Still there. If the bytes were also not destroyed, or the service
+			 * failed, something was left behind and the returned status has to
+			 * say so: it is the only way the caller can tell this run from a
+			 * clean one.
+			 */
+
+			if (!wiped && NT_SUCCESS(service_status))
+				return STATUS_DELETE_PENDING;
+
+			return service_status;
 		}
-
-		/*
-		 * Still there. If the bytes were also not destroyed, or the service
-		 * failed, something was left behind and the returned status has to say so:
-		 * it is the only way the caller can tell this run from a clean one.
-		 */
-
-		if (!wiped && NT_SUCCESS(service_status))
-			return STATUS_DELETE_PENDING;
-
-		return service_status;
 	}
 
 	if (!wiped) {
@@ -3277,7 +3290,10 @@ bool Driver::ClearMmUnloadedDrivers() {
  */
 
 uint64_t Driver::GetKernelModuleExportOrdinal(uint64_t kernel_module_base, uint16_t ordinal) {
-	if (!kernel_module_base || !ordinal)
+	//Ordinal 0 is legal when an export directory's Base is 0. The form flag in
+	//PE::ImportFunctionInfo distinguishes "by ordinal" from "by name", so 0 must
+	//not be rejected here; the Base/index checks below bound it correctly.
+	if (!kernel_module_base)
 		return 0;
 
 	const auto headers = ReadKernelModuleHeaders(kernel_module_base);

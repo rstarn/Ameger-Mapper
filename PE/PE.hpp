@@ -40,7 +40,7 @@ namespace PE
 	struct ImportFunctionInfo
 	{
 		std::string name;
-		ULONG64* address;
+		ULONG64* address = nullptr;
 		uint16_t ordinal = 0;
 		bool by_ordinal = false;
 	};

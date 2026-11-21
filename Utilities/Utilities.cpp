@@ -157,7 +157,8 @@ uint64_t Utilities::GetKernelModuleAddress(const std::string& module_name) {
 
 	const auto modules = static_cast<Nt::PRTL_PROCESS_MODULES>(buffer);
 	if (!modules || modules->NumberOfModules == 0) {
-		VirtualFree(buffer, 0, MEM_RELEASE);
+		if (buffer)
+			VirtualFree(buffer, 0, MEM_RELEASE);
 		return 0;
 	}
 

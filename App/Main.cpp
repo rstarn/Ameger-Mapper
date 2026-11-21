@@ -947,9 +947,16 @@ LONG WINAPI SimplestCrashHandler(EXCEPTION_POINTERS* ExceptionInfo)
 //Windows convention reserves -flag for a POSIX tool, which this is not, and
 //accepting it silently would make a mistyped -free run with the flag ignored.
 
+static bool IsOptionValue(const int argc, wchar_t** argv, int i);
+
 int paramExists(const int argc, wchar_t** argv, const wchar_t* param) {
 	size_t plen = wcslen(param);
 	for (int i = 1; i < argc; i++) {
+		//A token that is the value of --offsetsPath/--probe-context is not a
+		//flag. Scanning it as one let `--offsetsPath --silent` silently enable
+		//silent mode as well as pass "--silent" as the offsets file path.
+		if (IsOptionValue(argc, argv, i))
+			continue;
 		if (wcslen(argv[i]) == plen + 1ull && _wcsicmp(&argv[i][1], param) == 0 && argv[i][0] == '/') { // with slash
 			return i;
 		}
@@ -1219,6 +1226,10 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 		 * hide and hang the machine. Freeing is incompatible with hiding, so
 		 * force it off here. */
 
+		if (free || forceFree) {
+			Log(L"[!] --free/--force-free ignored with --hide: the hidden pages are the image allocation itself;" << std::endl);
+			Log(L"    releasing them would free the pages under the NPT hide and hang the machine." << std::endl);
+		}
 		free = false;
 		forceFree = false;
 		copyHeader = true;

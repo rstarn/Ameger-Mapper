@@ -67,6 +67,16 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 	const std::wstring servicesPath = L"SYSTEM\\CurrentControlSet\\Services\\" + serviceName;
 	const std::wstring nPath = L"\\??\\" + driver_path;
 
+	/* Detect pre-existence by opening the key BEFORE creating it. Looking only
+	 * for ImagePath/Type/Start misclassified an existing key that held other
+	 * values (or none), so a failed load deleted somebody else's service key. */
+
+	HKEY existing_key = nullptr;
+	const bool key_existed = RegOpenKeyExW(HKEY_LOCAL_MACHINE, servicesPath.c_str(),
+		0, KEY_READ, &existing_key) == ERROR_SUCCESS;
+	if (existing_key)
+		RegCloseKey(existing_key);
+
 	HKEY dservice;
 	LSTATUS status = RegCreateKeyW(HKEY_LOCAL_MACHINE, servicesPath.c_str(), &dservice);
 	if (status != ERROR_SUCCESS) {
@@ -75,8 +85,6 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 	}
 
 	/*
-	 * Whether this key already existed.
-	 *
 	 * Every failure path below deletes the whole key, which is right for a key
 	 * this run created and wrong for one it found: RegCreateKeyW opens an
 	 * existing key rather than failing, so a vendor-installed service under a
@@ -84,10 +92,6 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 	 * ever loaded anything. The cleanup deletes only what was created here, and
 	 * otherwise leaves the pre-existing key alone.
 	 */
-
-	const bool key_existed = RegQueryValueExW(dservice, L"ImagePath", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS ||
-		RegQueryValueExW(dservice, L"Type", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS ||
-		RegQueryValueExW(dservice, L"Start", nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
 
 	DWORD orig_type_len = 0;
 	DWORD orig_type_data = 0;
@@ -196,7 +200,8 @@ NTSTATUS Service::RegisterAndStart(const std::wstring& driver_path, const std::w
 
 	ntStatus = Nt::NtLoadDriver(&serviceStr);
 
-	Log(L"[+] NtLoadDriver Status " << Val(Hex(ntStatus)) << std::endl);
+	Log((NT_SUCCESS(ntStatus) ? L"[+]" : L"[-]") << L" NtLoadDriver Status "
+		<< Val(Hex(ntStatus)) << std::endl);
 
 	if (ntStatus == STATUS_IMAGE_CERT_REVOKED) {
 		Log("[-] Your vulnerable driver blocklist is enabled and has blocked the provider from loading, you must disable it" << std::endl);
@@ -309,7 +314,8 @@ NTSTATUS Service::StopAndRemove(const std::wstring& serviceName) {
 	}
 
 	NTSTATUS st = Nt::NtUnloadDriver(&serviceStr);
-	Log(L"[+] NtUnloadDriver Status: " << Val(Hex(st)) << std::endl);
+	Log((NT_SUCCESS(st) ? L"[+]" : L"[-]") << L" NtUnloadDriver Status: "
+		<< Val(Hex(st)) << std::endl);
 
 	/*
 	 * Restore the privilege to its prior state before the failure path below

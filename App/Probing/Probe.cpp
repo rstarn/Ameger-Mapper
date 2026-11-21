@@ -170,7 +170,12 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 		ctx->driver_ntstatus == (uint64_t)0 &&
 		ctx->probe_echo == 0xDEADBEEFCAFEBABEull;
 
-	if (mapped && entry_ok && fields_ok)
+	/* The printed verdict must match the exit code below, which also requires
+	 * a clean provider unload. Otherwise a failed teardown printed PASS while
+	 * returning -1, so log readers and script exit codes disagreed. */
+
+	const bool probe_passed = mapped && entry_ok && fields_ok && provider_clean;
+	if (probe_passed)
 		Log(L"PROBE_RESULT=PASS" << std::endl);
 	else
 		Log(L"PROBE_RESULT=FAIL" << std::endl);
@@ -237,7 +242,7 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 		}
 		LogRaw(hex.str());
 
-		return (mapped && entry_ok && fields_ok && provider_clean) ? 0 : -1;
+		return probe_passed ? 0 : -1;
 	}
 
 	VirtualFree(ring_buffer, 0, MEM_RELEASE);
@@ -257,5 +262,5 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 
 	VirtualFree(ctx, 0, MEM_RELEASE);
 
-	return (mapped && entry_ok && fields_ok && provider_clean) ? 0 : -1;
+	return probe_passed ? 0 : -1;
 }

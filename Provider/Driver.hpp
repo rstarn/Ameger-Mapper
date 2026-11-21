@@ -20,11 +20,10 @@
 * Anything that cannot be resolved from symbols is not trusted on its own: the
 * caller must structurally validate the object before writing to it.
 *
-* PDB_OFFSETS is not optional. The build that ships defines it, and the kernel
-* walks read SymbolsHandler unconditionally from Driver.cpp, so a configuration
-* without it does not fall back to compiled-in offsets - it does not compile.
-* The guards that used to suggest otherwise have been removed rather than left
-* to mislead the next reader.
+* There is no preprocessor switch for these offsets: the kernel walks read
+* SymbolsHandler unconditionally from Driver.cpp. An older PDB_OFFSETS macro
+* appeared only in the project file and in a comment; no translation unit read
+* it, so it was removed rather than left as a misleading build gate.
 */
 
 struct DriverOffsets {
