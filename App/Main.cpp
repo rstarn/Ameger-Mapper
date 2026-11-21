@@ -1781,16 +1781,12 @@ int wmain(const int argc, wchar_t** argv) {
 		Log(L"[+] Copying driver header enabled" << std::endl);
 	}
 
-	bool UpdateOffset = !(paramExists(argc, argv, L"dontUpdateOffsets") > 0);
 	int FilePathParamIdx = paramExists(argc, argv, L"offsetsPath");
+	//A custom offsets file implies --dontUpdateOffsets: there is nothing to
+	//regenerate into that path, and running the updater would overwrite the
+	//default file instead of the one the caller named.
+	bool UpdateOffset = !(paramExists(argc, argv, L"dontUpdateOffsets") > 0 || FilePathParamIdx > 0);
 	std::wstring offsetFilePath = Utilities::GetCurrentAppFolder() + L"\\Offsets.ini";
-
-	if (UpdateOffset && FilePathParamIdx > 0) {
-		Log("[-] Can't set --offsetsPath without set --dontUpdateOffsets" << std::endl);
-		help();
-		PauseBeforeExit();
-		return -1;
-	}
 
 	if (FilePathParamIdx > 0) {
 

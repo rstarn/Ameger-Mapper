@@ -399,9 +399,10 @@ NTSTATUS Driver::Load() {
 			<< L" came from symbols, the rest are using compiled defaults (unresolved fields are validated at runtime)" << std::endl);
 	LogBlank();
 
-	//Two steps, deliberately separate. ResolveMmPteBase reads the symbol, and
-	//ProbePteSelfMapBase chooses the base that is actually verified to index the
-	//pages that matter - the two are not the same value on every build.
+	//Two steps, deliberately separate. ResolveMmPteBase reads the value from
+	//nt!MmPteBase; ProbePteSelfMapBase proves that value really indexes the
+	//kernel's page tables before it is used. The verified base is the symbol
+	//value itself - there is no fallback candidate to choose between.
 
 	if (!ResolveMmPteBase()) {
 		Log(L"[-] nt!MmPteBase could not be read" << std::endl);
