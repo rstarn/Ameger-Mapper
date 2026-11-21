@@ -132,8 +132,10 @@ namespace
 		/* strtoull accepts its own 0x prefix. With the outer prefix already
 		 * skipped, "0x0x10" would otherwise be consumed as a valid 0x10. */
 
-		if (digits == 2 && value.size() > 2 && value[2] == L'0' &&
-			(value.size() == 3 || value[3] == L'x' || value[3] == L'X'))
+		//A single hex digit after the prefix ("0x0") is valid. Only a second
+		//prefix ("0x0x10", "0x0X") is malformed.
+		if (digits == 2 && value.size() >= 4 && value[2] == L'0' &&
+			(value[3] == L'x' || value[3] == L'X'))
 			return false;
 
 		try {
