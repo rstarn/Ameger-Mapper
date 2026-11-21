@@ -22,7 +22,7 @@
 #include <iostream>
 #include <sstream>
 
-#include "Engine/SymbolEngine.hpp"
+#include "Engine/Symbol.hpp"
 #include "../Utilities/Support/Console.hpp"
 
 namespace
@@ -112,7 +112,7 @@ int wmain()
 
 		// Base of the page table self-map window. Resolved rather than hardcoded because the
 		// value is build dependent, and a wrong constant is an unmapped address.
-		// Symbols\Handler\SymbolsHandler.cpp reads it, Driver.cpp uses it.
+		// Symbols\Handler\Symbols.cpp reads it, Driver.cpp uses it.
 
 		L"ntoskrnl.exe", L"MmPteBase" },
 		{ L"ci.dll", L"g_KernelHashBucketList" },

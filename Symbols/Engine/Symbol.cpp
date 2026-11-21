@@ -1,5 +1,5 @@
 /*
- * dbghelp based PDB reader. See SymbolEngine.hpp for the contract.
+ * dbghelp based PDB reader. See Symbol.hpp for the contract.
  *
  * Two kinds of lookup are used:
  *   - symbols, through SymFromName
@@ -18,7 +18,7 @@
  * from that same folder, which is what actually makes the layout work.
  */
 
-#include "SymbolEngine.hpp"
+#include "Symbol.hpp"
 #include "../../Utilities/Support/Console.hpp"
 
 #include <Windows.h>

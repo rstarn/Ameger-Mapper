@@ -57,10 +57,10 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\..\Symbols\Main.cpp" />
-    <ClCompile Include="..\..\Symbols\Engine\SymbolEngine.cpp" />
+    <ClCompile Include="..\..\Symbols\Engine\Symbol.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\Symbols\Engine\SymbolEngine.hpp" />
+    <ClInclude Include="..\..\Symbols\Engine\Symbol.hpp" />
     <ClInclude Include="..\..\Utilities\Support\Console.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

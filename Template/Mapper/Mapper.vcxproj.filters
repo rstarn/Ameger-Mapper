@@ -19,7 +19,7 @@
     <ClCompile Include="..\..\Service\Service.cpp">
       <Filter>Service</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\Symbols\Handler\SymbolsHandler.cpp">
+    <ClCompile Include="..\..\Symbols\Handler\Symbols.cpp">
       <Filter>Handler</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Utilities\Support\Utilities.cpp">
@@ -54,7 +54,7 @@
     <ClInclude Include="..\..\Service\Service.hpp">
       <Filter>Service</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\Symbols\Handler\SymbolsHandler.hpp">
+    <ClInclude Include="..\..\Symbols\Handler\Symbols.hpp">
       <Filter>Handler</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Utilities\Support\Console.hpp">

@@ -4,9 +4,6 @@
     <Filter Include="Symbols">
       <UniqueIdentifier>{70b2ef87-61ad-4384-d598-82b0d61a7367}</UniqueIdentifier>
     </Filter>
-    <Filter Include="Engine">
-      <UniqueIdentifier>{92d40109-83cf-4aab-f6b9-a4d2f83c9589}</UniqueIdentifier>
-    </Filter>
     <Filter Include="Utilities">
       <UniqueIdentifier>{81c3f098-72be-4495-e6a9-93c1e72b8478}</UniqueIdentifier>
     </Filter>
@@ -15,13 +12,13 @@
     <ClCompile Include="..\..\Symbols\Main.cpp">
       <Filter>Symbols</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\Symbols\Engine\SymbolEngine.cpp">
-      <Filter>Engine</Filter>
+    <ClCompile Include="..\..\Symbols\Engine\Symbol.cpp">
+      <Filter>Symbols</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\Symbols\Engine\SymbolEngine.hpp">
-      <Filter>Engine</Filter>
+    <ClInclude Include="..\..\Symbols\Engine\Symbol.hpp">
+      <Filter>Symbols</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Utilities\Support\Console.hpp">
       <Filter>Utilities</Filter>

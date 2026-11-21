@@ -5,7 +5,7 @@
 #include <vector>
 
 //Folder next to the executable holding dbghelp.dll and symsrv.dll.
-//Kept in step with SYMBOL_DLL_FOLDER in Symbols\Handler\SymbolsHandler.hpp, which
+//Kept in step with SYMBOL_DLL_FOLDER in Symbols\Handler\Symbols.hpp, which
 //is the mapper side of the same layout; the two programs do not share a header,
 //so both spell it out here.
 
@@ -38,7 +38,7 @@ struct FieldRequest {
  * structure field offsets from Microsoft's public PDBs.
  *
  * Loads dbghelp.dll and symsrv.dll from the DLLs subfolder next to the
- * executable; see SymbolEngine.cpp for why that is done explicitly rather than
+ * executable; see Symbol.cpp for why that is done explicitly rather than
  * through the import table.
  *
  * Every function reports failure by returning an empty container instead of

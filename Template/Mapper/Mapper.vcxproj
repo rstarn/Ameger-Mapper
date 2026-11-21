@@ -101,7 +101,7 @@ copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Comm
     <!-- Service -->
     <ClCompile Include="..\..\Service\Service.cpp" />
     <!-- Symbols -->
-    <ClCompile Include="..\..\Symbols\Handler\SymbolsHandler.cpp" />
+    <ClCompile Include="..\..\Symbols\Handler\Symbols.cpp" />
     <!-- Utilities -->
     <ClCompile Include="..\..\Utilities\Support\Utilities.cpp" />
   </ItemGroup>
@@ -121,7 +121,7 @@ copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Comm
     <!-- Service -->
     <ClInclude Include="..\..\Service\Service.hpp" />
     <!-- Symbols -->
-    <ClInclude Include="..\..\Symbols\Handler\SymbolsHandler.hpp" />
+    <ClInclude Include="..\..\Symbols\Handler\Symbols.hpp" />
     <!-- Utilities -->
     <ClInclude Include="..\..\Utilities\Support\Console.hpp" />
     <ClInclude Include="..\..\Utilities\Support\Utilities.hpp" />

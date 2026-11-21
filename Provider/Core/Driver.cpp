@@ -34,7 +34,7 @@
 #include "../../Service/Service.hpp"
 #include "../../App/NT.hpp"
 #include "../../Parsing/PE.hpp"
-#include "../../Symbols/Handler/SymbolsHandler.hpp"
+#include "../../Symbols/Handler/Symbols.hpp"
 
 //Kernel page table self-mapping helpers are defined further down the file.
 
