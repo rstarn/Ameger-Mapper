@@ -182,15 +182,10 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 		ctx->driver_ntstatus == (uint64_t)0 &&
 		ctx->probe_echo == 0xDEADBEEFCAFEBABEull;
 
-	/* The printed verdict must match the exit code below, which also requires
-	 * a clean provider unload. Otherwise a failed teardown printed PASS while
-	 * returning -1, so log readers and script exit codes disagreed. */
+	/* The core conditions are collected here; comm_ok and a confirmed shutdown
+	 * are added below before the verdict is printed. */
 
-	const bool probe_passed = mapped && entry_ok && fields_ok && provider_clean;
-	if (probe_passed)
-		Log(L"PROBE_RESULT=PASS" << std::endl);
-	else
-		Log(L"PROBE_RESULT=FAIL" << std::endl);
+	const bool core_ok = mapped && entry_ok && fields_ok && provider_clean;
 
 	//Report every context field so the result is auditable.
 
@@ -231,7 +226,19 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	}
 	Log(L"cmd_status     = " << Val(Hex(cmd->status)) << std::endl);
 
-	if (ctx->shutdown_complete != 1) {
+	/* The verdict must cover everything the probe actually tested. A driver
+	 * can write the four "started" fields yet never answer the ping or confirm
+	 * shutdown; printing PASS and exiting 0 in that case made the log and the
+	 * exit code disagree about whether the probe succeeded. */
+
+	const bool shutdown_ok = ctx->shutdown_complete == 1;
+	const bool probe_passed = core_ok && comm_ok && shutdown_ok;
+	if (probe_passed)
+		Log(L"PROBE_RESULT=PASS" << std::endl);
+	else
+		Log(L"PROBE_RESULT=FAIL" << std::endl);
+
+	if (!shutdown_ok) {
 
 		/* The driver MDL-locks ring_buffer and writes ctx fields. If it has not
 		 * confirmed shutdown it may still hold those MDLs; freeing the user VA

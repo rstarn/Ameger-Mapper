@@ -63,8 +63,6 @@
  * 24H2, so it has to be the real build.
  */
 
-extern "C" NTSTATUS NTAPI RtlGetVersion(PRTL_OSVERSIONINFOW version_information);
-
 /*
  * Console colour and layout come from Console.hpp, which is shared with
  * SymbolTool so both programs print the same way: two-space indent, coloured
@@ -119,7 +117,7 @@ namespace
 	DWORD RunningBuildNumber() {
 		RTL_OSVERSIONINFOW version = {};
 		version.dwOSVersionInfoSize = sizeof(version);
-		if (!NT_SUCCESS(RtlGetVersion(&version)))
+		if (!NT_SUCCESS(Nt::RtlGetVersion(&version)))
 			return 0;
 		return version.dwBuildNumber;
 	}

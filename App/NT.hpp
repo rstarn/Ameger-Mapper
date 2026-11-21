@@ -38,7 +38,7 @@ namespace Nt
 
 	//ntdll export; fills the same RTL_OSVERSIONINFOW that GetVersionExW uses.
 
-	extern "C" NTSTATUS RtlGetVersion(PRTL_OSVERSIONINFOW version_information);
+	extern "C" NTSTATUS NTAPI RtlGetVersion(PRTL_OSVERSIONINFOW version_information);
 
 	/*
 	 * SystemModuleInformation result, used to locate loaded kernel modules.
