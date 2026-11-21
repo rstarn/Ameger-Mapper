@@ -505,8 +505,8 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 	 * PDB walk order SymbolTool wrote them in: the allocation primitives the
 	 * mapper calls, the PiDDBCacheTable it walks, the ci.dll hash bucket cache,
 	 * then PiDDBLock, then MmPteBase - the address the read-only write
-	 * primitive is built on, which is reported last because it is the last
-	 * thing resolved before the first kernel call.
+	 * primitive is built on - and finally g_HashCacheLock, which is the last
+	 * offset the updater resolves.
 	 *
 	 * A symbol this list does not name keeps its file order and still reports,
 	 * so a newly resolved symbol can never vanish from the report by being

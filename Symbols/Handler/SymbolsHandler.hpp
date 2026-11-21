@@ -5,9 +5,9 @@
 #include <string>
 #include <unordered_map>
 
-//Name of the offset generator built by Template\SymbolTool.vcxproj. It is
-//deployed next to Mapper.exe and is what --dontUpdateOffsets turns off.
-//Keep in sync with <TargetName> in Template\SymbolTool.vcxproj.
+//Name of the offset generator built by Template\Symbols\SymbolTool.vcxproj.
+//It is deployed next to Mapper.exe and is what --dontUpdateOffsets turns off.
+//Keep in sync with <TargetName> in that project.
 #define SYMBOL_TOOL_EXE L"SymbolTool.exe"
 
 //Folder next to Mapper.exe and SymbolTool.exe holding dbghelp.dll and

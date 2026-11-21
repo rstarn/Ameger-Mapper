@@ -256,9 +256,9 @@ bool PE::GetImports(void* image_base, size_t image_size, vec_imports& imports) {
 	if (import_va >= image_extent)
 		return false;
 
-	//The end of the buffer the image occupies. Every pointer derived from the
-	//image below is checked against it before it is dereferenced. Written as a
-	//subtraction from the base rather than as a sum so the end cannot wrap.
+	//The end of the buffer the image occupies: base + extent. The per-field
+	//bounds checks below are written as subtractions from the extent or from
+	//this limit so they cannot underflow.
 
 	const auto image_limit = reinterpret_cast<ULONG64>(image_base) + image_extent;
 

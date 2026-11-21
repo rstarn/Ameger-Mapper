@@ -83,8 +83,9 @@ namespace
 	};
 }
 
-//Modules to resolve. ci.dll only matters when Defender is present, so its
-//entries end up in an empty [ci.dll.fields] section when it is not.
+//Modules to resolve. ci.dll is always required: its two symbols are part of
+//the release gate. Only WdFilter is optional, and it is added below when the
+//Defender driver is present.
 
 int wmain()
 {

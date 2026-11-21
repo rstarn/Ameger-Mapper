@@ -3,8 +3,9 @@
  *
  * The provider is registered the same way a normal kernel service is: a key
  * under HKLM\SYSTEM\CurrentControlSet\Services with an ImagePath, loaded
- * through NtLoadDriver. The key is removed again on every failure path and by
- * StopAndRemove, so a failed run does not leave a service entry behind.
+ * through NtLoadDriver. A key created by this run is removed on failure and by
+ * StopAndRemove; a pre-existing key is restored to its original values instead
+ * of being deleted.
  */
 
 #include "Service.hpp"

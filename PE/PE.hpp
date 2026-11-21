@@ -100,7 +100,8 @@ namespace PE
 
 	//Collect the import descriptors and the functions they pull in into
 	//`imports`. Both by-name and by-ordinal imports are collected; an ordinal
-	//import has an empty name and a non-zero ordinal.
+	//import has an empty name and a 16-bit ordinal (0 is legal), so by_ordinal
+	//is the flag that distinguishes the two forms.
 	//Returns true with an empty `imports` when the image has no import
 	//directory.
 	//Returns false when a descriptor, thunk array or name is malformed. The

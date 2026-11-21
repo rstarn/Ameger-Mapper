@@ -1532,13 +1532,12 @@ bool Driver::WriteMemory(uint64_t address, void* buffer, uint64_t size) {
 * writable from user mode through the provider: read the PTE, set the RW bit,
 * clear NX, write, then restore the original PTE.
 *
-* The self-map window base is a fixed architectural constant (0xFFFFF68000000000
-* on every Windows release since Vista - it is what WinDbg's !pte uses), but it
-* is still verified here before it is used: a wrong base means either an
-* unmapped read (bugcheck) or a kernel memory corruption. The verification reads
-* the PTEs of the first pages of ntoskrnl and requires a pair whose page frame
-* numbers differ by exactly one. If that fails, read-only writes are disabled
-* instead of continuing blind.
+ * The self-map base is not a constant: ResolveMmPteBase reads it from nt!MmPteBase
+ * at runtime, and ProbePteSelfMapBase verifies it before any write through it.
+ * The check uses KUSER_SHARED_DATA's 4K PTE, ntoskrnl's PDE, and a dual-map PFN
+ * match. A wrong base means an unmapped read (bugcheck) or corrupted kernel
+ * memory, so a failed probe disables read-only writes rather than continuing
+ * blind.
 */
 
 static bool g_pteSelfMapReady = false;
@@ -3706,9 +3705,9 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
  * PDB offsets; the entry layout is not public, so the name field is confirmed by
  * matching our own name in the entry before that offset is trusted.
  *
- * Matching is done on the expected name length first (the full path minus the
- * two characters of "\??") and then on the content, so the fast path only does
- * one small read for entries that cannot match.
+ * Matching is on content alone: the entry's name is read and compared as a
+ * substring of the full hashed path. The old length gate was removed because
+ * it rejected valid entries whose stored name was not the full path.
  *
  * The entry is unlinked and its pool block freed, and the lock is released on
  * every path. An entry that does not verify is skipped rather than unlinked.

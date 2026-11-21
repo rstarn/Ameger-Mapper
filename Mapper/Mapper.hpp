@@ -8,7 +8,8 @@
  * result into a freshly allocated kernel allocation and calls its entry point.
  *
  * It never writes to kernel memory until every user mode fixup has succeeded,
- * so a malformed or unloadable driver fails before any kernel state exists.
+ * so a malformed driver fails before touching the image allocation. That
+ * allocation is made up front and released again on every failure path.
  */
 
 #include <Windows.h>

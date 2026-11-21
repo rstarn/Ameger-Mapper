@@ -12,8 +12,8 @@ namespace Service
 	 * Creates HKLM\SYSTEM\CurrentControlSet\Services\<serviceName> with an
 	 * ImagePath of \??\<driver_path>, then calls NtLoadDriver.
 	 *
-	 * The registry key is removed again if any step fails, so a failed run
-	 * leaves no service behind.
+	 * On failure a key this run created is removed, while a pre-existing key
+	 * is restored to its original ImagePath and Type.
 	 *
 	 * Returns STATUS_IMAGE_CERT_REVOKED when the vulnerable driver blocklist is
 	 * enabled, STATUS_ACCESS_DENIED when something blocked the load.

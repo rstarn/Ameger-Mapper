@@ -239,10 +239,10 @@ namespace
 	/*
 	 * Global quiet flag, set by --silent.
 	 *
-	 * Its only remaining scope is the callback-gate refusal explanation - the
-	 * message that says why an image will not be freed. It does not silence the
-	 * operator question, the abort messages, or the hide warnings, because those
-	 * are the output the operator acts on.
+	 * It suppresses the callback-gate refusals plus the hide-mode banner and
+	 * independent-page allocation status/warnings. It does not silence the
+	 * operator question or the abort messages: those are what the operator acts
+	 * on.
 	 */
 
 	bool g_silent = false;
@@ -960,7 +960,7 @@ int paramExists(const int argc, wchar_t** argv, const wchar_t* param) {
 }
 
 //True when argv[i] is a value some option consumed rather than an option or the
-//driver path. Only --offsetsPath takes a separate value today, but this is a
+//driver path. --offsetsPath and --probe-context take separate values today, but this is a
 //property of the argument list and is asked here rather than duplicated at each
 //place that walks it.
 
@@ -1070,9 +1070,9 @@ bool ApplyHypervisorHide(bool hide, ULONG64 text_base, SIZE_T text_size) {
 			 * above; with 0/0 the driver hides the whole image, the legacy
 			 * behaviour, and that path is logged when it is taken.
 			 *
-			 * There is deliberately no HideMemory() fallback here. It covers
-			 * the whole resident range, executable span included, which is the
-			 * exact livelock ProtectSelf is being given the span to avoid.
+			 * There is deliberately no whole-image fallback here: hiding the
+			 * entire resident range, executable span included, is the exact
+			 * livelock ProtectSelf is being given the span to avoid.
 			 */
 
 			if (!Hypervisor::Protect(text_base, text_size)) {
@@ -1160,6 +1160,14 @@ bool RunMapAndHide(std::vector<BYTE>& raw_image, const std::wstring& driver_path
 	return true;
 }
 
+static void LogHideMode() {
+	if (g_silent)
+		return;
+	LogBlank();
+	Log(L"[+] NPT hide enabled: the mapped driver's image will be hidden in the nested page table, except its executable span" << std::endl);
+	Log(L"[+] Hypervisor: contiguous allocation (NPT hide requires contiguous physical pages)" << std::endl);
+	LogBlank();
+}
 
 /*
  * Decide the stealth mode.
@@ -1195,15 +1203,6 @@ bool RunMapAndHide(std::vector<BYTE>& raw_image, const std::wstring& driver_path
  */
 //noinline: keep this helper's frame separate from wmain's. The 0xC0000096 it
 //was split out for is STATUS_PRIVILEGED_INSTRUCTION, not a stack overrun.
-
-static void LogHideMode() {
-	if (g_silent)
-		return;
-	LogBlank();
-	Log(L"[+] NPT hide enabled: the mapped driver's image will be hidden in the nested page table, except its executable span" << std::endl);
-	Log(L"[+] Hypervisor: contiguous allocation (NPT hide requires contiguous physical pages)" << std::endl);
-	LogBlank();
-}
 
 __declspec(noinline)
 //forceFree is read only on entry; the decision is reported through `free`.

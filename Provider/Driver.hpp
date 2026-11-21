@@ -537,10 +537,10 @@ namespace Driver
 		/*
 		 * Restore the original bytes.
 		 *
-		 * Attempted twice. The second attempt exists because the failure mode
-		 * is a transient fault in the provider's copy (the same stale-TLB window
-		 * WriteToReadOnlyMemory documents), not a refused write - which a
-		 * second attempt pastes into.
+		 * Attempted up to three times, each verified by a byte-for-byte
+		 * readback. A failed attempt is usually a transient fault in the
+		 * provider's copy (the stale-TLB window WriteToReadOnlyMemory
+		 * documents), not a refused write, so another attempt can succeed.
 		 *
 		 * Whatever the outcome, the target has already run, so this function
 		 * returns true: the caller must learn that the kernel state it passed in

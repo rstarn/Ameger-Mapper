@@ -41,9 +41,9 @@ namespace Utilities
 	bool CreateFileFromMemory(const std::wstring& desired_file_path, const char* address, size_t size);
 
 	//Base address of a loaded kernel module, matched case-insensitively on the
-	//file name (e.g. "ntoskrnl.exe"). 0 when the module is not loaded.
-	//Runs NtQuerySystemInformation(SystemModuleInformation), which needs no
-	//special privilege.
+	//file name (e.g. "ntoskrnl.exe"). 0 when the module is not loaded or when
+	//the query could not return addresses. NtQuerySystemInformation itself needs
+	//no privilege, but ImageBase is zeroed without SeDebugPrivilege.
 
 	uint64_t GetKernelModuleAddress(const std::string& module_name);
 

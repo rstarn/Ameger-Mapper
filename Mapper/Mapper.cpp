@@ -344,14 +344,16 @@ bool Mapper::ResolveImports(const PE::vec_imports& imports, ImportResolver resol
  *
  * Sequence, and why it is in this order:
  *   1. validate the headers against the buffer we were given
- *   2. build a complete, fixed up image in user mode
- *   3. allocate kernel memory
+ *   2. allocate the kernel image up front
+ *   3. build a complete, fixed up image in a user-mode buffer
  *   4. copy the finished image over in one write
  *   5. optionally set per section protection
  *   6. call DriverEntry
  *
  * Every fixup happens in user mode before the single kernel write, so a driver
- * that cannot be mapped fails without having created any kernel state.
+ * that cannot be mapped never writes a partial image into the allocation. That
+ * allocation already exists at that point; the failure cleanup below releases
+ * it before returning.
  *
  * realBase is the allocation itself. When destroyHeader is set, kernel_image_base
  * is moved forward past the header so that the image is treated as starting at
