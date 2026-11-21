@@ -68,6 +68,19 @@ bool IsElevated() {
  * with every context field and an 80-byte hex dump of the context.
  */
 
+static void DumpContext(const AMEGER_KERNEL_CONTEXT* ctx) {
+	LogBlank();
+	LogRaw(L"Context hex dump (96 bytes):");
+	const auto* bytes = reinterpret_cast<const unsigned char*>(ctx);
+	std::wostringstream hex;
+	for (size_t i = 0; i < sizeof(*ctx); ++i) {
+		hex << std::hex << std::setw(2) << std::setfill(L'0') << static_cast<unsigned>(bytes[i]);
+		if (i + 1 < sizeof(*ctx))
+			hex << L' ';
+	}
+	LogRaw(hex.str());
+}
+
 int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	if (probeContextIdx + 1 >= argc) {
 		Log(L"[-] --probe-context requires a file path argument" << std::endl);
@@ -229,37 +242,13 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 		Log(L"[-] Driver did not complete shutdown in time; leaving the probe "
 			L"buffers resident rather than freeing memory the driver may still use." << std::endl);
 
-		//Hex dump of the whole context, as it exists after MapDriver returned.
-
-		LogBlank();
-		LogRaw(L"Context hex dump (96 bytes):");
-		const unsigned char* bytes = reinterpret_cast<const unsigned char*>(ctx);
-		std::wostringstream hex;
-		for (size_t i = 0; i < sizeof(*ctx); ++i) {
-			hex << std::hex << std::setw(2) << std::setfill(L'0') << static_cast<unsigned>(bytes[i]);
-			if (i + 1 < sizeof(*ctx))
-				hex << L' ';
-		}
-		LogRaw(hex.str());
-
+		DumpContext(ctx);
 		return probe_passed ? 0 : -1;
 	}
 
 	VirtualFree(ring_buffer, 0, MEM_RELEASE);
 
-	//Hex dump of the whole context, as it exists after MapDriver returned.
-
-	LogBlank();
-	LogRaw(L"Context hex dump (96 bytes):");
-	const unsigned char* bytes = reinterpret_cast<const unsigned char*>(ctx);
-	std::wostringstream hex;
-	for (size_t i = 0; i < sizeof(*ctx); ++i) {
-		hex << std::hex << std::setw(2) << std::setfill(L'0') << static_cast<unsigned>(bytes[i]);
-		if (i + 1 < sizeof(*ctx))
-			hex << L' ';
-	}
-	LogRaw(hex.str());
-
+	DumpContext(ctx);
 	VirtualFree(ctx, 0, MEM_RELEASE);
 
 	return probe_passed ? 0 : -1;

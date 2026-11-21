@@ -28,7 +28,6 @@
 #include <cstring>
 #include <cstddef>
 #include <intrin.h>
-#include <ctime>
 
 //bcrypt backs the SHA-256 in the driver summary and wintrust the Authenticode
 //check. Both are system libraries, so their import libraries are pulled in here
@@ -152,7 +151,6 @@ namespace
 	 */
 
 	constexpr ULONG kCodeIntegrityHvciKmciEnabled = 0x0400;
-	constexpr ULONG kCodeIntegrityHvciKmciAuditMode = 0x0800;
 	constexpr ULONG kCodeIntegrityHvciKmciStrictMode = 0x1000;
 	constexpr ULONG kCodeIntegrityHvciIumEnabled = 0x2000;
 
@@ -177,12 +175,12 @@ namespace
 		}
 		if (queryFailed) *queryFailed = false;
 
-		//Audit mode alone does not block writes, so it is not part of the test.
+		//Audit mode (0x0800) alone does not block writes, so it is not part of
+		//the test and has no named constant.
 
 		const ULONG enforcing = kCodeIntegrityHvciKmciEnabled |
 			kCodeIntegrityHvciKmciStrictMode |
 			kCodeIntegrityHvciIumEnabled;
-		UNREFERENCED_PARAMETER(kCodeIntegrityHvciKmciAuditMode);
 		return (info.CodeIntegrityOptions & enforcing) != 0;
 	}
 
@@ -1204,6 +1202,15 @@ bool RunMapAndHide(std::vector<BYTE>& raw_image, const std::wstring& driver_path
 //noinline: keep this helper's frame separate from wmain's. The 0xC0000096 it
 //was split out for is STATUS_PRIVILEGED_INSTRUCTION, not a stack overrun.
 
+static void LogHideMode() {
+	if (g_silent)
+		return;
+	LogBlank();
+	Log(L"[+] NPT hide enabled: the mapped driver's image will be hidden in the nested page table, except its executable span" << std::endl);
+	Log(L"[+] Hypervisor: contiguous allocation (NPT hide requires contiguous physical pages)" << std::endl);
+	LogBlank();
+}
+
 __declspec(noinline)
 bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree, bool& indPagesMode,
                        bool forceFreeAllowed, bool forceAsk, const std::vector<uint8_t>& image) {
@@ -1242,16 +1249,10 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 		free = false;
 		forceFree = false;
 		copyHeader = true;
-		indPagesMode = Hypervisor::kHypervisorSupportsDiscontiguousNpt ? IndPagesAvailable() : false;
-		if (!g_silent) {
-			LogBlank();
-			Log(L"[+] NPT hide enabled: the mapped driver's image will be hidden in the nested page table, except its executable span" << std::endl);
-			if (indPagesMode)
-				Log(L"[+] Hypervisor: scattered allocation enabled (NPT hide supports discontiguous ranges)");
-			else
-				Log(L"[+] Hypervisor: contiguous allocation (NPT hide requires contiguous physical pages)");
-			LogBlank();
-		}
+		//NPT hide needs contiguous physical pages; the discontiguous mode is
+		//deliberately disabled at compile time, so there is no branch to log.
+		indPagesMode = false;
+		LogHideMode();
 		return true;
 	}
 
@@ -1305,16 +1306,8 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 	case 1: // Operator says hypervisor
 		hide = true;
 		copyHeader = true;
-		indPagesMode = Hypervisor::kHypervisorSupportsDiscontiguousNpt ? IndPagesAvailable() : false;
-		if (!g_silent) {
-			LogBlank();
-			Log(L"[+] NPT hide enabled: the mapped driver's image will be hidden in the nested page table, except its executable span" << std::endl);
-			if (indPagesMode)
-				Log(L"[+] Hypervisor: scattered allocation enabled (NPT hide supports discontiguous ranges)");
-			else
-				Log(L"[+] Hypervisor: contiguous allocation (NPT hide requires contiguous physical pages)");
-			LogBlank();
-		}
+		indPagesMode = false;
+		LogHideMode();
 		break;
 	case 0: // Operator says non-hypervisor (prompt answer N)
 
@@ -1355,9 +1348,11 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 		if (enableIndPages())
 			indPagesMode = true;
 
-		/* 17p belt-and-suspenders: gate refusal is absolute. */
+		/* The gate was already re-parsed in this branch above; a second walk
+		 * over the same immutable image cannot change the answer. Keep the
+		 * absolute refusal on the caller's gate verdict. */
 
-		if (!forceFreeAllowed || !CheckCallbackSafetyGate(image)) { free = false; forceFree = false; }
+		if (!forceFreeAllowed) { free = false; forceFree = false; }
 		break;
 	default: // Operator input ended
 		Log(L"[!] No operator input: the image is kept resident (safe default)" << std::endl);
@@ -2009,13 +2004,12 @@ int wmain(const int argc, wchar_t** argv) {
 		return -1;
 	}
 
-	/* 17l: hard-block — NO path may free a callback-driver image. ChooseStealthMode
-
-	   receives forceFreeAllowed; this is a final backstop against any bypass. */
-	if (!callbackGateAllowed) {
+	/* Hard backstop: no path may free a callback-driver image. ChooseStealthMode
+	   already received forceFreeAllowed; this repeats the decision on the value
+	   the gate actually computed. `forceFree` is consumed only inside that
+	   helper, so there is nothing to clear here. */
+	if (!callbackGateAllowed)
 		free = false;
-		forceFree = false;
-	}
 
 	// An active hypervisor blocks a second hypervisor and nothing else. This is
 	// the decision the probe used to take on its own, which made mapping an

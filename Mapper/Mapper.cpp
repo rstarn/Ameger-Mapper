@@ -9,6 +9,16 @@
 #include "../App/NT.hpp"
 #include "../PE/PE.hpp"
 
+//Release a kernel image allocated by MapDriver. Both the --free path and the
+//failure cleanup have to use the same routine for the same allocation mode.
+static bool FreeKernelImage(Mapper::AllocationMode mode, ULONG64 base, ULONG64 size) {
+	if (mode == Mapper::AllocationMode::AllocateIndependentPages) {
+		//size originates from the 32-bit SizeOfImage field, so it always fits.
+		return Driver::MmFreeIndependentPages(base, static_cast<uint32_t>(size));
+	}
+	return Driver::MmFreeContiguousMemory(base);
+}
+
 /*
  * Apply base relocations to the local copy.
  *
@@ -447,17 +457,13 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 	{
 		kernel_image_base = Driver::MmAllocateIndependentPagesEx(image_size);
 	}
-	else if (mode == AllocationMode::AllocateContiguous)
-	{
+	else {
 
 		//Page aligned, so the image occupies whole pages: a driver that hides
 		//its own image page by page must not be handed a base that shares its
-		//first page with a POOL_HEADER.
+		//first page with a POOL_HEADER. Contiguous is the default.
 
 		kernel_image_base = Driver::AllocateContiguous(image_size);
-	}
-	else { // AllocatePool
-		kernel_image_base = Driver::AllocatePool(Nt::POOL_TYPE::NonPagedPool, image_size);
 	}
 
 	if (!kernel_image_base) {
@@ -845,19 +851,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		if (free && !driver_entry_failed) {
 			LogBlank();
 			Log(L"[+] Freeing memory" << std::endl);
-			bool free_status = false;
-
-			if (mode == AllocationMode::AllocateIndependentPages)
-			{
-				free_status = Driver::MmFreeIndependentPages(realBase, image_size);
-			}
-			else if (mode == AllocationMode::AllocateContiguous)
-			{
-				free_status = Driver::MmFreeContiguousMemory(realBase);
-			}
-			else {
-				free_status = Driver::FreePool(realBase);
-			}
+			const bool free_status = FreeKernelImage(mode, realBase, image_size);
 
 			if (free_status) {
 				Log(L"[+] Memory has been released" << std::endl);
@@ -930,19 +924,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 	VirtualFree(local_image_base, 0, MEM_RELEASE);
 
 	Log(L"[+] Freeing memory" << std::endl);
-	bool free_status = false;
-
-	if (mode == AllocationMode::AllocateIndependentPages)
-	{
-		free_status = Driver::MmFreeIndependentPages(kernel_image_base, image_size);
-	}
-	else if (mode == AllocationMode::AllocateContiguous)
-	{
-		free_status = Driver::MmFreeContiguousMemory(kernel_image_base);
-	}
-	else {
-		free_status = Driver::FreePool(kernel_image_base);
-	}
+	const bool free_status = FreeKernelImage(mode, kernel_image_base, image_size);
 
 	if (free_status) {
 		Log(L"[+] Memory has been released" << std::endl);

@@ -13,7 +13,6 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
-#include <utility>
 #include <vector>
 #include <sstream>
 #include <iterator>
@@ -23,6 +22,9 @@
 
 namespace
 {
+
+	//Length of the PATH buffer used both here and in ReloadFile.
+	constexpr size_t kPathBufferChars = 32768;
 
 	/*
 	 * Restores PATH when it goes out of scope.
@@ -71,18 +73,9 @@ namespace
 
 	private:
 
-		//The longest PATH this will read. 32 KB is the same bound the buffer
-		//this replaced used, so the truncation behaviour is unchanged.
-
-		static constexpr size_t kPathBufferChars = 32768;
-
 		bool had_value_ = false;
 		std::wstring previous_;
 	};
-
-	//Length of the PATH buffer in ScopedPathChange, in characters. See there.
-
-constexpr size_t kPathBufferChars = 32768;
 
 //Trim ASCII whitespace from both ends. The generator emits no spaces, but a
 	//hand edited or regenerated file routinely does, and an untrimmed name is a

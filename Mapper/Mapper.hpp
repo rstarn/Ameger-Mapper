@@ -41,15 +41,8 @@ namespace Mapper
 	enum class AllocationMode
 	{
 
-		//Single nonpaged pool block holding the whole image. The allocation
-		//stays RWX for the lifetime of the mapping: the provider cannot apply
-		//per section protection to a pool block.
-
-		AllocatePool,
-
 		//One page aligned, physically contiguous block for the whole image.
-		//Same lifetime and protection properties as AllocatePool, but the base
-		//is page aligned: a driver that blanks whole pages of its own image
+		//The base is page aligned: a driver that blanks whole pages of its own image
 		//(memhv's self-hide) must not touch the pool header in front of the
 		//allocation or the block that follows it. This is the default.
 

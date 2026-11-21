@@ -383,7 +383,7 @@ namespace Driver
 	 *     now would corrupt memory a running kernel object is using.
 	 *
 	 * That distinction is why the restore does not decide this return value.
-	 * LastCallHookRestored() reports the restore separately; a caller that owns
+	 * RestoreSucceeded() reports the restore separately; a caller that owns
 	 * state the target may have adopted has to check it.
 	 */
 

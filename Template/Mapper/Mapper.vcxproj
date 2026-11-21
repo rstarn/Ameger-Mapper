@@ -61,10 +61,9 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <ExceptionHandling>Async</ExceptionHandling>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <!-- The Hypervisor client header, pulled in for the hide flag (see App\Main.cpp).
-       Referenced in place rather than copied so the VMCall ABI cannot drift
-       between the two projects. -->
-      <AdditionalIncludeDirectories>$(SolutionDir)..\..\..\Hypervisor\Client\Library;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- App\Hypervisor.h is a local copy, kept in sync with the hypervisor
+       client library by hand (see the CallIoctl comment there). No include
+       directory outside this solution is needed to build Mapper. -->
       <!-- /EHc has no MSBuild property. The previous "/EHsc ... /EHa" pairing kept
        the "extern C never throws" half of /EHsc, and ExceptionHandling=Async on
        its own drops it: the tail calls through extern "C" imports turn into
