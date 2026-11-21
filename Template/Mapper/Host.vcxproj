@@ -94,7 +94,7 @@ copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Comm
     <ClCompile Include="..\..\App\Probing\Probe.cpp" />
     <!-- Mapper -->
     <ClCompile Include="..\..\Mapper\Mapper.cpp" />
-    <!-- PE -->
+    <!-- Parsing -->
     <ClCompile Include="..\..\Parsing\PE.cpp" />
     <!-- Provider -->
     <ClCompile Include="..\..\Provider\Core\Driver.cpp" />
@@ -112,7 +112,7 @@ copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Comm
     <ClInclude Include="..\..\App\Probing\Probe.h" />
     <!-- Mapper -->
     <ClInclude Include="..\..\Mapper\Mapper.hpp" />
-    <!-- PE -->
+    <!-- Parsing -->
     <ClInclude Include="..\..\Parsing\PE.hpp" />
     <!-- Provider -->
     <ClInclude Include="..\..\Provider\Core\Driver.hpp" />

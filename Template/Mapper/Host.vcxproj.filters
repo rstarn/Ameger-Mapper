@@ -11,7 +11,7 @@
       <Filter>Mapper</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Parsing\PE.cpp">
-      <Filter>PE</Filter>
+      <Filter>Parsing</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Provider\Core\Driver.cpp">
       <Filter>Provider</Filter>
@@ -40,7 +40,7 @@
       <Filter>Mapper</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Parsing\PE.hpp">
-      <Filter>PE</Filter>
+      <Filter>Parsing</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Provider\Core\Driver.hpp">
       <Filter>Provider</Filter>
@@ -71,7 +71,7 @@
     <Filter Include="Mapper">
       <UniqueIdentifier>{3c7eab43-2d69-4f40-9154-4e7c92d63f23}</UniqueIdentifier>
     </Filter>
-    <Filter Include="PE">
+    <Filter Include="Parsing">
       <UniqueIdentifier>{4d8fbc54-3e7a-4051-a265-5f8da3e74034}</UniqueIdentifier>
     </Filter>
     <Filter Include="Provider">
