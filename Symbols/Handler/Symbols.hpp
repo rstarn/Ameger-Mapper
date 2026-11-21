@@ -5,7 +5,7 @@
 #include <string>
 #include <unordered_map>
 
-//Name of the offset generator built by Template\Symbols\SymbolTool.vcxproj.
+//Name of the offset generator built by Template\Symbols\Tool.vcxproj.
 //It is deployed next to Mapper.exe and is what --dontUpdateOffsets turns off.
 //Keep in sync with <TargetName> in that project.
 #define SYMBOL_TOOL_EXE L"SymbolTool.exe"
