@@ -722,9 +722,8 @@ namespace
 
 		//Prompt immediately after probe output without extra spacing.
 
-		LogRaw(L"Is the driver a Hypervisor? [Y/N]: ");
-
 		for (;;) {
+			LogRaw(L"Is the driver a Hypervisor? [Y/N]: ");
 			std::wstring line;
 			if (!std::getline(std::wcin, line)) {
 
@@ -737,7 +736,13 @@ namespace
 			const wchar_t* p = line.c_str();
 			while (*p == L' ' || *p == L'\t')
 				++p;
-			const wchar_t* end = p;
+			if (*p == L'\0') {
+				Log(L"[-] Answer with y or n" << std::endl);
+				continue;
+			}
+			//Scan from AFTER the answer: starting at p made every answer look
+			//longer than one character, so a plain "N" was re-prompted forever.
+			const wchar_t* end = p + 1;
 			while (*end == L' ' || *end == L'\t' || *end == L'\r')
 				++end;
 
@@ -746,7 +751,7 @@ namespace
 			 * the free-vs-hide verdict from a truncated token. Anything longer
 			 * than one letter (including an empty answer) re-prompts. */
 
-			if (end != p + 1 || (*p != L'y' && *p != L'Y' && *p != L'n' && *p != L'N')) {
+			if (*end != L'\0' || (*p != L'y' && *p != L'Y' && *p != L'n' && *p != L'N')) {
 				Log(L"[-] Answer with y or n" << std::endl);
 				continue;
 			}
