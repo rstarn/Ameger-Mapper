@@ -2359,22 +2359,12 @@ bool Driver::WriteToReadOnlyMemory(uint64_t address, void* buffer, uint32_t size
 	return ok;
 }
 
-/*
- * The assumed 4-argument signature of MmAllocateIndependentPagesEx.
- *
- * The routine has no prototype in the public SDK, so this is the shape the
- * mapper calls it with, written down in one place. The call below goes through
- * CallKernelFunction, which forwards arguments through registers and accepts
- * any list, so the compiler would not catch a drift between this typedef and
- * the real prototype - the typedef exists so the assumption is explicit and
- * reviewable instead of implied by the argument list at the call site.
- *
- * The arguments are (size, -1, 0, 0): size is the requested length, and the
- * three trailing values are the partition and reserved parameters the
- * reference implementation passes.
- */
-
-typedef PVOID(__stdcall* MmAllocateIndependentPagesExFn)(uint32_t size, int partition, int reserved1, int reserved2);
+/* MmAllocateIndependentPagesEx has no public SDK prototype. The call below
+ * passes (size, -1, 0, 0): the requested length, then the partition and two
+ * reserved parameters used by the reference implementation. It goes through
+ * CallKernelFunction, which forwards arguments through registers, so the
+ * assumption is documented here rather than enforced by a typedef the compiler
+ * could not check anyway. */
 
 //Allocate page aligned kernel memory for the --indPages mode, which needs one
 //allocation whose protection can be set per section.
@@ -2412,7 +2402,7 @@ uint64_t Driver::MmAllocateIndependentPagesEx(uint32_t size)
 		kernel_MmAllocateIndependentPagesEx += Driver::ntoskrnlAddr;
 	}
 
-	//(size, -1, 0, 0) matches the assumed MmAllocateIndependentPagesExFn above.
+	//(size, -1, 0, 0) is the assumed 4-argument shape documented above.
 
 	if (!Driver::CallKernelFunction(&allocated_pages, kernel_MmAllocateIndependentPagesEx, size, -1, 0, 0))
 		return 0;

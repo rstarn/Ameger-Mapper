@@ -65,7 +65,7 @@ bool IsElevated() {
  * with VirtualAlloc, pass it as param2 to Mapper::MapDriver so the driver's
  * DriverEntry treats it as its second argument, then report whether the driver
  * wrote back its success fields. Prints PROBE_RESULT=PASS or PROBE_RESULT=FAIL
- * with every context field and an 80-byte hex dump of the context.
+ * with every context field and a 96-byte hex dump of the context.
  */
 
 static void DumpContext(const AMEGER_KERNEL_CONTEXT* ctx) {
@@ -158,9 +158,8 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	//3. Pass the context as param2 to MapDriver.
 
 	NTSTATUS driver_status = (NTSTATUS)0x8000ffff;
-	SIZE_T resident_size = 0;
 	const ULONG64 base = Mapper::MapDriver(
-		image.data(), image.size(), 0,
+		image.data(), image.size(),
 		static_cast<ULONG64>(reinterpret_cast<uintptr_t>(ctx)),
 
 		/*free=*/false, /*destroyHeader=*/true,
@@ -169,7 +168,7 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 
 		/*passAllocationPtr=*/false,
 
-		&driver_status, &resident_size);
+		&driver_status, nullptr);
 
 	const bool provider_clean = (Driver::Unload() >= 0);
 

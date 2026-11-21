@@ -614,25 +614,23 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 		}
 	}
 
-	if (symbols.empty() || !missing.empty()) {
+	if (!missing.empty()) {
+		/* An empty file also reports missing MmPteBase, so there is no separate
+		 * "nothing parsed" case to distinguish here. */
 		Log(L"[-] " << Val(path) << L" does not describe this build's offsets"
-			<< (missing.empty() ? std::wstring(L" - no entries were parsed")
-				: std::wstring(L" - missing: ") + missing)
-			<< std::endl);
+			<< L" - missing: " << missing << std::endl);
 
 		//Prove what the parser actually read: dump the first 100 wide chars of
 		//the file (BOM included) so a mangled or empty file is visible at a glance.
 
-		if (!missing.empty()) {
-			std::wifstream peek(path);
-			if (peek.is_open()) {
-				wchar_t buf[100] = { 0 };
-				peek.read(buf, 100);
-				const std::wstring head(buf, peek.gcount());
-				const std::wstring headToShow = head.empty() ? std::wstring(L"(empty)") : head;
-				Log(L"[*] First 100 characters of " << Val(path) << L":");
-				LogRaw(headToShow);
-			}
+		std::wifstream peek(path);
+		if (peek.is_open()) {
+			wchar_t buf[100] = { 0 };
+			peek.read(buf, 100);
+			const std::wstring head(buf, peek.gcount());
+			const std::wstring headToShow = head.empty() ? std::wstring(L"(empty)") : head;
+			Log(L"[*] First 100 characters of " << Val(path) << L":");
+			LogRaw(headToShow);
 		}
 
 		const std::wstring toolCommand = Utilities::GetCurrentAppFolder() + L"\\" + SYMBOL_TOOL_EXE;

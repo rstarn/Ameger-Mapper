@@ -16,39 +16,23 @@
 namespace Hypervisor
 {
 
-    // Compile-time flag: whether the hypervisor's NPT hide routine supports discontiguous physical pages.
-    // Set to false for conservative contiguous allocation.
-
-    inline constexpr bool kHypervisorSupportsDiscontiguousNpt = false;
-
     namespace Shared
     {
         constexpr ULONG64 MAGIC = 0xfeed3;
         constexpr ULONG64 COMM_CHECK = 0xdead;
 
-        constexpr ULONG64 MAX_RW_SIZE = 0x10000;
-
+        // Wire values are pinned: the hypervisor owns this protocol and may
+        // insert values between those Mapper uses. See Shared.h there.
         enum CommandId
         {
-            Invalid,
-            CheckPresence,
-            GetProcess,
-            GetDirectoryBase,
-            CopyProcessMemory,
-            ProtectSelf,
-            FlushNpt,
-            ProtectRange,
+            CheckPresence = 1,
+            ProtectSelf   = 5,
+            FlushNpt      = 6,
         };
 
         enum ErrorCodes
         {
-            Success,
-            ControlBlockReadFail,
-            MemoryCopyTooLarge,
-            MemoryCopyFailSource,
-            MemoryCopyFailTarget,
-            InvalidProcess,
-            AccessDenied = 0xDEADBEEF,
+            Success = 0,
         };
 
         // Data commands travel through the \\.\AmegerHv IOCTL interface. The
@@ -77,16 +61,6 @@ namespace Hypervisor
         static_assert(offsetof(AMEGER_IOCTL_RESPONSE, Status) == 0x00, "AMEGER_IOCTL_RESPONSE.Status ABI mismatch");
         static_assert(offsetof(AMEGER_IOCTL_RESPONSE, Value) == 0x08, "AMEGER_IOCTL_RESPONSE.Value ABI mismatch");
         static_assert(offsetof(AMEGER_IOCTL_RESPONSE, Payload) == 0x10, "AMEGER_IOCTL_RESPONSE.Payload ABI mismatch");
-
-        typedef struct _COPY_MEMORY_DATA
-        {
-            ULONG32 SourceProcessId;
-            ULONG32 DestinationProcessId;
-            ULONG64 SourceAddress;
-            ULONG64 DestinationAddress;
-            SIZE_T NumberOfBytes;
-        } COPY_MEMORY_DATA;
-        static_assert(sizeof(COPY_MEMORY_DATA) == 32, "COPY_MEMORY_DATA ABI mismatch");
     }
 
     namespace Data

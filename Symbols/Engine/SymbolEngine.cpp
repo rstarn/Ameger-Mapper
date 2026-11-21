@@ -46,7 +46,6 @@ namespace
 	struct DbgHelp
 	{
 		HMODULE module = nullptr;
-		std::wstring path;
 
 		BOOL(WINAPI* SymInitializeW)(HANDLE, PCWSTR, BOOL) = nullptr;
 		BOOL(WINAPI* SymCleanup)(HANDLE) = nullptr;
@@ -123,15 +122,15 @@ namespace
 
 			//Preferred: the DLLs subfolder, which is where the release ships them.
 
-			path = folder + L"\\" + kSymbolDllFolder + L"\\dbghelp.dll";
-			module = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+			std::wstring dll_path = folder + L"\\" + kSymbolDllFolder + L"\\dbghelp.dll";
+			module = LoadLibraryExW(dll_path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 
 			//Fallback: next to the executable, for a developer layout that has
 			//not adopted the DLLs folder yet.
 
 			if (!module) {
-				path = folder + L"\\dbghelp.dll";
-				module = LoadLibraryExW(path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+				dll_path = folder + L"\\dbghelp.dll";
+				module = LoadLibraryExW(dll_path.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
 			}
 
 			if (!module) {
@@ -481,7 +480,7 @@ std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const
 
 	if (ModBase == 0)
 	{
-		Log(L"[-] Error: SymLoadModule64() failed. Error code: " << Val(GetLastError()) << std::endl);
+		Log(L"[-] Error: SymLoadModuleExW() failed. Error code: " << Val(GetLastError()) << std::endl);
 		return {};
 	}
 
@@ -502,7 +501,7 @@ std::vector<uint64_t> SymbolEngine::GetOffset(const std::wstring& pdbPath, const
 		);
 		if (!bRet || !SymInfoPackage.si.Address)
 		{
-			Log(L"[-] Error: SymFromName() failed. Sym: " << Val(sym) << L" || Error code: " << Val(GetLastError()) << std::endl);
+			Log(L"[-] Error: SymFromNameW() failed. Sym: " << Val(sym) << L" || Error code: " << Val(GetLastError()) << std::endl);
 			dbg.SymUnloadModule64(GetCurrentProcess(), ModBase);
 			return {};
 		}
@@ -682,7 +681,7 @@ std::vector<SymbolEngine::FieldResult> SymbolEngine::GetStructFieldOffsets(const
 	);
 
 	if (ModBase == 0) {
-		Log(L"[-] Error: SymLoadModule64() failed. Error code: " << Val(GetLastError()) << std::endl);
+		Log(L"[-] Error: SymLoadModuleExW() failed. Error code: " << Val(GetLastError()) << std::endl);
 		return {};
 	}
 

@@ -58,7 +58,7 @@ typedef struct _AMEGER_KERNEL_CONTEXT {
 //param2 so the driver's DriverEntry treats it as its second argument, then
 //report whether the driver wrote back its success fields. Prints
 //PROBE_RESULT=PASS or PROBE_RESULT=FAIL with every context field and an
-//80-byte hex dump of the context.
+//96-byte hex dump of the context.
 
 int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx);
 

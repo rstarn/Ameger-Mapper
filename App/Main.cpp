@@ -101,12 +101,6 @@ namespace
 		case STATUS_PRIVILEGED_INSTRUCTION:   return L"STATUS_PRIVILEGED_INSTRUCTION";
 		case STATUS_STACK_BUFFER_OVERRUN:     return L"STATUS_STACK_BUFFER_OVERRUN";
 
-		//The hypervisor's CheckSupport() refuses to launch and reports this
-		//custom code instead of a standard NTSTATUS. It means the AMD SVM
-		//support gate failed - most often a stale resident hypervisor
-		//(EFER.SVME left set by a prior run), not an Intel CPU, or a CPU
-		//lacking the SVM/NP feature bits.
-		case (NTSTATUS)0xc0350057:           return L"STATUS_HV_SUPPORT_CHECK_FAILED";
 		default:                              return L"unknown status";
 		}
 	}
@@ -1148,7 +1142,7 @@ bool RunMapAndHide(std::vector<BYTE>& raw_image, const std::wstring& driver_path
 	resident_size = 0;
 
 	resident_base = Mapper::MapDriver(
-		raw_image.data(), raw_image.size(), 0, 0, free, !copyHeader, mode, passAllocationPtr,
+		raw_image.data(), raw_image.size(), 0, free, !copyHeader, mode, passAllocationPtr,
 		&driver_status, &resident_size);
 
 	if (!resident_base) {
@@ -1212,7 +1206,8 @@ static void LogHideMode() {
 }
 
 __declspec(noinline)
-bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree, bool& indPagesMode,
+//forceFree is read only on entry; the decision is reported through `free`.
+bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool forceFree, bool& indPagesMode,
                        bool forceFreeAllowed, bool forceAsk, const std::vector<uint8_t>& image) {
 
 	//Scatter the allocation across independent pages whenever this build
@@ -1247,10 +1242,9 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 			Log(L"    releasing them would free the pages under the NPT hide and hang the machine." << std::endl);
 		}
 		free = false;
-		forceFree = false;
 		copyHeader = true;
-		//NPT hide needs contiguous physical pages; the discontiguous mode is
-		//deliberately disabled at compile time, so there is no branch to log.
+		//NPT hide needs contiguous physical pages, so the per-section mode is
+		//not usable on this path regardless of build.
 		indPagesMode = false;
 		LogHideMode();
 		return true;
@@ -1263,7 +1257,6 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 	if (free) {
 		if (!forceFreeAllowed) {
 			free = false;
-			forceFree = false;
 			if (enableIndPages())
 				indPagesMode = true;
 			if (!g_silent) {
@@ -1274,7 +1267,6 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 			}
 			return true;
 		}
-		forceFree = forceFree && forceFreeAllowed;
 		if (enableIndPages())
 			indPagesMode = true;
 		if (!g_silent) {
@@ -1316,7 +1308,6 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 
 		if (!forceFreeAllowed) {
 			free = false;
-			forceFree = false;
 			if (!g_silent) {
 				LogBlank();
 				Log(L"[!] Driver imports callback/timer APIs; refusing to free its image" << std::endl);
@@ -1329,7 +1320,6 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 
 			if (!CheckCallbackSafetyGate(image)) {
 				free = false;
-				forceFree = false;
 				if (!g_silent) {
 					LogBlank();
 					Log(L"[!] gate re-check refused free — refusing to free its image" << std::endl);
@@ -1337,7 +1327,6 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 				}
 			} else {
 				free = true;   // only if gate allows
-				forceFree = true;
 				if (!g_silent) {
 					LogBlank();
 					Log(L"[+] Free memory after driver execution enabled" << std::endl);
@@ -1348,11 +1337,6 @@ bool ChooseStealthMode(bool& hide, bool& copyHeader, bool& free, bool& forceFree
 		if (enableIndPages())
 			indPagesMode = true;
 
-		/* The gate was already re-parsed in this branch above; a second walk
-		 * over the same immutable image cannot change the answer. Keep the
-		 * absolute refusal on the caller's gate verdict. */
-
-		if (!forceFreeAllowed) { free = false; forceFree = false; }
 		break;
 	default: // Operator input ended
 		Log(L"[!] No operator input: the image is kept resident (safe default)" << std::endl);
@@ -1511,7 +1495,6 @@ struct HypervisorProbeResult {
 	bool active = false;                   // the vmmcall returned COMM_CHECK
 	bool svm_supported = false;            // CPUID says this CPU implements SVM
 	bool cpuid_hypervisor_present = false; // CPUID.1:ECX[31]
-	uint32_t raw_return = 0;               // the vmmcall's return, for the log line
 };
 
 /*
@@ -1568,7 +1551,6 @@ HypervisorProbeResult RunHypervisorProbe() {
 	const ULONG64 probe_result = Hypervisor::CallVM(
 		Hypervisor::Shared::MAGIC, Hypervisor::Shared::CommandId::CheckPresence, 0, 0, &trapped);
 
-	result.raw_return = static_cast<uint32_t>(probe_result);
 	result.active = !trapped && probe_result == Hypervisor::Shared::COMM_CHECK;
 
 	if (trapped)
@@ -1800,11 +1782,6 @@ int wmain(const int argc, wchar_t** argv) {
 		Log(L"[+] Copying driver header enabled" << std::endl);
 	}
 
-	if (hide) {
-		Log(L"[+] NPT hide enabled: the hypervisor will blank the mapped driver's" << std::endl);
-		Log(L"[+] resident pages and its own image in the nested page table" << std::endl);
-	}
-
 	bool UpdateOffset = !(paramExists(argc, argv, L"dontUpdateOffsets") > 0);
 	int FilePathParamIdx = paramExists(argc, argv, L"offsetsPath");
 	std::wstring offsetFilePath = Utilities::GetCurrentAppFolder() + L"\\Offsets.ini";
@@ -2003,13 +1980,6 @@ int wmain(const int argc, wchar_t** argv) {
 		PauseBeforeExit();
 		return -1;
 	}
-
-	/* Hard backstop: no path may free a callback-driver image. ChooseStealthMode
-	   already received forceFreeAllowed; this repeats the decision on the value
-	   the gate actually computed. `forceFree` is consumed only inside that
-	   helper, so there is nothing to clear here. */
-	if (!callbackGateAllowed)
-		free = false;
 
 	// An active hypervisor blocks a second hypervisor and nothing else. This is
 	// the decision the probe used to take on its own, which made mapping an

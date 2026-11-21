@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
-    <ProjectConfiguration Include="Release_Pdb_Offset|x64">
-      <Configuration>Release_Pdb_Offset</Configuration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
       <Platform>x64</Platform>
     </ProjectConfiguration>
   </ItemGroup>
@@ -13,7 +13,7 @@
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_Pdb_Offset|x64'" Label="Configuration">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v145</PlatformToolset>
@@ -24,11 +24,11 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings" />
   <ImportGroup Label="Shared" />
-  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release_Pdb_Offset|x64'">
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_Pdb_Offset|x64'">
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <TargetName>Mapper</TargetName>
     <!-- Build scratch lives outside the repository, under %TEMP%\amager_build,
      so no build output or intermediate ever lands in the source tree.
@@ -38,7 +38,7 @@
     <IntDir>$(TEMP)\amager_build\obj\$(ProjectName)\</IntDir>
     <OutDir>$(TEMP)\amager_build\bin\</OutDir>
   </PropertyGroup>
-  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release_Pdb_Offset|x64'">
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <WarningLevel>Level4</WarningLevel>
       <Optimization>MaxSpeed</Optimization>
@@ -88,19 +88,9 @@ copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Comm
   </ItemDefinitionGroup>
   <ItemGroup>
     <!-- App -->
-    <!-- Main.cpp inlines Hypervisor.h; CallVM wraps the vmmcall in a C++ handler.
-      The vmmcall trap (#VMEXIT with no handler) is a hardware exception, so the
-      handler is a C++ catch(...) rather than SEH __except, which needs /EHa so
-      that catch(...) catches hardware exceptions; /EHa is added here and globally.
-     This TU carries stack protection like the rest of the project. The /GS- it
-     used to have dated from a 0xC0000096 crash read as a stack buffer overrun.
-     0xC0000096 is STATUS_PRIVILEGED_INSTRUCTION, not a stack overrun: the real
-     cause was a ring-3 RDMSR in wmain, since removed, so /GS- was never what
-     fixed it. Stated per-file as properties, not raw flags. -->
-    <ClCompile Include="..\..\App\Main.cpp">
-      <BufferSecurityCheck>true</BufferSecurityCheck>
-      <ExceptionHandling>Async</ExceptionHandling>
-    </ClCompile>
+    <!-- Main.cpp inlines Hypervisor.h; CallVM catches the hardware #UD from a
+      vmmcall with catch(...), which needs /EHa (set globally). -->
+    <ClCompile Include="..\..\App\Main.cpp" />
     <ClCompile Include="..\..\App\Probing\Probe.cpp" />
     <!-- Mapper -->
     <ClCompile Include="..\..\Mapper\Mapper.cpp" />
@@ -118,6 +108,8 @@ copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Comm
   <ItemGroup>
     <!-- App -->
     <ClInclude Include="..\..\App\NT.hpp" />
+    <ClInclude Include="..\..\App\Hypervisor.h" />
+    <ClInclude Include="..\..\App\Probing\Probe.h" />
     <!-- Mapper -->
     <ClInclude Include="..\..\Mapper\Mapper.hpp" />
     <!-- PE -->

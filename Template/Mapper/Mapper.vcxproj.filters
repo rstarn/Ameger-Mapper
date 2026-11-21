@@ -4,6 +4,9 @@
     <ClCompile Include="..\..\App\Main.cpp">
       <Filter>App</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\App\Probing\Probe.cpp">
+      <Filter>App</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\Mapper\Mapper.cpp">
       <Filter>Mapper</Filter>
     </ClCompile>
@@ -25,6 +28,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\App\NT.hpp">
+      <Filter>App</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\App\Hypervisor.h">
+      <Filter>App</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\App\Probing\Probe.h">
       <Filter>App</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Mapper\Mapper.hpp">

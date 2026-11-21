@@ -76,14 +76,6 @@ namespace Console
 		return disabled;
 	}
 
-	//True when AMEGER_VERBOSE asks for the per-entry diagnostics that would
-	//otherwise flood the log (e.g. every restored page-table entry).
-
-	inline bool Verbose() {
-		static const bool verbose = EnvironmentFlag(L"AMEGER_VERBOSE");
-		return verbose;
-	}
-
 	/* True when stdout is a real console. Cached at first use so every colour
 	 * constant and EnableAnsiColors() agree on the same answer. A redirected
 	 * file or pipe is not a console, even though GetStdHandle succeeds. */

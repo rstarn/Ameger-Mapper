@@ -66,8 +66,8 @@ namespace Mapper
 	 * destroyHeader  skip the PE header in the kernel copy and load the image
 	 *              from the first section, which hides the "PE" signature at
 	 *              the start of the allocation
-	 * PassAllocationAddressAsFirstParam  pass the allocation base as the first
-	 *              DriverEntry argument; param1 is ignored when set
+	 * PassAllocationAddressAsFirstParam  pass the allocation base instead of
+	 *              the fabricated DRIVER_OBJECT as DriverEntry's first argument
 	 * exitCode     optional, receives the DriverEntry NTSTATUS
 	 * residentSize optional, receives the number of bytes resident in the
 	 *              kernel allocation (SizeOfImage minus the stripped header
@@ -79,9 +79,7 @@ namespace Mapper
 	 * allocation made along the way (the user mode buffer and the kernel one)
 	 * is released before returning.
 	 */
-	//Note: if you set PassAllocationAddressAsFirstParam as true, param1 will be ignored
-
-	ULONG64 MapDriver(BYTE* data, size_t data_size, ULONG64 param1 = 0, ULONG64 param2 = 0, bool free = false, bool destroyHeader = true, AllocationMode mode = AllocationMode::AllocateContiguous, bool PassAllocationAddressAsFirstParam = false, NTSTATUS* exitCode = nullptr, SIZE_T* residentSize = nullptr);
+	ULONG64 MapDriver(BYTE* data, size_t data_size, ULONG64 param2 = 0, bool free = false, bool destroyHeader = true, AllocationMode mode = AllocationMode::AllocateContiguous, bool PassAllocationAddressAsFirstParam = false, NTSTATUS* exitCode = nullptr, SIZE_T* residentSize = nullptr);
 
 	/*
 	 * The three image fixups, exposed rather than kept file-local.

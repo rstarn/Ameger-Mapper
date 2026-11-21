@@ -482,9 +482,9 @@ int wmain()
 		if (resolvedFields[i].Resolved())
 			++entryCount;
 
-	//Prove the file landed with the right number of entries.
+	//Count of entries generated into the file above.
 
-	Log(L"[+] Offsets.ini carries " << Val(entryCount) << L" entries." << std::endl);
+	Log(L"[+] Generated " << Val(entryCount) << L" offsets in Offsets.ini" << std::endl);
 
 	return 0;
 }

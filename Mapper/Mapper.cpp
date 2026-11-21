@@ -359,7 +359,7 @@ bool Mapper::ResolveImports(const PE::vec_imports& imports, ImportResolver resol
  * the shifted base is only ever used to compute addresses.
  */
 
-ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 param2, bool free, bool destroyHeader, AllocationMode mode, bool PassAllocationAddressAsFirstParam, NTSTATUS* exitCode, SIZE_T* residentSize) {
+ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param2, bool free, bool destroyHeader, AllocationMode mode, bool PassAllocationAddressAsFirstParam, NTSTATUS* exitCode, SIZE_T* residentSize) {
 
 	if (!data || data_size == 0) {
 		Log(L"[-] No image data to map" << std::endl);
@@ -739,9 +739,10 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 */
 
 		ULONG64 driver_object = 0;
+		ULONG64 entry_param1 = 0;
 		if (PassAllocationAddressAsFirstParam) {
 			Log(L"[INFO] Passing the allocation base as the first DriverEntry argument, as requested" << std::endl);
-			param1 = realBase;
+			entry_param1 = realBase;
 		}
 		else {
 			driver_object = Driver::CreateDriverObjectForEntry(realBase, image_size, realBase);
@@ -756,7 +757,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 			 * driver sees a null first argument and cannot record its range.
 			 */
 
-			param1 = driver_object;
+			entry_param1 = driver_object;
 		}
 
 		/*
@@ -771,10 +772,10 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 
 		LogBlank();
 		Log(L"[!] Calling DriverEntry | Entry " << Val(reinterpret_cast<void*>(address_of_entry_point))
-			<< L" | DriverEntry (" << Val(param1) << L", " << Val(param2) << L")" << std::endl);
+			<< L" | DriverEntry (" << Val(entry_param1) << L", " << Val(param2) << L")" << std::endl);
 
 		NTSTATUS status = 0;
-		if (!Driver::CallKernelFunction(&status, address_of_entry_point, param1, param2)) {
+		if (!Driver::CallKernelFunction(&status, address_of_entry_point, entry_param1, param2)) {
 
 			/*
 			 * The hook never went in, so DriverEntry never executed. Nothing the
