@@ -79,8 +79,8 @@
     <PostBuildEvent>
       <!-- Copies the two symbol libraries into $(OutDir)\DLLs, which is where
      SymbolEngine looks for them. The two files are named explicitly on purpose:
-     a Utilities\* wildcard would also drag Utilities.cpp and Utilities.hpp into
-     the build output, because they ship from the same folder. -->
+      a Utilities\DLLs\* wildcard could pick up unrelated files placed next
+      to these two binaries later. -->
     <Command>if not exist "$(OutDir)DLLs" mkdir "$(OutDir)DLLs"
 copy /y "$(SolutionDir)..\Utilities\DLLs\dbghelp.dll" "$(OutDir)DLLs\" >nul
 copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Command>
@@ -95,15 +95,15 @@ copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Comm
     <!-- Mapper -->
     <ClCompile Include="..\..\Mapper\Mapper.cpp" />
     <!-- PE -->
-    <ClCompile Include="..\..\PE\PE.cpp" />
+    <ClCompile Include="..\..\PE\Parsing\PE.cpp" />
     <!-- Provider -->
-    <ClCompile Include="..\..\Provider\Driver.cpp" />
+    <ClCompile Include="..\..\Provider\Core\Driver.cpp" />
     <!-- Service -->
     <ClCompile Include="..\..\Service\Service.cpp" />
     <!-- Symbols -->
     <ClCompile Include="..\..\Symbols\Handler\SymbolsHandler.cpp" />
     <!-- Utilities -->
-    <ClCompile Include="..\..\Utilities\Utilities.cpp" />
+    <ClCompile Include="..\..\Utilities\Support\Utilities.cpp" />
   </ItemGroup>
   <ItemGroup>
     <!-- App -->
@@ -113,18 +113,18 @@ copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Comm
     <!-- Mapper -->
     <ClInclude Include="..\..\Mapper\Mapper.hpp" />
     <!-- PE -->
-    <ClInclude Include="..\..\PE\PE.hpp" />
+    <ClInclude Include="..\..\PE\Parsing\PE.hpp" />
     <!-- Provider -->
-    <ClInclude Include="..\..\Provider\Driver.hpp" />
-    <ClInclude Include="..\..\Provider\Provider.hpp" />
-    <ClInclude Include="..\..\Provider\Resource.hpp" />
+    <ClInclude Include="..\..\Provider\Core\Driver.hpp" />
+    <ClInclude Include="..\..\Provider\Core\Provider.hpp" />
+    <ClInclude Include="..\..\Provider\Core\Resource.hpp" />
     <!-- Service -->
     <ClInclude Include="..\..\Service\Service.hpp" />
     <!-- Symbols -->
     <ClInclude Include="..\..\Symbols\Handler\SymbolsHandler.hpp" />
     <!-- Utilities -->
-    <ClInclude Include="..\..\Utilities\Console.hpp" />
-    <ClInclude Include="..\..\Utilities\Utilities.hpp" />
+    <ClInclude Include="..\..\Utilities\Support\Console.hpp" />
+    <ClInclude Include="..\..\Utilities\Support\Utilities.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

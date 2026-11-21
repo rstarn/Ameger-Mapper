@@ -29,12 +29,12 @@
 
 #include "Provider.hpp"
 #include "Resource.hpp"
-#include "../Utilities/Utilities.hpp"
-#include "../Utilities/Console.hpp"
-#include "../Service/Service.hpp"
-#include "../App/NT.hpp"
-#include "../PE/PE.hpp"
-#include "../Symbols/Handler/SymbolsHandler.hpp"
+#include "../../Utilities/Support/Utilities.hpp"
+#include "../../Utilities/Support/Console.hpp"
+#include "../../Service/Service.hpp"
+#include "../../App/NT.hpp"
+#include "../../PE/Parsing/PE.hpp"
+#include "../../Symbols/Handler/SymbolsHandler.hpp"
 
 //Kernel page table self-mapping helpers are defined further down the file.
 

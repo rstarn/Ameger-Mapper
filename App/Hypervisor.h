@@ -11,7 +11,7 @@
 #include <stdint.h>
 #include <vector>
 
-#include "../Utilities/Console.hpp"
+#include "../Utilities/Support/Console.hpp"
 
 namespace Hypervisor
 {

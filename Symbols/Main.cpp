@@ -23,7 +23,7 @@
 #include <sstream>
 
 #include "Engine/SymbolEngine.hpp"
-#include "../Utilities/Console.hpp"
+#include "../Utilities/Support/Console.hpp"
 
 namespace
 {

@@ -17,8 +17,8 @@
 #include <sstream>
 #include <iterator>
 
-#include "../../Utilities/Utilities.hpp"
-#include "../../Utilities/Console.hpp"
+#include "../../Utilities/Support/Utilities.hpp"
+#include "../../Utilities/Support/Console.hpp"
 
 namespace
 {

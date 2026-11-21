@@ -3,11 +3,11 @@
 #include <iostream>
 #include <random>
 
-#include "../Utilities/Utilities.hpp"
-#include "../Utilities/Console.hpp"
-#include "../Provider/Driver.hpp"
+#include "../Utilities/Support/Utilities.hpp"
+#include "../Utilities/Support/Console.hpp"
+#include "../Provider/Core/Driver.hpp"
 #include "../App/NT.hpp"
-#include "../PE/PE.hpp"
+#include "../PE/Parsing/PE.hpp"
 
 //Release a kernel image allocated by MapDriver. Both the --free path and the
 //failure cleanup have to use the same routine for the same allocation mode.

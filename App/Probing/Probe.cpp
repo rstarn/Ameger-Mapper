@@ -5,9 +5,9 @@
 #include <cstring>
 
 #include "../../Mapper/Mapper.hpp"
-#include "../../Utilities/Utilities.hpp"
-#include "../../Utilities/Console.hpp"
-#include "../../Provider/Driver.hpp"
+#include "../../Utilities/Support/Utilities.hpp"
+#include "../../Utilities/Support/Console.hpp"
+#include "../../Provider/Core/Driver.hpp"
 #include "../../Symbols/Handler/SymbolsHandler.hpp"
 #include "Probe.h"
 

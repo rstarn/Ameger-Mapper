@@ -39,10 +39,10 @@
 #pragma comment(lib, "wintrust.lib")
 
 #include "../Mapper/Mapper.hpp"
-#include "../PE/PE.hpp"
-#include "../Utilities/Utilities.hpp"
-#include "../Utilities/Console.hpp"
-#include "../Provider/Driver.hpp"
+#include "../PE/Parsing/PE.hpp"
+#include "../Utilities/Support/Utilities.hpp"
+#include "../Utilities/Support/Console.hpp"
+#include "../Provider/Core/Driver.hpp"
 #include "../Symbols/Handler/SymbolsHandler.hpp"
 #include "Probing/Probe.h"
 

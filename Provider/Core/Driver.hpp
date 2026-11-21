@@ -5,9 +5,9 @@
 #include <iostream>
 #include <string>
 
-#include "../Utilities/Console.hpp"
-#include "../App/NT.hpp"
-#include "../Symbols/Handler/SymbolsHandler.hpp"
+#include "../../Utilities/Support/Console.hpp"
+#include "../../App/NT.hpp"
+#include "../../Symbols/Handler/SymbolsHandler.hpp"
 
 /*
 * Structure offsets used while walking kernel objects.

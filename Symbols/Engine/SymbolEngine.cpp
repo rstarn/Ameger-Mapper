@@ -19,7 +19,7 @@
  */
 
 #include "SymbolEngine.hpp"
-#include "../../Utilities/Console.hpp"
+#include "../../Utilities/Support/Console.hpp"
 
 #include <Windows.h>
 #include <algorithm>
