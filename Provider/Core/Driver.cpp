@@ -27,8 +27,8 @@
 #include <vector>
 #include <iostream> //Log() writes through std::wcout at the point of use
 
-#include "Provider.hpp"
-#include "Resource.hpp"
+#include "../Provider.hpp"
+#include "../Resource.hpp"
 #include "../../Utilities/Support/Utilities.hpp"
 #include "../../Utilities/Support/Console.hpp"
 #include "../../Service/Service.hpp"

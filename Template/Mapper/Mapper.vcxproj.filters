@@ -45,10 +45,10 @@
     <ClInclude Include="..\..\Provider\Core\Driver.hpp">
       <Filter>Provider</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\Provider\Core\Provider.hpp">
+    <ClInclude Include="..\..\Provider\Provider.hpp">
       <Filter>Provider</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\Provider\Core\Resource.hpp">
+    <ClInclude Include="..\..\Provider\Resource.hpp">
       <Filter>Provider</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Service\Service.hpp">

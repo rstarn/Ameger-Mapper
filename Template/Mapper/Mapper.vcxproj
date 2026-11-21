@@ -116,8 +116,8 @@ copy /y "$(SolutionDir)..\Utilities\DLLs\symsrv.dll" "$(OutDir)DLLs\" >nul</Comm
     <ClInclude Include="..\..\Parsing\PE.hpp" />
     <!-- Provider -->
     <ClInclude Include="..\..\Provider\Core\Driver.hpp" />
-    <ClInclude Include="..\..\Provider\Core\Provider.hpp" />
-    <ClInclude Include="..\..\Provider\Core\Resource.hpp" />
+    <ClInclude Include="..\..\Provider\Provider.hpp" />
+    <ClInclude Include="..\..\Provider\Resource.hpp" />
     <!-- Service -->
     <ClInclude Include="..\..\Service\Service.hpp" />
     <!-- Symbols -->
