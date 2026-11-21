@@ -15,7 +15,7 @@
 #include <Windows.h>
 #include <string>
 
-#include "../PE/Parsing/PE.hpp"
+#include "../Parsing/PE.hpp"
 
 namespace Mapper
 {

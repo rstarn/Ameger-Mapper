@@ -10,7 +10,7 @@
     <ClCompile Include="..\..\Mapper\Mapper.cpp">
       <Filter>Mapper</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\PE\Parsing\PE.cpp">
+    <ClCompile Include="..\..\Parsing\PE.cpp">
       <Filter>PE</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Provider\Core\Driver.cpp">
@@ -39,7 +39,7 @@
     <ClInclude Include="..\..\Mapper\Mapper.hpp">
       <Filter>Mapper</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\PE\Parsing\PE.hpp">
+    <ClInclude Include="..\..\Parsing\PE.hpp">
       <Filter>PE</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Provider\Core\Driver.hpp">

@@ -33,7 +33,7 @@
 #include "../../Utilities/Support/Console.hpp"
 #include "../../Service/Service.hpp"
 #include "../../App/NT.hpp"
-#include "../../PE/Parsing/PE.hpp"
+#include "../../Parsing/PE.hpp"
 #include "../../Symbols/Handler/SymbolsHandler.hpp"
 
 //Kernel page table self-mapping helpers are defined further down the file.

@@ -39,7 +39,7 @@
 #pragma comment(lib, "wintrust.lib")
 
 #include "../Mapper/Mapper.hpp"
-#include "../PE/Parsing/PE.hpp"
+#include "../Parsing/PE.hpp"
 #include "../Utilities/Support/Utilities.hpp"
 #include "../Utilities/Support/Console.hpp"
 #include "../Provider/Core/Driver.hpp"

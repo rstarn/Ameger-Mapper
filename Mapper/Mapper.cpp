@@ -7,7 +7,7 @@
 #include "../Utilities/Support/Console.hpp"
 #include "../Provider/Core/Driver.hpp"
 #include "../App/NT.hpp"
-#include "../PE/Parsing/PE.hpp"
+#include "../Parsing/PE.hpp"
 
 //Release a kernel image allocated by MapDriver. Both the --free path and the
 //failure cleanup have to use the same routine for the same allocation mode.
