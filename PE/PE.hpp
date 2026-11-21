@@ -123,7 +123,9 @@ namespace PE
 	 * the optional header is itself a value inside the image's own range, and
 	 * counting it would flag every well-formed file.
 	 *
-	 * Called only when GetRelocs returned an empty vector.
+	 * Called when no fixup was actually applied: either GetRelocs returned an
+	 * empty vector, or the relocation blocks contained only ABSOLUTE entries.
+	 * The scan is byte-by-byte so a pointer at an unaligned offset is found too.
 	 */
 
 	bool VerifyNoAbsoluteReferences(void* image_base, size_t image_size);

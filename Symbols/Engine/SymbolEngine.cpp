@@ -357,6 +357,19 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 		Log(L"[-] Could not create a temporary symbol store" << std::endl);
 		return {};
 	}
+
+	/* RAII: an allocation failure in the strings below used to unwind past the
+	 * plain remove_all at the end of this function and leave the temporary
+	 * symstore (pingme.txt and GUID subfolders) on disk. */
+
+	struct TempStoreCleanup {
+		std::wstring path;
+		~TempStoreCleanup() {
+			std::error_code ec;
+			std::filesystem::remove_all(path, ec);
+		}
+	} cleanup{ tempStore };
+
 	const std::wstring tempSearch = L"cache*" + tempStore + L";SRV*http://msdl.microsoft.com/download/symbols";
 
 	auto pdbPath = std::make_unique<wchar_t[]>(4096);
@@ -416,11 +429,8 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 		}
 	}
 
-	//Remove the temporary store whatever happened: nothing of it may survive,
-	//least of all a pingme.txt or a GUID subfolder.
-
-	std::error_code removeError;
-	std::filesystem::remove_all(tempStore, removeError);
+	//The cleanup guard above removes the temporary store on every exit,
+	//including an exception, so no pingme.txt or GUID subfolder survives.
 
 	return result;
 }

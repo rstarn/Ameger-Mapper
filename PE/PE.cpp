@@ -7,6 +7,7 @@
 #include "PE.hpp"
 
 #include <Windows.h>
+#include <cstring>
 #include <string>
 
 PIMAGE_NT_HEADERS64 PE::GetNtHeaders(void* image_base, size_t image_size) {
@@ -196,6 +197,19 @@ bool PE::GetRelocs(void* image_base, size_t image_size, vec_relocs& relocs) {
 		relocs.push_back(reloc_info);
 
 		current_base_relocation = reinterpret_cast<PIMAGE_BASE_RELOCATION>(block_start + current_base_relocation->SizeOfBlock);
+	}
+
+	/* The loop ends either at the declared end of the directory, at a zero
+	 * SizeOfBlock terminator, or with fewer than 8 bytes left. In the latter two
+	 * cases anything still inside the declared directory has to be zero padding:
+	 * a non-zero block after a premature terminator would otherwise be silently
+	 * ignored, leaving real fixups unapplied while the vector looks non-empty. */
+
+	auto remaining = reinterpret_cast<const BYTE*>(current_base_relocation);
+	const auto end = reinterpret_cast<const BYTE*>(reloc_end);
+	for (; remaining < end; ++remaining) {
+		if (*remaining != 0)
+			return false;
 	}
 
 	return true;
@@ -456,8 +470,14 @@ bool PE::VerifyNoAbsoluteReferences(void* image_base, size_t image_size) {
 
 		const auto start = base_address + section[i].VirtualAddress;
 
-		for (ULONG32 offset = 0; offset + sizeof(ULONG64) <= scan_length; offset += sizeof(ULONG64)) {
-			const ULONG64 value = *reinterpret_cast<const ULONG64*>(start + offset);
+		/* Slide byte by byte. An aligned-only walk splits a pointer stored at
+		 * e.g. start+3 across two windows, so neither window matches and a live
+		 * unrelocated self-pointer passes the check. memcpy also keeps the read
+		 * defined for unaligned offsets. */
+
+		for (ULONG32 offset = 0; offset + sizeof(ULONG64) <= scan_length; ++offset) {
+			ULONG64 value = 0;
+			std::memcpy(&value, reinterpret_cast<const void*>(start + offset), sizeof(value));
 
 			/*
 			 * A pointer back into this image is a field that was never relocated.

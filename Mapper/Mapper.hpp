@@ -108,7 +108,10 @@ namespace Mapper
 	//Returns false on an unsupported relocation type or a target outside the
 	//image, in both cases having applied nothing further.
 
-	bool RelocateImageByDelta(const PE::vec_relocs& relocs, ULONG64 delta, ULONG64 image_base, ULONG64 image_size);
+	//applied receives the number of fixups actually written. A relocation block
+	//can be present but contain only ABSOLUTE entries, which write nothing; the
+	//caller uses this to decide whether the no-absolute-pointers check is needed.
+	bool RelocateImageByDelta(const PE::vec_relocs& relocs, ULONG64 delta, ULONG64 image_base, ULONG64 image_size, size_t& applied);
 
 	//Rewrites /GS security cookie so it matches the base the image runs at.
 	//Returns false only when the headers themselves cannot be read; a missing

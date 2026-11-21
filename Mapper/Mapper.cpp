@@ -28,7 +28,8 @@
  * would otherwise patch memory past the end of the mapper's own allocation.
  */
 
-bool Mapper::RelocateImageByDelta(const PE::vec_relocs& relocs, const ULONG64 delta, const ULONG64 image_base, const ULONG64 image_size) {
+bool Mapper::RelocateImageByDelta(const PE::vec_relocs& relocs, const ULONG64 delta, const ULONG64 image_base, const ULONG64 image_size, size_t& applied) {
+	applied = 0;
 	for (const auto& current_reloc : relocs) {
 		for (auto i = 0u; i < current_reloc.count; ++i) {
 			const uint16_t type = current_reloc.item[i] >> 12;
@@ -58,6 +59,7 @@ bool Mapper::RelocateImageByDelta(const PE::vec_relocs& relocs, const ULONG64 de
 			}
 
 			*reinterpret_cast<ULONG64*>(target) += delta;
+			++applied;
 
 		}
 	}
@@ -532,7 +534,10 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 			break;
 		}
 
-		if (!RelocateImageByDelta(relocations, relocation_delta, reinterpret_cast<ULONG64>(local_image_base), nt_headers->OptionalHeader.SizeOfImage)) {
+		size_t applied_fixups = 0;
+		if (!RelocateImageByDelta(relocations, relocation_delta,
+			reinterpret_cast<ULONG64>(local_image_base),
+			nt_headers->OptionalHeader.SizeOfImage, applied_fixups)) {
 			Log(L"[-] Failed to apply relocations" << std::endl);
 			kernel_image_base = realBase;
 			break;
@@ -546,7 +551,12 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 		 * checkable, so it is checked rather than assumed.
 		 */
 
-		if (relocations.empty()) {
+		/* A present .reloc whose blocks are all ABSOLUTE (or empty) writes
+		 * nothing, so it is no protection against unrelocated self-pointers.
+		 * Gate the check on fixups actually applied, not on the vector being
+		 * non-empty. */
+
+		if (applied_fixups == 0) {
 
 			/*
 			 * Say exactly what was checked.
@@ -574,7 +584,7 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param1, ULONG64 
 
 			Log(L"[INFO] Verified: no absolute self-pointers, safe to load at "
 				<< Val(reinterpret_cast<void*>(realBase)) << std::endl);
-			Log(L"[INFO] Image has no relocation directory; it can only load at its preferred base" << std::endl);
+			Log(L"[INFO] Image has no effective relocations; it can only load at its preferred base" << std::endl);
 		}
 
 		if (!FixSecurityCookie(local_image_base, nt_headers->OptionalHeader.SizeOfImage, kernel_image_base))

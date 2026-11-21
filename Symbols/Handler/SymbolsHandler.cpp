@@ -136,6 +136,13 @@ constexpr size_t kPathBufferChars = 32768;
 		if (value.size() <= digits || value[digits] == L'-' || value[digits] == L'+')
 			return false;
 
+		/* strtoull accepts its own 0x prefix. With the outer prefix already
+		 * skipped, "0x0x10" would otherwise be consumed as a valid 0x10. */
+
+		if (digits == 2 && value.size() > 2 && value[2] == L'0' &&
+			(value.size() == 3 || value[3] == L'x' || value[3] == L'X'))
+			return false;
+
 		try {
 			size_t consumed = 0;
 
@@ -429,10 +436,9 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 		const bool isField = currentSection.size() >= 7 &&
 			currentSection.compare(currentSection.size() - 7, 7, L".fields") == 0;
 
-		//A duplicate name would silently shadow the earlier entry. The file is
-		//machine generated, so a repeat means the generator changed or the file
-		//was hand edited, and either way the two values disagree and the later
-		//one is being taken on trust.
+		//A duplicate name keeps the first value: the file is machine generated,
+		//so a repeat means it changed or was hand edited. Report the conflict and
+		//make sure the display uses the value the mapper will actually read.
 
 		const auto [existing, inserted] = symbols.emplace(name, parsed);
 		if (!inserted && existing->second != parsed) {
@@ -440,7 +446,12 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 				<< Val(Hex(existing->second)) << L" vs " << Val(Hex(parsed)) << L"), keeping the first" << std::endl);
 		}
 
-		(isField ? fieldEntries : symbolEntries).push_back({ currentSection, name, parsed });
+		//Report the value that is actually in the map, not the later duplicate
+		//that emplace rejected. Otherwise the console shows an offset the mapper
+		//never uses, exactly when the operator is chasing a suspicious value.
+
+		(isField ? fieldEntries : symbolEntries).push_back(
+			{ currentSection, name, inserted ? parsed : existing->second });
 
 		if (isField)
 			++fieldCount;

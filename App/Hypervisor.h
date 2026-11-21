@@ -50,7 +50,35 @@ namespace Hypervisor
             MemoryCopyFailSource,
             MemoryCopyFailTarget,
             InvalidProcess,
+            AccessDenied = 0xDEADBEEF,
         };
+
+        // Data commands travel through the \\.\AmegerHv IOCTL interface. The
+        // hypervisor rejects every CPL3 VMMCALL except CheckPresence, so the old
+        // vmmcall transport made --hide return AccessDenied on every CPU.
+
+        typedef struct _AMEGER_IOCTL_REQUEST
+        {
+            ULONG64 CommandId;
+            ULONG64 Arg1;
+            ULONG64 Arg2;
+            ULONG64 Arg3;
+        } AMEGER_IOCTL_REQUEST;
+
+        #define IOCTL_AMEGER_HV_COMMAND CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+        #define AMEGER_HV_DEVICE_NAME L"\\\\.\\\\AmegerHv"
+
+        typedef struct _AMEGER_IOCTL_RESPONSE
+        {
+            ULONG64 Status;
+            ULONG64 Value;
+            UCHAR Payload[496];
+        } AMEGER_IOCTL_RESPONSE;
+
+        static_assert(sizeof(AMEGER_IOCTL_RESPONSE) == 512, "AMEGER_IOCTL_RESPONSE ABI mismatch");
+        static_assert(offsetof(AMEGER_IOCTL_RESPONSE, Status) == 0x00, "AMEGER_IOCTL_RESPONSE.Status ABI mismatch");
+        static_assert(offsetof(AMEGER_IOCTL_RESPONSE, Value) == 0x08, "AMEGER_IOCTL_RESPONSE.Value ABI mismatch");
+        static_assert(offsetof(AMEGER_IOCTL_RESPONSE, Payload) == 0x10, "AMEGER_IOCTL_RESPONSE.Payload ABI mismatch");
 
         typedef struct _COPY_MEMORY_DATA
         {
@@ -141,6 +169,35 @@ namespace Hypervisor
         return output;
     }
 
+    /* Send a data command through the driver's IOCTL interface. CheckPresence
+     * stays on the VMMCALL path because the hypervisor explicitly allows that
+     * one from CPL3; every other command is rejected there with AccessDenied. */
+
+    inline ULONG64 CallIoctl(ULONG64 commandId, ULONG64 arg1 = 0, ULONG64 arg2 = 0, ULONG64 arg3 = 0)
+    {
+        static HANDLE deviceHandle = INVALID_HANDLE_VALUE;
+        if (deviceHandle == INVALID_HANDLE_VALUE) {
+            deviceHandle = CreateFileW(AMEGER_HV_DEVICE_NAME, GENERIC_READ | GENERIC_WRITE,
+                0, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (deviceHandle == INVALID_HANDLE_VALUE)
+                return 0xAABB; // no hypervisor device, same sentinel as CallVM
+        }
+
+        Shared::AMEGER_IOCTL_REQUEST request = { commandId, arg1, arg2, arg3 };
+        UCHAR outBuf[512] = { 0 };
+        DWORD bytesReturned = 0;
+
+        const BOOL ok = DeviceIoControl(deviceHandle, IOCTL_AMEGER_HV_COMMAND,
+            &request, sizeof(request), outBuf, sizeof(outBuf), &bytesReturned, nullptr);
+
+        const SIZE_T headerSize = offsetof(Shared::AMEGER_IOCTL_RESPONSE, Value) + sizeof(ULONG64);
+        if (!ok || bytesReturned < headerSize)
+            return 0xAABB;
+
+        const auto* response = reinterpret_cast<const Shared::AMEGER_IOCTL_RESPONSE*>(outBuf);
+        return response->Value;
+    }
+
     inline bool Error(ULONG64 hvOutput)
     {
         if (hvOutput == 0xAABB)
@@ -148,6 +205,9 @@ namespace Hypervisor
 
         if (hvOutput == 0xFFFF)
             return true; // command not implemented
+
+        if (hvOutput == static_cast<ULONG64>(Shared::ErrorCodes::AccessDenied))
+            return true; // the hypervisor refused a CPL3 call
 
         if (hvOutput > Shared::ErrorCodes::Success &&
             hvOutput <= Shared::ErrorCodes::InvalidProcess)
@@ -166,7 +226,7 @@ namespace Hypervisor
 
     inline bool HideMemory(ULONG64 base, SIZE_T size)
     {
-        const ULONG64 output = CallVM(Shared::MAGIC, Shared::CommandId::ProtectRange, base, static_cast<ULONG64>(size));
+        const ULONG64 output = CallIoctl(Shared::CommandId::ProtectRange, base, static_cast<ULONG64>(size));
         return output == Shared::ErrorCodes::Success;
     }
 
@@ -187,7 +247,7 @@ namespace Hypervisor
 
     inline bool Protect(ULONG64 textBase = 0, SIZE_T textSize = 0)
     {
-        const ULONG64 output = CallVM(Shared::MAGIC, Shared::CommandId::ProtectSelf, textBase, static_cast<ULONG64>(textSize));
+        const ULONG64 output = CallIoctl(Shared::CommandId::ProtectSelf, textBase, static_cast<ULONG64>(textSize));
         return output == Shared::ErrorCodes::Success;
     }
 
@@ -258,7 +318,7 @@ namespace Hypervisor
                         continue;
                     }
 
-                    if (CallVM(Shared::MAGIC, Shared::CommandId::FlushNpt) != Shared::ErrorCodes::Success)
+                    if (CallIoctl(Shared::CommandId::FlushNpt) != Shared::ErrorCodes::Success)
                     {
                         printf("  [*] flush G%u:C%u: vmmcall failed\n", group, bit);
                         allFlushed = false;
@@ -283,12 +343,12 @@ namespace Hypervisor
 
     inline ULONG64 GetEPROCESS(UINT32 processId)
     {
-        return CallVM(Shared::MAGIC, Shared::CommandId::GetProcess, processId);
+        return CallIoctl(Shared::CommandId::GetProcess, processId);
     }
 
     inline ULONG64 GetDirbase(UINT32 processId)
     {
-        return CallVM(Shared::MAGIC, Shared::CommandId::GetDirectoryBase, processId);
+        return CallIoctl(Shared::CommandId::GetDirectoryBase, processId);
     }
 
     inline bool AttachToProcess(UINT32 processId)
@@ -342,7 +402,7 @@ namespace Hypervisor
             data.DestinationAddress = target;
             data.NumberOfBytes = chunk;
 
-            const ULONG64 value = CallVM(Shared::MAGIC, Shared::CommandId::CopyProcessMemory, reinterpret_cast<ULONG64>(&data));
+            const ULONG64 value = CallIoctl(Shared::CommandId::CopyProcessMemory, reinterpret_cast<ULONG64>(&data));
             if (value != Shared::ErrorCodes::Success)
                 return false;
 
