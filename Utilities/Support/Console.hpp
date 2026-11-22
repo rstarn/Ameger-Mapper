@@ -13,6 +13,8 @@
  *     [INFO] yellow, [-] red, [!], [<] and [*] cyan
  *   - a value wrapped in Val() prints green, so addresses, offsets, counts,
  *     statuses and names stand out from the prose around them
+ *   - the '(' , ')' and '|' separators in prose print white, so structure in a
+ *     line stays visible without colouring the words around it
  *   - AMEGER_NO_COLOR=1 resolves every sequence to an empty string, so the
  *     output degrades to plain text with the same wording and no escape bytes
  *
@@ -100,6 +102,7 @@ namespace Console
 	}
 
 	inline const wchar_t* const kReset = ColorOrPlain(L"\x1b[0m");
+	inline const wchar_t* const kWhite = ColorOrPlain(L"\x1b[97m");
 	inline const wchar_t* const kGreen = ColorOrPlain(L"\x1b[92m");
 	inline const wchar_t* const kRed = ColorOrPlain(L"\x1b[91m");
 	inline const wchar_t* const kYellow = ColorOrPlain(L"\x1b[93m");
@@ -231,9 +234,45 @@ namespace Console
 		}
 	}
 
+	/* Wrap each '(' , ')' and '|' in `white` ... `reset`, leaving the rest of
+	 * the text untouched. Pure and parameterised so the transformation can be
+	 * checked independently of whether a console happens to be attached. */
+	inline std::wstring ColorizeSeparators(const std::wstring& text, const wchar_t* white, const wchar_t* reset) {
+		std::wstring out;
+		out.reserve(text.size());
+		size_t start = 0;
+		while (start < text.size()) {
+			const size_t pos = text.find_first_of(L"()|", start);
+			if (pos == std::wstring::npos) {
+				out.append(text, start, std::wstring::npos);
+				break;
+			}
+			out.append(text, start, pos - start);
+			out += white;
+			out += text[pos];
+			out += reset;
+			start = pos + 1;
+		}
+		return out;
+	}
+
+	/* Write prose, drawing the bracket and pipe separators in white so they
+	 * stand out from the text around them. When colour is disabled or output is
+	 * redirected kWhite is empty, so the fast path writes the text verbatim and
+	 * no escape bytes reach a log file. */
+	inline void WriteColorized(const std::wstring& text) {
+		if (kWhite[0] == L'\0') {
+			std::wcout << text;
+			return;
+		}
+		std::wcout << ColorizeSeparators(text, kWhite, kReset);
+	}
+
 	//Write text, colouring a leading "[x]" tag when it is one of ours. "[!!]"
 	//(the crash handler) and the six character "[INFO]" are treated as tags as
-	//well. Text that carries no recognised tag is written unchanged.
+	//well. The rest of the line is written by WriteColorized(), which draws the
+	//'(' , ')' and '|' separators in white. Text that carries no recognised tag
+	//is written unchanged apart from those separators.
 
 	inline void WriteTagged(const std::wstring& text) {
 		size_t tag_length = 0;
@@ -253,11 +292,12 @@ namespace Console
 		}
 
 		if (!color) {
-			std::wcout << text;
+			WriteColorized(text);
 			return;
 		}
 
-		std::wcout << color << text.substr(0, tag_length) << kReset << text.substr(tag_length);
+		std::wcout << color << text.substr(0, tag_length) << kReset;
+		WriteColorized(text.substr(tag_length));
 	}
 
 	/*
