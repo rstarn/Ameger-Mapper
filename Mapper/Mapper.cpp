@@ -6,7 +6,7 @@
 #include "../Utilities/Support/Utilities.hpp"
 #include "../Utilities/Support/Console.hpp"
 #include "../Provider/Core/Driver.hpp"
-#include "../App/NT.hpp"
+#include "../Application/NT.hpp"
 #include "../Parsing/PE.hpp"
 
 //Release a kernel image allocated by MapDriver. Both the --free path and the

@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="..\..\App\Main.cpp">
-      <Filter>App</Filter>
+    <ClCompile Include="..\..\Application\Main.cpp">
+      <Filter>Application</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\App\Probing\Probe.cpp">
-      <Filter>App</Filter>
+    <ClCompile Include="..\..\Application\Probing\Probe.cpp">
+      <Filter>Application</Filter>
     </ClCompile>
     <ClCompile Include="..\..\Mapper\Mapper.cpp">
       <Filter>Mapper</Filter>
@@ -27,14 +27,14 @@
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\App\NT.hpp">
-      <Filter>App</Filter>
+    <ClInclude Include="..\..\Application\NT.hpp">
+      <Filter>Application</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\App\Hypervisor.h">
-      <Filter>App</Filter>
+    <ClInclude Include="..\..\Application\Hypervisor.h">
+      <Filter>Application</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\App\Probing\Probe.h">
-      <Filter>App</Filter>
+    <ClInclude Include="..\..\Application\Probing\Probe.h">
+      <Filter>Application</Filter>
     </ClInclude>
     <ClInclude Include="..\..\Mapper\Mapper.hpp">
       <Filter>Mapper</Filter>
@@ -65,7 +65,7 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <Filter Include="App">
+    <Filter Include="Application">
       <UniqueIdentifier>{1a5c8f21-0b47-4d2e-9f31-2c5a70b41d01}</UniqueIdentifier>
     </Filter>
     <Filter Include="Mapper">

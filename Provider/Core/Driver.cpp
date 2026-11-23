@@ -32,7 +32,7 @@
 #include "../../Utilities/Support/Utilities.hpp"
 #include "../../Utilities/Support/Console.hpp"
 #include "../../Service/Service.hpp"
-#include "../../App/NT.hpp"
+#include "../../Application/NT.hpp"
 #include "../../Parsing/PE.hpp"
 #include "../../Symbols/Handler/Symbols.hpp"
 

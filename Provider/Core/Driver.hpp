@@ -6,7 +6,7 @@
 #include <string>
 
 #include "../../Utilities/Support/Console.hpp"
-#include "../../App/NT.hpp"
+#include "../../Application/NT.hpp"
 #include "../../Symbols/Handler/Symbols.hpp"
 
 /*
