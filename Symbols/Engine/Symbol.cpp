@@ -250,6 +250,84 @@ std::wstring MakeTempSymbolStore() {
 	}
 	return {};
 }
+
+/*
+ * Download one PDB straight from the public symbol server as a fallback for
+ * SymFindFileInPathW.
+ *
+ * msdl now answers symbol requests with a 302 to an Azure blob URL. Some
+ * symsrv builds do not follow that redirect and report a plain
+ * ERROR_FILE_NOT_FOUND for a PDB that is in fact published, which used to fail
+ * the whole offsets run. URLDownloadToFileW follows the redirect chain, so the
+ * same file is fetched here instead.
+ *
+ * The URL is built from the binary's own debug identity, and the downloaded
+ * file is checked against that identity before it is accepted. A 404 body, a
+ * truncated transfer or a wrong build therefore never reaches the flat cache.
+ */
+
+bool DownloadPdbDirect(const SYMSRV_INDEX_INFOW& info, const std::wstring& destPath, const DbgHelp& dbg) {
+	std::wstring identity;
+	wchar_t buffer[48];
+
+	if (info.guid == GUID{}) {
+		//Classic signature + age layout.
+		swprintf(buffer, std::size(buffer), L"%08lx%lx", info.sig, info.age);
+	}
+	else {
+		//GUID + age, lowercase with no separators, as the server expects.
+		swprintf(buffer, std::size(buffer),
+			L"%08lx%04x%04x%02x%02x%02x%02x%02x%02x%02x%02x%lx",
+			info.guid.Data1, info.guid.Data2, info.guid.Data3,
+			info.guid.Data4[0], info.guid.Data4[1], info.guid.Data4[2], info.guid.Data4[3],
+			info.guid.Data4[4], info.guid.Data4[5], info.guid.Data4[6], info.guid.Data4[7],
+			info.age);
+	}
+	identity = buffer;
+
+	const std::wstring url = L"https://msdl.microsoft.com/download/symbols/"
+		+ std::wstring(info.pdbfile) + L"/" + identity + L"/" + info.pdbfile;
+
+	//Loaded on demand: this fallback is rare, and adding a hard import just for
+	//it would couple the release to urlmon.dll even when symbols resolve normally.
+
+	HMODULE urlmon = LoadLibraryW(L"urlmon.dll");
+	if (!urlmon) {
+		Log(L"[-] Could not load urlmon.dll for a direct symbol download" << std::endl);
+		return false;
+	}
+
+	using DownloadFn = HRESULT(WINAPI*)(void*, const wchar_t*, const wchar_t*, DWORD, void*);
+	const auto download = reinterpret_cast<DownloadFn>(GetProcAddress(urlmon, "URLDownloadToFileW"));
+	if (!download) {
+		FreeLibrary(urlmon);
+		Log(L"[-] urlmon.dll is missing URLDownloadToFileW" << std::endl);
+		return false;
+	}
+
+	const HRESULT hr = download(nullptr, url.c_str(), destPath.c_str(), 0, nullptr);
+	FreeLibrary(urlmon);
+	if (FAILED(hr)) {
+		Log(L"[-] Direct download of " << Val(info.pdbfile) << L" failed, HRESULT "
+			<< Val(Hex(static_cast<unsigned long>(hr))) << std::endl);
+		return false;
+	}
+
+	//A success code with a missing or wrong file is still a miss. Verify the
+	//downloaded PDB carries the identity the binary asked for before moving it
+	//into the flat cache, exactly as the cache-hit path does.
+
+	SYMSRV_INDEX_INFOW downloadedInfo{};
+	downloadedInfo.sizeofstruct = sizeof(downloadedInfo);
+	if (!dbg.SymSrvGetFileIndexInfoW(destPath.c_str(), &downloadedInfo, 0)
+		|| !SameIdentity(IdentityOf(info), IdentityOf(downloadedInfo))) {
+		Log(L"[-] Downloaded " << Val(info.pdbfile) << L" does not match the running build" << std::endl);
+		DeleteFileW(destPath.c_str());
+		return false;
+	}
+
+	return true;
+}
 }
 
 /*
@@ -261,11 +339,12 @@ std::wstring MakeTempSymbolStore() {
  * when its own index matches the binary's; a stale PDB from an earlier Windows
  * build is treated as a miss, never loaded silently.
  *
- * A miss is fetched through SymFindFileInPathW - the msdl URL layout is left to
- * symsrv - but its downstream store is pointed at a throwaway temporary folder,
- * because symsrv would otherwise rebuild the nested <name>\<GUID>\ layout (and
- * a pingme.txt) under the cache folder. The downloaded PDB is then moved into
- * the flat cache path and the temporary store is removed.
+ * A miss is fetched through SymFindFileInPathW, whose downstream store is
+ * pointed at a throwaway temporary folder because symsrv would otherwise
+ * rebuild the nested <name>\<GUID>\ layout (and a pingme.txt) under the cache
+ * folder. If symsrv cannot follow msdl's redirect to blob storage, the same
+ * PDB is fetched directly over HTTPS instead. Either way the download is then
+ * moved into the flat cache path and the temporary store is removed.
  *
  * An empty result means no symbols are available, which the caller treats as a
  * hard failure rather than continuing with a missing offset.
@@ -385,7 +464,11 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 		NULL
 	);
 
-	const std::wstring downloadedPath = pdbPath.get();
+	//Capture before any logging: argument evaluation order is unspecified, so
+	//reading GetLastError() inside the stream below could observe a later call.
+
+	const DWORD findError = GetLastError();
+	std::wstring downloadedPath = pdbPath.get();
 
 	//The return value was discarded, so a failure was inferred from an empty
 	//output buffer - and the only diagnostic that could fire checked whether
@@ -394,8 +477,9 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 	//and no file, and the caller reported only "no symbols available".
 
 	if (!found) {
-		Log(L"[-] SymFindFileInPathW could not retrieve " << Val(binaryInfo.pdbfile)
-			<< L", error " << Val(static_cast<unsigned long>(GetLastError())) << std::endl);
+		Log(L"[INFO] symsrv could not retrieve " << Val(binaryInfo.pdbfile)
+			<< L", error " << Val(static_cast<unsigned long>(findError))
+			<< L"; trying a direct download" << std::endl);
 	}
 
 	//Windows does not ship symsrv.dll and dbghelp loads it from its own folder.
@@ -404,6 +488,20 @@ std::wstring SymbolEngine::GetPDB(const std::wstring& binaryPath) {
 	//lookup failing, and worth saying so.
 	else if (downloadedPath.empty() && GetModuleHandleA("symsrv.dll") == nullptr) {
 		Log(L"[-] Please provide proper dbghelp.dll and symsrv.dll!" << std::endl);
+	}
+
+	/* msdl answers symbol requests with a 302 to Azure blob storage, and some
+	 * symsrv builds fail to follow it - which is exactly the ERROR_FILE_NOT_FOUND
+	 * above for a PDB that is really published. Fetch the same identity directly
+	 * into the temp store; the move below then treats it like any other hit, and
+	 * the RAII guard still removes the store on every path. */
+	if (downloadedPath.empty()) {
+		const std::wstring directPath = tempStore + L"\\" + binaryInfo.pdbfile;
+		if (DownloadPdbDirect(binaryInfo, directPath, dbg)) {
+			Log(L"[+] Downloaded " << Val(binaryInfo.pdbfile)
+				<< L" directly from the symbol server" << std::endl);
+			downloadedPath = directPath;
+		}
 	}
 
 	std::wstring result;
