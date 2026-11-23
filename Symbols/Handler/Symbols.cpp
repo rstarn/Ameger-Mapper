@@ -276,11 +276,12 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 
 			std::wstring oldPath(kPathBufferChars, L'\0');
 			const DWORD pathLength = GetEnvironmentVariableW(L"PATH", oldPath.data(), static_cast<DWORD>(oldPath.size()));
-			if (pathLength == 0 || pathLength >= oldPath.size()) {
-
-				//0 means PATH was unset, which is the intended case; at or above
-				//the buffer size means truncation, which is not.
-
+			if (pathLength == 0) {
+				//PATH was unset: leave it alone, there is no value to extend.
+			}
+			else if (pathLength >= oldPath.size()) {
+				//At or above the buffer size means truncation, which is not
+				//a value that can be extended.
 				Log(L"[-] PATH is too long to extend; leaving PATH alone" << std::endl);
 			}
 			else {
@@ -327,7 +328,6 @@ bool SymbolsHandler::ReloadFile(const std::wstring& requestedPath, const std::ws
 
 	//INI shaped: [section] headers are read for the log only, the entries
 	//themselves are a flat name = offset list.
-	//load file with ini format
 	//
 	//std::wifstream on this toolchain decodes the file in the ANSI code page,
 	//treating each UTF-16LE byte as a separate wchar_t, so a UTF-16LE

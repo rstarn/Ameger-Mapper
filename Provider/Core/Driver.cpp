@@ -153,8 +153,8 @@ static bool ProbeKernelAddressMapped(uint64_t address) {
 static bool ProbeKernelRangeMapped(uint64_t address, uint64_t size) {
 
 	//Bounded so a file controlled length cannot become an "ends of a 4 GB range"
-	//argument that is meaningless as a proof. The largest caller below is a
-	//32768 entry array.
+	//argument that is meaningless as a proof. The largest caller below probes
+	//4096 eight-byte entries, i.e. 32768 bytes.
 
 	if (size == 0 || size > 0x10000)
 		return false;

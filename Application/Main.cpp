@@ -1731,6 +1731,32 @@ int wmain(const int argc, wchar_t** argv) {
 	 * this flag and turned a developer diagnostic into a 0x3B bugcheck.
 	 */
 
+	/* Resolved before the probe dispatch: --probe-context uses the same offsets
+	 * file settings as the normal path, so a named file or --dontUpdateOffsets
+	 * must not be silently ignored there. */
+
+	int FilePathParamIdx = paramExists(argc, argv, L"offsetsPath");
+	//A custom offsets file implies --dontUpdateOffsets: there is nothing to
+	//regenerate into that path, and running the updater would overwrite the
+	//default file instead of the one the caller named.
+	bool UpdateOffset = !(paramExists(argc, argv, L"dontUpdateOffsets") > 0 || FilePathParamIdx > 0);
+	std::wstring offsetFilePath = Utilities::GetCurrentAppFolder() + L"\\Offsets.ini";
+
+	if (FilePathParamIdx > 0) {
+
+		//The value is the next argument. When the flag is the last one there is
+		//none, and argv[argc] is NULL, which would be read as a wide string.
+
+		if (FilePathParamIdx + 1 >= argc) {
+			Log(L"[-] --offsetsPath requires a file path argument" << std::endl);
+			help();
+			PauseBeforeExit();
+			return -1;
+		}
+		offsetFilePath = argv[FilePathParamIdx + 1];
+		Log(L"[+] Setting Offsets File Path To: " << Val(offsetFilePath) << std::endl);
+	}
+
 	int probeContextIdx = paramExists(argc, argv, L"probe-context");
 	if (probeContextIdx > 0) {
 		if (paramExists(argc, argv, L"developer") <= 0) {
@@ -1738,7 +1764,9 @@ int wmain(const int argc, wchar_t** argv) {
 			PauseBeforeExit();
 			return -1;
 		}
-		return RunProbeContext(argc, argv, probeContextIdx);
+		const int probeResult = RunProbeContext(argc, argv, probeContextIdx, offsetFilePath, UpdateOffset);
+		PauseBeforeExit();
+		return probeResult;
 	}
 
 	/*
@@ -1768,7 +1796,9 @@ int wmain(const int argc, wchar_t** argv) {
 			PauseBeforeExit();
 			return -1;
 		}
-		Log(L"[+] Allocate Independent Pages mode enabled" << std::endl);
+		//The hide path later forces contiguous allocation (NPT hide needs it),
+		//so report this as a request: the actual mode is logged when mapping starts.
+		Log(L"[+] Allocate Independent Pages mode requested" << std::endl);
 	}
 
 	if (passAllocationPtr) {
@@ -1777,28 +1807,6 @@ int wmain(const int argc, wchar_t** argv) {
 
 	if (copyHeader) {
 		Log(L"[+] Copying driver header enabled" << std::endl);
-	}
-
-	int FilePathParamIdx = paramExists(argc, argv, L"offsetsPath");
-	//A custom offsets file implies --dontUpdateOffsets: there is nothing to
-	//regenerate into that path, and running the updater would overwrite the
-	//default file instead of the one the caller named.
-	bool UpdateOffset = !(paramExists(argc, argv, L"dontUpdateOffsets") > 0 || FilePathParamIdx > 0);
-	std::wstring offsetFilePath = Utilities::GetCurrentAppFolder() + L"\\Offsets.ini";
-
-	if (FilePathParamIdx > 0) {
-
-		//The value is the next argument. When the flag is the last one there is
-		//none, and argv[argc] is NULL, which would be read as a wide string.
-
-		if (FilePathParamIdx + 1 >= argc) {
-			Log(L"[-] --offsetsPath requires a file path argument" << std::endl);
-			help();
-			PauseBeforeExit();
-			return -1;
-		}
-		offsetFilePath = argv[FilePathParamIdx + 1];
-		Log(L"[+] Setting Offsets File Path To: " << Val(offsetFilePath) << std::endl);
 	}
 
 	//Warn on any argument that looks like a flag but was not recognized. A typo

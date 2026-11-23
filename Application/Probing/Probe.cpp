@@ -81,7 +81,8 @@ static void DumpContext(const AMEGER_KERNEL_CONTEXT* ctx) {
 	LogRaw(hex.str());
 }
 
-int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
+int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx,
+	const std::wstring& offsetFilePath, bool updateOffset) {
 	if (probeContextIdx + 1 >= argc) {
 		Log(L"[-] --probe-context requires a file path argument" << std::endl);
 		return -1;
@@ -134,10 +135,12 @@ int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx) {
 	//1. Initialize symbols FIRST: load (or regenerate) Offsets.ini exactly as the
 	//normal path does, so the tracing lines and MmPteBase resolve before any
 	//kernel call. Without this, GetOffset(L"MmPteBase") returns 0 and the probe
-	//fails at Driver::Load.
+	//fails at Driver::Load. The file path and update flag come from wmain so
+	//--offsetsPath / --dontUpdateOffsets are honoured here too.
 
-	const std::wstring offsetFilePath = Utilities::GetCurrentAppFolder() + L"\\Offsets.ini";
-	const std::wstring updater = Utilities::GetCurrentAppFolder() + L"\\" + SYMBOL_TOOL_EXE;
+	const std::wstring updater = updateOffset
+		? Utilities::GetCurrentAppFolder() + L"\\" + SYMBOL_TOOL_EXE
+		: L"";
 	if (!SymbolsHandler::GetInstance()->ReloadFile(offsetFilePath, updater)) {
 		Log(L"[-] Failed to load Offsets.ini; the probe cannot run." << std::endl);
 		VirtualFree(ring_buffer, 0, MEM_RELEASE);

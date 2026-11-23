@@ -49,8 +49,8 @@ namespace Mapper
 
 		AllocateContiguous,
 
-		//One independent-page allocation per section, so each section can be
-		//given its own protection through MmSetPageProtection after the copy.
+		//One independent-page allocation for the whole image; sections are then
+		//given their own protection through MmSetPageProtection after the copy.
 		//Closer to how the loader maps a driver, but requires that export.
 
 		AllocateIndependentPages

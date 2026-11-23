@@ -60,7 +60,8 @@ typedef struct _AMEGER_KERNEL_CONTEXT {
 //PROBE_RESULT=PASS or PROBE_RESULT=FAIL with every context field and an
 //96-byte hex dump of the context.
 
-int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx);
+int RunProbeContext(const int argc, wchar_t** argv, int probeContextIdx,
+	const std::wstring& offsetFilePath, bool updateOffset);
 
 //True when the process runs under the administrator token. The manifest asks
 //for requireAdministrator, but the tool can also be started from a shell that
