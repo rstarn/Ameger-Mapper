@@ -236,13 +236,26 @@ uint64_t Utilities::GetKernelModuleAddress(const std::string& module_name) {
 }
 
 std::wstring Utilities::GetCurrentAppFolder() {
-	wchar_t buffer[1024] = { 0 };
-	const DWORD length = GetModuleFileNameW(NULL, buffer, static_cast<DWORD>(std::size(buffer)));
-	if (!length || length >= std::size(buffer))
-		return L"";
+	/* Grow until the whole path fits. The old fixed 1024-wide buffer returned
+	 * an empty folder for a valid long install path, which made Offsets.ini
+	 * resolve to "\\Offsets.ini" at the drive root and aborted mapping after
+	 * SymbolTool had already written the real file. Kept in step with the
+	 * copies in Symbols\Main.cpp and Symbols\Engine\Symbol.cpp. */
 
-	std::wstring::size_type pos = std::wstring(buffer).find_last_of(L"\\/");
-	if (pos == std::wstring::npos)
-		return L"";
-	return std::wstring(buffer).substr(0, pos);
+	std::wstring path;
+	for (DWORD capacity = MAX_PATH;;) {
+		path.assign(capacity, L'\0');
+		const DWORD length = GetModuleFileNameW(NULL, path.data(), capacity);
+		if (length == 0u)
+			return L"";
+		if (length < capacity) {
+			path.resize(length);
+			break;
+		}
+		if (capacity > (1u << 15))
+			return L"";
+		capacity *= 2;
+	}
+	const auto pos = path.find_last_of(L"\\/");
+	return pos == std::wstring::npos ? std::wstring() : path.substr(0, pos);
 }

@@ -826,20 +826,27 @@ ULONG64 Mapper::MapDriver(BYTE* data, size_t data_size, ULONG64 param2, bool fre
 		 * the unconditional post-loop free, which bypassed the gate and made the
 		 * "image left resident" verdict path unreachable.
 		 *
-		 * The fabricated driver object is ours and can be released: DriverEntry
-		 * failed, so the driver is not loaded. The real failure status is already
-		 * in *exitCode; return the base so the caller reports it as "mapped, but
-		 * DriverEntry failed" rather than "failed to map".
+		 * The fabricated driver object is kept resident for the same reason. A
+		 * driver can create a device object (and register its \Device and \??
+		 * names) and still fail later - a symbolic-link collision is exactly
+		 * that case. Each DEVICE_OBJECT links back through DriverObject, so
+		 * freeing the object here left every registered device pointing at
+		 * freed pool. The client's unload then could not delete that device, its
+		 * name stayed in the Object Manager, and the NEXT run's IoCreateDevice
+		 * returned STATUS_OBJECT_NAME_COLLISION. Keeping the object alive leaves
+		 * the device chain valid so the driver's own unload can remove it.
+		 *
+		 * The real failure status is already in *exitCode; return the base so
+		 * the caller reports it as "mapped, but DriverEntry failed" rather than
+		 * "failed to map".
 		 */
 
 		const bool driver_entry_failed = !NT_SUCCESS(status);
 		if (driver_entry_failed) {
 			Log(L"[-] DriverEntry returned " << Val(Hex(status))
-				<< L"; the image is left resident because kernel code has already run" << std::endl);
-			if (driver_object) {
-				Driver::DestroyDriverObjectForEntry(driver_object);
-				driver_object = 0;
-			}
+				<< L"; the image and its driver object are left resident because kernel code has already run" << std::endl);
+			Log(L"[!] If the driver created a device before failing, its name stays registered; "
+				"unload it from the client before mapping this image again" << std::endl);
 		}
 
 		if (!hook_restored)

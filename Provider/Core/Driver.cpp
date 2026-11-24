@@ -2836,6 +2836,27 @@ bool Driver::DestroyDriverObjectForEntry(uint64_t driver_object) {
 	if (!driver_object)
 		return false;
 
+	/* Refuse to free an object that still owns a device. DriverEntry can create
+	 * a device and then fail for an unrelated reason (a symbolic-link name
+	 * collision is exactly that). Each DEVICE_OBJECT points back at its driver,
+	 * so freeing the object here leaves a registered device with a dangling
+	 * driver pointer and its name stuck in the Object Manager - the next run
+	 * then fails IoCreateDevice with STATUS_OBJECT_NAME_COLLISION. Only callers
+	 * that know DriverEntry never ran may reach the frees below. */
+
+	uint64_t first_device = 0;
+	if (!ReadBoundedPointer(driver_object, DriverObjectNeededSize(),
+		Driver::g_offsets.DriverObject_DeviceObject, first_device)) {
+		Log(L"[-] DestroyDriverObjectForEntry: could not read the device list head; keeping the object" << std::endl);
+		return false;
+	}
+	if (first_device) {
+		Log(L"[!] DestroyDriverObjectForEntry: the driver object still has a device "
+			<< Val(reinterpret_cast<void*>(first_device))
+			<< L"; keeping it so the client's unload can remove the device" << std::endl);
+		return false;
+	}
+
 	//The extension address is recovered from the object rather than cached, so
 	//the two can never drift apart. Bounded by the size the block was actually
 	//allocated at - the same expression the constructor used - rather than by the

@@ -81,6 +81,11 @@ struct DriverOffsets {
 	 */
 
 	uint32_t DriverObject_Size = 0x02;
+	//Head of the DEVICE_OBJECT list IoCreateDevice links into. Read back by
+	//DestroyDriverObjectForEntry so an object that still owns a live device is
+	//never freed out from under it. x64 default; a wrong value can only make
+	//the check conservative (keep the object), never destructive.
+	uint32_t DriverObject_DeviceObject = 0x08;
 	uint32_t DriverObject_DriverStart = 0x18;
 	uint32_t DriverObject_DriverSize = 0x20;
 	uint32_t DriverObject_DriverExtension = 0x30;
